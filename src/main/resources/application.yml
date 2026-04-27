@@ -1,0 +1,78 @@
+app:
+  database:
+    host: 127.0.0.1
+    port: 5432
+    name: checklist
+    username: postgres
+    password: 12345678
+server:
+  port: 8080
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/xml,text/plain,multipart/form-data
+    min-response-size: 1024
+spring:
+  application:
+    name: checklist
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  profiles:
+    active: dev
+  main:
+    web-application-type: reactive
+  r2dbc:
+    url: r2dbc:postgresql://${app.database.host}:${app.database.port}/${app.database.name}
+    username: ${app.database.username}
+    password: ${app.database.password}
+  jackson:
+    time-zone: Asia/Bangkok
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 20MB
+      max-request-size: 20MB
+  webflux:
+    multipart:
+      max-in-memory-size: 10MB
+      max-parts: 20
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: web-support@acme-inter.com
+    password: owjuocsnpifxlvhf
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+    default-encoding: UTF-8
+management:
+  health:
+    redis:
+      enabled: false
+lark:
+  app-id: cli_a77e105831f99010
+  app-secret: 1tL35lbTGzarQ5PZhlQKZVvOIKvZiOpY
+jwt:
+  secret: PP/e22h/W97Ahtx26r/fGTAnQQgvwvN7OPyP5Kp7NT0bnYvwSUJZ/DSwG183hkLH
+  access-token-expiry: 3600000
+  refresh-token-expiry: 86400000
+#logging:
+#  level:
+#    org.springframework.r2dbc.core: DEBUG
