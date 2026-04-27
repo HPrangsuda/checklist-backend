@@ -5,7 +5,6 @@ import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
-import com.acme.checklist.payload.audit.AuditMemberDTO;
 import com.acme.checklist.payload.calibration.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +53,7 @@ public class CalibrationService {
                 .flatMap(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
+                    Long   memberId   = principal.memberId();
 
                     return switch (role) {
                         case "ADMIN" -> {
@@ -62,15 +62,15 @@ public class CalibrationService {
                             yield commonService.executePagedQuery(index, size, query, criteria,
                                     CalibrationRecord.class, this::convertCalibrationListDTOs);
                         }
-                        case "MANAGER"    -> fetchByMachineRole(employeeId, "manager_id",            keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(employeeId, "supervisor_id",         keyword, index, size);
-                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", keyword, index, size);
+                        case "MANAGER"    -> fetchByMachineRole(employeeId, "manager_id",            memberId, keyword, index, size);
+                        case "SUPERVISOR" -> fetchByMachineRole(employeeId, "supervisor_id",         memberId, keyword, index, size);
+                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", null,     keyword, index, size);
                     };
                 });
     }
 
     private Mono<PagedResponse<CalibrationListDTO>> fetchByMachineRole(
-            String employeeId, String roleColumn, String keyword, int index, int size) {
+            String employeeId, String roleColumn, Long memberId, String keyword, int index, int size) {
 
         return template.select(
                         Query.query(Criteria.where(roleColumn).is(employeeId)),
@@ -78,13 +78,26 @@ public class CalibrationService {
                 .map(Machine::getMachineCode)
                 .collectList()
                 .flatMap(machineCodes -> {
-                    if (machineCodes.isEmpty()) {
+                    if (machineCodes.isEmpty() && memberId == null) {
                         return Mono.just(PagedResponse.<CalibrationListDTO>builder()
                                 .success(true).message("Success").data(List.of())
                                 .totalElements(0L).totalPages(0).index(index).size(size).build());
                     }
 
-                    Criteria criteria = Criteria.where("machine_code").in(machineCodes);
+                    Criteria criteria;
+
+                    if (machineCodes.isEmpty()) {
+                        // ไม่มี machine แต่อาจมี record ที่ manager/supervisor ตรง
+                        criteria = Criteria.where("manager").is(String.valueOf(memberId));
+                    } else if (memberId != null) {
+                        // MANAGER/SUPERVISOR — เห็น machine ที่รับผิดชอบ + record ที่ตัวเองเป็น manager/supervisor
+                        criteria = Criteria.where("machine_code").in(machineCodes)
+                                .or("manager").is(String.valueOf(memberId));
+                    } else {
+                        // MEMBER — เห็นเฉพาะ machine ที่รับผิดชอบ
+                        criteria = Criteria.where("machine_code").in(machineCodes);
+                    }
+
                     if (StringUtils.hasText(keyword)) {
                         criteria = criteria.and(
                                 Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
