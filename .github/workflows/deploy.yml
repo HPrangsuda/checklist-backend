@@ -27,8 +27,9 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "target/checklist-0.0.1-SNAPSHOT.jar"
-          target: "/opt/acme/machine/app.jar"
+          target: "/opt/acme/machine/"
           strip_components: 1
+          overwrite: true
 
       - name: Restart service
         uses: appleboy/ssh-action@v1.0.3
@@ -37,6 +38,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            mv -f /opt/acme/machine/checklist-0.0.1-SNAPSHOT.jar /opt/acme/machine/app.jar
             systemctl restart acme-machine
             sleep 5
             systemctl status acme-machine
