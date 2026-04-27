@@ -39,6 +39,6 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             mv -f /opt/acme/machine/checklist-0.0.1-SNAPSHOT.jar /opt/acme/machine/app.jar
-            systemctl restart acme-machine
+            systemctl restart machine-checklist
             sleep 5
-            systemctl status acme-machine
+            systemctl status machine-checklist
