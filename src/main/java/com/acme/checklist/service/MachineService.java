@@ -269,6 +269,9 @@ public class MachineService {
                 .flatMap(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
+                    Long   memberId   = principal.memberId();
+                    String memberIdStr = String.valueOf(memberId);
+
                     return switch (role) {
                         case "ADMIN" -> {
                             Criteria criteria = buildKeywordCriteria(keyword);
@@ -276,10 +279,12 @@ public class MachineService {
                             yield commonService.executePagedQuery(index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
                         }
                         case "MANAGER" -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(employeeId).or("manager_id").is(employeeId),
+                                Criteria.where("responsible_person_id").is(employeeId)
+                                        .or("manager_id").is(memberIdStr),      // ← memberIdStr
                                 keyword, index, size);
                         case "SUPERVISOR" -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(employeeId).or("supervisor_id").is(employeeId),
+                                Criteria.where("responsible_person_id").is(employeeId)
+                                        .or("supervisor_id").is(memberIdStr),   // ← memberIdStr
                                 keyword, index, size);
                         default -> fetchWithRoleAndKeyword(
                                 Criteria.where("responsible_person_id").is(employeeId),
@@ -306,32 +311,35 @@ public class MachineService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMapMany(principal -> {
-                    String role       = principal.role();
-                    String employeeId = principal.employeeId();
+                    String role        = principal.role();
+                    String employeeId  = principal.employeeId();
+                    Long   memberId    = principal.memberId();
+                    String memberIdStr = String.valueOf(memberId);
+
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.manager_id = '" + employeeId + "')";
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.supervisor_id = '" + employeeId + "')";
+                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.manager_id = '" + memberIdStr + "')";       // ← memberIdStr
+                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.supervisor_id = '" + memberIdStr + "')";    // ← memberIdStr
                         default           -> "AND m.responsible_person_id = '" + employeeId + "'";
                     };
 
                     String sql = """
-                        SELECT
-                            d.department_code,
-                            d.department as department_name,
-                            COUNT(m.id) as total,
-                            COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
-                            COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
-                            COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
-                            COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
-                            COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
-                            COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
-                        FROM machine m
-                        JOIN department d ON m.department = d.department_code
-                        WHERE 1=1 %s
-                        GROUP BY d.department_code, d.department
-                        ORDER BY d.department
-                        """.formatted(roleFilter);
+                    SELECT
+                        d.department_code,
+                        d.department as department_name,
+                        COUNT(m.id) as total,
+                        COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
+                        COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
+                        COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
+                        COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
+                        COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
+                        COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
+                    FROM machine m
+                    JOIN department d ON m.department = d.department_code
+                    WHERE 1=1 %s
+                    GROUP BY d.department_code, d.department
+                    ORDER BY d.department
+                    """.formatted(roleFilter);
 
                     return template.getDatabaseClient()
                             .sql(sql)
