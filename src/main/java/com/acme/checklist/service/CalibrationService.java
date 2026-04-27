@@ -36,7 +36,7 @@ public class CalibrationService {
     // ─── UPDATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> update(CalibrationDTO dto) {
-        return validateData(dto, true)
+        return validateData(dto)
                 .flatMap(v -> commonService.update(dto.getId(), buildUpdateFromDTO(v), CalibrationRecord.class)
                         .then(Mono.just(ApiResponse.success("MS003"))))
                 .onErrorResume(e -> {
@@ -209,7 +209,7 @@ public class CalibrationService {
 
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
 
-    public Mono<CalibrationDTO> validateData(CalibrationDTO dto, boolean isUpdate) {
+    public Mono<CalibrationDTO> validateData(CalibrationDTO dto) {
         if (dto.getDueDate() == null) {
             return Mono.error(new ThrowException("MS008", "Calibration due date is required"));
         }
