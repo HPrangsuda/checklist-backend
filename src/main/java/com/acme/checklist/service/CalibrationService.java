@@ -62,42 +62,29 @@ public class CalibrationService {
                             yield commonService.executePagedQuery(index, size, query, criteria,
                                     CalibrationRecord.class, this::convertCalibrationListDTOs);
                         }
-                        case "MANAGER"    -> fetchByMachineRole(employeeId, "manager_id",            memberId, keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(employeeId, "supervisor_id",         memberId, keyword, index, size);
-                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", null,     keyword, index, size);
+                        case "MANAGER"    -> fetchByMachineRole(memberId,   "manager_id",            keyword, index, size);
+                        case "SUPERVISOR" -> fetchByMachineRole(memberId,   "supervisor_id",         keyword, index, size);
+                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", keyword, index, size);
                     };
                 });
     }
 
     private Mono<PagedResponse<CalibrationListDTO>> fetchByMachineRole(
-            String employeeId, String roleColumn, Long memberId, String keyword, int index, int size) {
+            Object roleValue, String roleColumn, String keyword, int index, int size) {
 
         return template.select(
-                        Query.query(Criteria.where(roleColumn).is(employeeId)),
+                        Query.query(Criteria.where(roleColumn).is(roleValue)),
                         Machine.class)
                 .map(Machine::getMachineCode)
                 .collectList()
                 .flatMap(machineCodes -> {
-                    if (machineCodes.isEmpty() && memberId == null) {
+                    if (machineCodes.isEmpty()) {
                         return Mono.just(PagedResponse.<CalibrationListDTO>builder()
                                 .success(true).message("Success").data(List.of())
                                 .totalElements(0L).totalPages(0).index(index).size(size).build());
                     }
 
-                    Criteria criteria;
-
-                    if (machineCodes.isEmpty()) {
-                        // ไม่มี machine แต่อาจมี record ที่ manager/supervisor ตรง
-                        criteria = Criteria.where("manager").is(String.valueOf(memberId));
-                    } else if (memberId != null) {
-                        // MANAGER/SUPERVISOR — เห็น machine ที่รับผิดชอบ + record ที่ตัวเองเป็น manager/supervisor
-                        criteria = Criteria.where("machine_code").in(machineCodes)
-                                .or("manager").is(String.valueOf(memberId));
-                    } else {
-                        // MEMBER — เห็นเฉพาะ machine ที่รับผิดชอบ
-                        criteria = Criteria.where("machine_code").in(machineCodes);
-                    }
-
+                    Criteria criteria = Criteria.where("machine_code").in(machineCodes);
                     if (StringUtils.hasText(keyword)) {
                         criteria = criteria.and(
                                 Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
@@ -117,11 +104,12 @@ public class CalibrationService {
                 .flatMapMany(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
+                    Long   memberId   = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.manager_id = '" + employeeId + "')";
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.supervisor_id = '" + employeeId + "')";
+                        case "MANAGER"    -> "AND m.manager_id = " + memberId;
+                        case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
                         default           -> "AND m.responsible_person_id = '" + employeeId + "'";
                     };
 
@@ -139,8 +127,8 @@ public class CalibrationService {
                             COUNT(*) as total,
                             COUNT(CASE WHEN c.results = 'Pass' THEN 1 END) as total_pass,
                             COUNT(CASE WHEN c.results = 'Not Pass' THEN 1 END) as total_not_pass,
-                            COUNT(CASE WHEN c.calibration_status = 'On Time' THEN 1 END) as total_on_time,
-                            COUNT(CASE WHEN c.calibration_status = 'Overdue' THEN 1 END) as total_overdue,
+                            COUNT(CASE WHEN c.calibration_status = 'ON TIME' THEN 1 END) as total_on_time,
+                            COUNT(CASE WHEN c.calibration_status = 'OVERDUE' THEN 1 END) as total_overdue,
                             COUNT(CASE WHEN c.certificate_date IS NOT NULL THEN 1 END) as total_completed,
                             COUNT(CASE WHEN c.certificate_date IS NULL THEN 1 END) as total_pending
                         FROM calibration_record c

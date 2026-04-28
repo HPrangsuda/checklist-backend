@@ -157,7 +157,6 @@ public class MachineService {
                 .flatMap(machine -> {
                     String oldPersonId = machine.getResponsiblePersonId();
 
-                    // ปิด history เก่า
                     Mono<Void> closeOld = template.update(
                                     Query.query(Criteria.where("machine_code").is(machineCode)
                                             .and("effective_to").isNull()),
@@ -165,7 +164,6 @@ public class MachineService {
                                     ResponsibleHistory.class)
                             .then();
 
-                    // เปิด history ใหม่
                     ResponsibleHistory newHistory = ResponsibleHistory.builder()
                             .machineCode(machineCode)
                             .responsiblePersonId(newPersonId)
@@ -173,7 +171,6 @@ public class MachineService {
                             .build();
                     Mono<Void> insertNew = template.insert(newHistory).then();
 
-                    // อัปเดต machine
                     machine.setResponsiblePersonId(newPersonId);
                     Mono<Void> updateMachine = template.update(machine).then();
 
@@ -268,9 +265,7 @@ public class MachineService {
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
                     String role       = principal.role();
-                    String employeeId = principal.employeeId();
                     Long   memberId   = principal.memberId();
-                    String memberIdStr = String.valueOf(memberId);
 
                     return switch (role) {
                         case "ADMIN" -> {
@@ -279,15 +274,15 @@ public class MachineService {
                             yield commonService.executePagedQuery(index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
                         }
                         case "MANAGER" -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(employeeId)
-                                        .or("manager_id").is(memberIdStr),      // ← memberIdStr
+                                Criteria.where("responsible_person_id").is(memberId)
+                                        .or("manager_id").is(memberId),
                                 keyword, index, size);
                         case "SUPERVISOR" -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(employeeId)
-                                        .or("supervisor_id").is(memberIdStr),   // ← memberIdStr
+                                Criteria.where("responsible_person_id").is(memberId)
+                                        .or("supervisor_id").is(memberId),
                                 keyword, index, size);
                         default -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(employeeId),
+                                Criteria.where("responsible_person_id").is(memberId),
                                 keyword, index, size);
                     };
                 });
@@ -311,16 +306,14 @@ public class MachineService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMapMany(principal -> {
-                    String role        = principal.role();
-                    String employeeId  = principal.employeeId();
-                    Long   memberId    = principal.memberId();
-                    String memberIdStr = String.valueOf(memberId);
+                    String role       = principal.role();
+                    Long   memberId   = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.manager_id = '" + memberIdStr + "')";       // ← memberIdStr
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + employeeId + "' OR m.supervisor_id = '" + memberIdStr + "')";    // ← memberIdStr
-                        default           -> "AND m.responsible_person_id = '" + employeeId + "'";
+                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + memberId + "' OR m.manager_id = " + memberId + ")";
+                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + memberId + "' OR m.supervisor_id = " + memberId + ")";
+                        default           -> "AND m.responsible_person_id = '" + memberId + "'";
                     };
 
                     String sql = """
@@ -419,8 +412,8 @@ public class MachineService {
                             ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(auditIds);
 
                     Mono<String> qrMono      = generateQRCodeReactive(machine.getQrCode(), machineCode);
-                    Mono<String> supNameMono = resolveMemberName(machine.getSupervisorId());
-                    Mono<String> mgrNameMono = resolveMemberName(machine.getManagerId());
+                    Mono<String> supNameMono = resolveMemberName(Long.valueOf(machine.getSupervisorId()));
+                    Mono<String> mgrNameMono = resolveMemberName(Long.valueOf(machine.getManagerId()));
 
                     Mono<String> groupNameMono = Mono.justOrEmpty(machineGroup)
                             .flatMap(gid -> template.getDatabaseClient()
@@ -622,18 +615,11 @@ public class MachineService {
         return d;
     }
 
-    private Mono<String> resolveMemberName(String memberId) {
-        if (memberId == null || memberId.isBlank()) return Mono.just("");
-        try {
-            Long lid = Long.parseLong(memberId);
-            return template.selectOne(Query.query(Criteria.where("id").is(lid)), Member.class)
-                    .map(m -> m.getFirstName() + " " + m.getLastName())
-                    .defaultIfEmpty(memberId);
-        } catch (NumberFormatException e) {
-            return template.selectOne(Query.query(Criteria.where("employee_id").is(memberId)), Member.class)
-                    .map(m -> m.getFirstName() + " " + m.getLastName())
-                    .defaultIfEmpty(memberId);
-        }
+    private Mono<String> resolveMemberName(Long memberId) {
+        if (memberId == null) return Mono.just("");
+        return template.selectOne(Query.query(Criteria.where("id").is(memberId)), Member.class)
+                .map(m -> m.getFirstName() + " " + m.getLastName())
+                .defaultIfEmpty("");
     }
 
     private Mono<MachineDTO> resolveDepartmentFields(MachineDTO dto) {

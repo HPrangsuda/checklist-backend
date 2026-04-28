@@ -80,6 +80,7 @@ public class MaintenanceService {
                 .flatMap(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
+                    Long   memberId   = principal.memberId();
 
                     return switch (role) {
                         case "ADMIN" -> {
@@ -90,18 +91,18 @@ public class MaintenanceService {
                                     index, size, query, criteria,
                                     MaintenanceRecord.class, this::convertMaintenanceListDTOs);
                         }
-                        case "MANAGER"    -> fetchByMachineRole(employeeId, "manager_id",            keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(employeeId, "supervisor_id",         keyword, index, size);
+                        case "MANAGER"    -> fetchByMachineRole(memberId,   "manager_id",            keyword, index, size);
+                        case "SUPERVISOR" -> fetchByMachineRole(memberId,   "supervisor_id",         keyword, index, size);
                         default           -> fetchByMachineRole(employeeId, "responsible_person_id", keyword, index, size);
                     };
                 });
     }
 
     private Mono<PagedResponse<MaintenanceListDTO>> fetchByMachineRole(
-            String employeeId, String roleColumn, String keyword, int index, int size) {
+            Object roleValue, String roleColumn, String keyword, int index, int size) {
 
         return template.select(
-                        Query.query(Criteria.where(roleColumn).is(employeeId)),
+                        Query.query(Criteria.where(roleColumn).is(roleValue)),
                         Machine.class)
                 .map(Machine::getMachineCode)
                 .collectList()
@@ -141,11 +142,12 @@ public class MaintenanceService {
                 .flatMapMany(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
+                    Long   memberId   = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND m.manager_id = '" + employeeId + "'";
-                        case "SUPERVISOR" -> "AND m.supervisor_id = '" + employeeId + "'";
+                        case "MANAGER"    -> "AND m.manager_id = " + memberId;
+                        case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
                         default           -> "AND m.responsible_person_id = '" + employeeId + "'";
                     };
 
