@@ -146,7 +146,7 @@ public class MachineService {
 
     // ─── CHANGE RESPONSIBLE PERSON ────────────────────────────────────────────
 
-    public Mono<ApiResponse<Void>> changeResponsiblePerson(String machineCode, String newPersonId) {
+    public Mono<ApiResponse<Void>> changeResponsiblePerson(String machineCode, Long newPersonId) {
         LocalDate today     = LocalDate.now();
         LocalDate yesterday = today.minusDays(1);
 
@@ -155,7 +155,7 @@ public class MachineService {
                         Machine.class)
                 .switchIfEmpty(Mono.error(new ThrowException("MS030", "Machine not found: " + machineCode)))
                 .flatMap(machine -> {
-                    String oldPersonId = String.valueOf(machine.getResponsiblePersonId());
+                    Long oldPersonId = machine.getResponsiblePersonId();
 
                     Mono<Void> closeOld = template.update(
                                     Query.query(Criteria.where("machine_code").is(machineCode)
@@ -166,12 +166,12 @@ public class MachineService {
 
                     ResponsibleHistory newHistory = ResponsibleHistory.builder()
                             .machineCode(machineCode)
-                            .responsiblePersonId(newPersonId)
+                            .responsiblePersonId(String.valueOf(newPersonId))
                             .effectiveFrom(today)
                             .build();
                     Mono<Void> insertNew = template.insert(newHistory).then();
 
-                    machine.setResponsiblePersonId(Long.valueOf(newPersonId));
+                    machine.setResponsiblePersonId(newPersonId);
                     Mono<Void> updateMachine = template.update(machine).then();
 
                     return closeOld
@@ -189,8 +189,8 @@ public class MachineService {
                 });
     }
 
-    private Mono<Void> recalculateKpiForPerson(String personId) {
-        if (personId == null) return Mono.empty();
+    private Mono<Void> recalculateKpiForPerson(Long memberId) {
+        if (memberId == null) return Mono.empty();
 
         LocalDate today    = LocalDate.now();
         YearMonth ym       = YearMonth.from(today);
@@ -201,7 +201,7 @@ public class MachineService {
         LocalDate lastFriday = getLastFridayOfMonth(ym);
 
         Criteria historyCriteria = Criteria
-                .where("responsible_person_id").is(personId)
+                .where("responsible_person_id").is(memberId)
                 .and("effective_from").lessThanOrEquals(lastDay)
                 .and(Criteria.where("effective_to").isNull()
                         .or(Criteria.where("effective_to").greaterThanOrEquals(firstDay)));
@@ -218,7 +218,7 @@ public class MachineService {
 
         return newCheckAllMono.flatMap(newCheckAll ->
                 template.selectOne(
-                                Query.query(Criteria.where("employee_id").is(personId)
+                                Query.query(Criteria.where("member_id").is(memberId)
                                         .and("years").is(year)
                                         .and("months").is(month)),
                                 Kpi.class)
@@ -230,16 +230,16 @@ public class MachineService {
                         .switchIfEmpty(Mono.defer(() -> {
                             if (newCheckAll == 0) return Mono.empty();
                             return template.selectOne(
-                                            Query.query(Criteria.where("employee_id").is(personId)),
+                                            Query.query(Criteria.where("id").is(memberId)),
                                             Member.class)
                                     .flatMap(member -> template.select(
-                                                    Query.query(Criteria.where("responsible_person_id").is(personId)
+                                                    Query.query(Criteria.where("responsible_person_id").is(memberId)
                                                             .and("machine_status").not("CANCELLED")),
                                                     Machine.class)
                                             .next()
                                             .flatMap(m -> {
                                                 Kpi newKpi = Kpi.builder()
-                                                        .employeeId(personId)
+                                                        .memberId(memberId)
                                                         .employeeName(member.getFirstName() + " " + member.getLastName())
                                                         .years(year)
                                                         .months(month)
@@ -251,9 +251,9 @@ public class MachineService {
                                                 return template.insert(newKpi).then();
                                             }));
                         }))
-                        .doOnSuccess(v -> log.info("Recalculated KPI for {} → checkAll={}", personId, newCheckAll))
+                        .doOnSuccess(v -> log.info("Recalculated KPI for memberId={} → checkAll={}", memberId, newCheckAll))
                         .onErrorResume(e -> {
-                            log.error("Failed to recalculate KPI for {}: {}", personId, e.getMessage());
+                            log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
                             return Mono.empty();
                         }));
     }
@@ -264,8 +264,8 @@ public class MachineService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
-                    String role       = principal.role();
-                    Long   memberId   = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
 
                     return switch (role) {
                         case "ADMIN" -> {
@@ -306,14 +306,14 @@ public class MachineService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMapMany(principal -> {
-                    String role       = principal.role();
-                    Long   memberId   = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = '" + memberId + "' OR m.manager_id = " + memberId + ")";
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = '" + memberId + "' OR m.supervisor_id = " + memberId + ")";
-                        default           -> "AND m.responsible_person_id = '" + memberId + "'";
+                        case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId + " OR m.manager_id = " + memberId + ")";
+                        case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId + " OR m.supervisor_id = " + memberId + ")";
+                        default           -> "AND m.responsible_person_id = " + memberId;
                     };
 
                     String sql = """
@@ -412,8 +412,8 @@ public class MachineService {
                             ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(auditIds);
 
                     Mono<String> qrMono      = generateQRCodeReactive(machine.getQrCode(), machineCode);
-                    Mono<String> supNameMono = resolveMemberName(Long.valueOf(machine.getSupervisorId()));
-                    Mono<String> mgrNameMono = resolveMemberName(Long.valueOf(machine.getManagerId()));
+                    Mono<String> supNameMono = resolveMemberName(machine.getSupervisorId());
+                    Mono<String> mgrNameMono = resolveMemberName(machine.getManagerId());
 
                     Mono<String> groupNameMono = Mono.justOrEmpty(machineGroup)
                             .flatMap(gid -> template.getDatabaseClient()

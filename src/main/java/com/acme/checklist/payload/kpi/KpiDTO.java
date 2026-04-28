@@ -11,12 +11,12 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 public class KpiDTO {
     private Long id;
-    private String employeeId;
+    private Long memberId;
     private String employeeName;
     private String years;
     private String months;
     private Long checkAll;
     private Long checked;
-    private String managerId;
-    private String supervisorId;
+    private Long managerId;
+    private Long supervisorId;
 }

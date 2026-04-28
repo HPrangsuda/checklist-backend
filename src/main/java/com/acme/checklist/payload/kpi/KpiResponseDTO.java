@@ -16,14 +16,14 @@ import java.util.List;
 @NoArgsConstructor
 public class KpiResponseDTO {
     private Long   id;
-    private String employeeId;
+    private Long   memberId;
     private String employeeName;
     private String years;
     private String months;
     private Long   checkAll;
     private Long   checked;
-    private Long managerId;
-    private Long supervisorId;
+    private Long   managerId;
+    private Long   supervisorId;
 
     private List<ChecklistListDTO> checklists;
 
@@ -31,7 +31,7 @@ public class KpiResponseDTO {
         if (kpi == null) return null;
         return KpiResponseDTO.builder()
                 .id(kpi.getId())
-                .employeeId(kpi.getEmployeeId())
+                .memberId(kpi.getMemberId())       // ← ปิดวงเล็บถูกต้อง
                 .employeeName(kpi.getEmployeeName())
                 .years(kpi.getYears())
                 .months(kpi.getMonths())

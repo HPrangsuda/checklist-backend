@@ -77,6 +77,6 @@ public class MachineController {
     public Mono<ApiResponse<Void>> changeResponsiblePerson(
             @PathVariable String machineCode,
             @RequestBody ChangeResponsiblePersonRequest req) {
-        return machineService.changeResponsiblePerson(machineCode, req.newPersonId());
+        return machineService.changeResponsiblePerson(machineCode, Long.valueOf(req.newPersonId()));
     }
 }

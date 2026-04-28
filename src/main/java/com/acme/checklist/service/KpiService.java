@@ -58,72 +58,76 @@ public class KpiService {
             return Mono.error(new IllegalArgumentException("ResponsiblePersonId cannot be null"));
         }
 
+        // responsiblePersonId คือ employee_id ของ machine (String เช่น "AIT0005")
+        // ต้องหา member.id จาก employee_id ก่อน
         YearMonth yearMonth = YearMonth.of(Integer.parseInt(year), Integer.parseInt(month));
         int fridays = countFridaysInMonth(yearMonth);
-
-        Mono<Long> machineCountMono = template.count(
-                Query.query(Criteria.where("responsible_person_id").is(responsiblePersonId)
-                        .and("machine_status").not("ยกเลิกใช้งาน")),
-                Machine.class
-        );
-
-        Mono<Machine> machineMono = template.select(
-                Query.query(Criteria.where("responsible_person_id").is(responsiblePersonId)
-                        .and("machine_status").not("ยกเลิกใช้งาน")),
-                Machine.class
-        ).next();
 
         Mono<Member> memberMono = template.selectOne(
                 Query.query(Criteria.where("employee_id").is(responsiblePersonId)),
                 Member.class
         );
 
-        Mono<Kpi> existingKpiMono = template.selectOne(
-                Query.query(Criteria.where("employee_id").is(responsiblePersonId)
-                        .and("years").is(year)
-                        .and("months").is(month)),
-                Kpi.class
-        );
+        return memberMono.flatMap(member -> {
+            Long memberId = member.getId();
 
-        return Mono.zip(machineCountMono, machineMono, memberMono, existingKpiMono.defaultIfEmpty(new Kpi()))
-                .flatMap(tuple -> {
-                    long machineCount = tuple.getT1();
-                    Machine machine   = tuple.getT2();
-                    Member member     = tuple.getT3();
-                    Kpi existingKpi   = tuple.getT4();
+            Mono<Long> machineCountMono = template.count(
+                    Query.query(Criteria.where("responsible_person_id").is(memberId)
+                            .and("machine_status").not("ยกเลิกใช้งาน")),
+                    Machine.class
+            );
 
-                    if (machineCount == 0) {
-                        log.info("No active machines for: {}", responsiblePersonId);
-                        return Mono.empty();
-                    }
+            Mono<Machine> machineMono = template.select(
+                    Query.query(Criteria.where("responsible_person_id").is(memberId)
+                            .and("machine_status").not("ยกเลิกใช้งาน")),
+                    Machine.class
+            ).next();
 
-                    String employeeName = member.getFirstName() + " " + member.getLastName();
+            Mono<Kpi> existingKpiMono = template.selectOne(
+                    Query.query(Criteria.where("member_id").is(memberId)
+                            .and("years").is(year)
+                            .and("months").is(month)),
+                    Kpi.class
+            );
 
-                    if (existingKpi.getId() != null) {
-                        existingKpi.setCheckAll((long) fridays * machineCount);
-                        existingKpi.setChecked(existingKpi.getChecked() + 1);
-                        existingKpi.setEmployeeName(employeeName);
-                        existingKpi.setManagerId(machine.getManagerId());
-                        existingKpi.setSupervisorId(machine.getSupervisorId());
-                        return template.update(existingKpi).then();
-                    } else {
-                        Kpi newKpi = Kpi.builder()
-                                .employeeId(responsiblePersonId)
-                                .employeeName(employeeName)
-                                .years(year)
-                                .months(month)
-                                .checkAll((long) fridays * machineCount)
-                                .checked(1L)
-                                .managerId(machine.getManagerId())
-                                .supervisorId(machine.getSupervisorId())
-                                .build();
-                        return template.insert(newKpi).then();
-                    }
-                })
-                .onErrorResume(e -> {
-                    log.error("Failed to update KPI: {}", e.getMessage(), e);
-                    return Mono.empty();
-                });
+            return Mono.zip(machineCountMono, machineMono, existingKpiMono.defaultIfEmpty(new Kpi()))
+                    .flatMap(tuple -> {
+                        long machineCount = tuple.getT1();
+                        Machine machine   = tuple.getT2();
+                        Kpi existingKpi   = tuple.getT3();
+
+                        if (machineCount == 0) {
+                            log.info("No active machines for memberId: {}", memberId);
+                            return Mono.empty();
+                        }
+
+                        String employeeName = member.getFirstName() + " " + member.getLastName();
+
+                        if (existingKpi.getId() != null) {
+                            existingKpi.setCheckAll((long) fridays * machineCount);
+                            existingKpi.setChecked(existingKpi.getChecked() + 1);
+                            existingKpi.setEmployeeName(employeeName);
+                            existingKpi.setManagerId(machine.getManagerId());
+                            existingKpi.setSupervisorId(machine.getSupervisorId());
+                            return template.update(existingKpi).then();
+                        } else {
+                            Kpi newKpi = Kpi.builder()
+                                    .memberId(memberId)
+                                    .employeeName(employeeName)
+                                    .years(year)
+                                    .months(month)
+                                    .checkAll((long) fridays * machineCount)
+                                    .checked(1L)
+                                    .managerId(machine.getManagerId())
+                                    .supervisorId(machine.getSupervisorId())
+                                    .build();
+                            return template.insert(newKpi).then();
+                        }
+                    });
+        }).onErrorResume(e -> {
+            log.error("Failed to update KPI: {}", e.getMessage(), e);
+            return Mono.empty();
+        });
     }
 
     // ─── GET LIST ─────────────────────────────────────────────────────────────
@@ -134,7 +138,6 @@ public class KpiService {
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
-                    String employeeId = principal.employeeId();
 
                     Criteria base = Criteria
                             .where("years").is(year)
@@ -142,22 +145,22 @@ public class KpiService {
 
                     Criteria criteria = switch (role) {
                         case "MEMBER" ->
-                                base.and("employee_id").is(employeeId);
+                                base.and("member_id").is(memberId);
                         case "SUPERVISOR" ->
                                 base.and(
-                                        Criteria.where("employee_id").is(employeeId)
-                                                .or("supervisor_id").is(memberId)  // ← Long
+                                        Criteria.where("member_id").is(memberId)
+                                                .or("supervisor_id").is(memberId)
                                 );
                         case "MANAGER" ->
                                 base.and(
-                                        Criteria.where("employee_id").is(employeeId)
-                                                .or("manager_id").is(memberId)     // ← Long
+                                        Criteria.where("member_id").is(memberId)
+                                                .or("manager_id").is(memberId)
                                 );
                         default -> base;
                     };
 
                     return template.select(Query.query(criteria), Kpi.class)
-                            .distinct(Kpi::getEmployeeId)
+                            .distinct(Kpi::getMemberId)
                             .collectList();
                 })
                 .doOnError(e -> log.error("Failed to fetch KPI: {}", e.getMessage()));
@@ -185,8 +188,9 @@ public class KpiService {
                     Instant startInstant = start.atStartOfDay(ZoneOffset.UTC).toInstant();
                     Instant endInstant   = end.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
 
+                    // ดึง checklist ด้วย member_id
                     Criteria criteria = Criteria
-                            .where("user_id").is(kpi.getEmployeeId())
+                            .where("created_by").is(kpi.getMemberId())
                             .and("recheck").is(true)
                             .and("check_type").is("GENERAL")
                             .and("created_at").greaterThanOrEquals(startInstant)
@@ -209,7 +213,7 @@ public class KpiService {
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
 
     public Mono<KpiDTO> validateData(KpiDTO kpiDTO) {
-        if (kpiDTO.getEmployeeId() == null || kpiDTO.getEmployeeId().isEmpty())
+        if (kpiDTO.getMemberId() == null)
             return Mono.error(new ThrowException("KP003"));
         if (kpiDTO.getEmployeeName() == null || kpiDTO.getEmployeeName().isEmpty())
             return Mono.error(new ThrowException("KP004"));
@@ -227,14 +231,14 @@ public class KpiService {
     public Kpi buildFromDTO(KpiDTO kpiDTO) {
         return Kpi.builder()
                 .id(kpiDTO.getId())
-                .employeeId(kpiDTO.getEmployeeId())
+                .memberId(kpiDTO.getMemberId())
                 .employeeName(kpiDTO.getEmployeeName())
                 .years(kpiDTO.getYears())
                 .months(kpiDTO.getMonths())
                 .checkAll(kpiDTO.getCheckAll())
                 .checked(kpiDTO.getChecked())
-                .managerId(Long.valueOf(kpiDTO.getManagerId()))
-                .supervisorId(Long.valueOf(kpiDTO.getSupervisorId()))
+                .managerId(kpiDTO.getManagerId())
+                .supervisorId(kpiDTO.getSupervisorId())
                 .build();
     }
 

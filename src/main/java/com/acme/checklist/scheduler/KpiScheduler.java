@@ -47,7 +47,7 @@ public class KpiScheduler {
                 .collectMultimap(ResponsibleHistory::getResponsiblePersonId)
                 .flatMap(historyMap -> Flux.fromIterable(historyMap.entrySet())
                         .flatMap(entry -> {
-                            String personId = entry.getKey();
+                            Long memberId = Long.valueOf(entry.getKey());
                             long checkAll = entry.getValue().stream()
                                     .mapToLong(h -> countFridaysInRange(
                                             clampStart(h.getEffectiveFrom(), firstDay),
@@ -55,16 +55,16 @@ public class KpiScheduler {
                                     .sum();
 
                             return template.selectOne(
-                                            Query.query(Criteria.where("employee_id").is(personId)),
+                                            Query.query(Criteria.where("id").is(memberId)),
                                             Member.class)
                                     .flatMap(member -> template.select(
-                                                    Query.query(Criteria.where("responsible_person_id").is(personId)
+                                                    Query.query(Criteria.where("responsible_person_id").is(memberId)
                                                             .and("machine_status").not("CANCELLED")),
                                                     Machine.class)
                                             .next()
                                             .flatMap(machine -> {
                                                 Kpi kpi = Kpi.builder()
-                                                        .employeeId(personId)
+                                                        .memberId(memberId)
                                                         .employeeName(member.getFirstName() + " " + member.getLastName())
                                                         .years(year)
                                                         .months(month)
@@ -76,7 +76,7 @@ public class KpiScheduler {
                                                 return template.insert(kpi).then();
                                             }))
                                     .onErrorResume(e -> {
-                                        log.error("Failed to create KPI for {}: {}", personId, e.getMessage());
+                                        log.error("Failed to create KPI for memberId={}: {}", memberId, e.getMessage());
                                         return Mono.empty();
                                     });
                         }).then()
@@ -110,12 +110,12 @@ public class KpiScheduler {
                         Query.query(Criteria.where("years").is(year).and("months").is(month)),
                         Kpi.class)
                 .flatMap(kpi -> {
-                    String personId = kpi.getEmployeeId();
+                    Long memberId = kpi.getMemberId();  // ← เปลี่ยนจาก getEmployeeId()
 
                     // ── checkAll จาก history ────────────────────────────────
                     Mono<Long> checkAllMono = template.select(
                                     Query.query(historyCriteria
-                                            .and(Criteria.where("responsible_person_id").is(personId))),
+                                            .and(Criteria.where("responsible_person_id").is(memberId))),
                                     ResponsibleHistory.class)
                             .filterWhen(h -> isMachineActive(h.getMachineCode()))
                             .collectList()
@@ -127,7 +127,7 @@ public class KpiScheduler {
 
                     // ── checked count ────────────────────────────────────────
                     Mono<Long> checkedMono = template.count(
-                            Query.query(Criteria.where("user_id").is(personId)
+                            Query.query(Criteria.where("created_by").is(memberId)  // ← เปลี่ยนจาก user_id
                                     .and("recheck").is(true)
                                     .and("check_type").is("GENERAL")
                                     .and("created_at").greaterThanOrEquals(
@@ -138,7 +138,7 @@ public class KpiScheduler {
 
                     // ── machine ปัจจุบัน (manager/supervisor) ───────────────
                     Mono<Machine> machineMono = template.select(
-                                    Query.query(Criteria.where("responsible_person_id").is(personId)
+                                    Query.query(Criteria.where("responsible_person_id").is(memberId)
                                             .and("machine_status").not("CANCELLED")),
                                     Machine.class)
                             .next();
@@ -157,12 +157,12 @@ public class KpiScheduler {
                                 kpi.setSupervisorId(machine.getSupervisorId());
 
                                 return template.update(kpi)
-                                        .doOnSuccess(v -> log.info("Updated KPI {} → checkAll={}, checked={}",
-                                                personId, newCheckAll, checkedCount))
+                                        .doOnSuccess(v -> log.info("Updated KPI memberId={} → checkAll={}, checked={}",
+                                                memberId, newCheckAll, checkedCount))
                                         .then();
                             })
                             .onErrorResume(e -> {
-                                log.error("Failed to recalculate KPI for {}: {}", personId, e.getMessage());
+                                log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
                                 return Mono.empty();
                             });
                 })
@@ -172,9 +172,9 @@ public class KpiScheduler {
 
     // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-    private Mono<Boolean> isMachineActive(String machineId) {
+    private Mono<Boolean> isMachineActive(String machineCode) {
         return template.selectOne(
-                        Query.query(Criteria.where("id").is(machineId)),
+                        Query.query(Criteria.where("machine_code").is(machineCode)),
                         Machine.class)
                 .map(m -> !"CANCELLED".equals(m.getMachineStatus())
                         && !"MONTHLY".equals(m.getResetPeriod()))

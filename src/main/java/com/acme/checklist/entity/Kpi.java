@@ -14,8 +14,8 @@ public class Kpi {
     @Id
     private Long id;
 
-    @Column("employee_id")
-    private String employeeId;
+    @Column("member_id")
+    private Long memberId;
 
     @Column("employee_name")
     private String employeeName;
