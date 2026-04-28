@@ -24,30 +24,28 @@ public class DashboardService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
 
-    // ── Principal helper ──────────────────────────────────────────────────────
-
     private Mono<MemberPrincipal> getPrincipal() {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal());
     }
 
-    // ── Machine filter clause (SQL fragment) ─────────────────────────────────
+    // ── Machine filter clause ─────────────────────────────────────────────────
 
     private record MachineFilter(String clause, Long memberId) {}
 
     private MachineFilter buildMachineFilter(String role, Long memberId) {
         return switch (role) {
             case "MEMBER" ->
-                    new MachineFilter("m.responsible_person_id = :memberId", memberId);
+                    new MachineFilter("m.responsible_person_id = $1", memberId);
             case "SUPERVISOR" ->
                     new MachineFilter(
-                            "(m.responsible_person_id = :memberId OR m.supervisor_id = :memberId)",
+                            "(m.responsible_person_id = $1 OR m.supervisor_id = $1)",
                             memberId);
             case "MANAGER" ->
                     new MachineFilter(
-                            "(m.responsible_person_id = :memberId OR m.manager_id = :memberId)",
+                            "(m.responsible_person_id = $1 OR m.manager_id = $1)",
                             memberId);
-            default -> new MachineFilter(null, null); // ADMIN
+            default -> new MachineFilter(null, null);
         };
     }
 
@@ -57,6 +55,9 @@ public class DashboardService {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String machineWhere = f.clause() != null ? "WHERE " + f.clause() : "";
+            String subWhere = f.clause() != null
+                    ? "WHERE " + f.clause().replace("m.", "mc.")
+                    : "";
 
             String sql = """
                 SELECT
@@ -76,14 +77,10 @@ public class DashboardService {
                     ) AS total_maintenance
                 FROM machine m
                 %s
-            """.formatted(
-                    f.clause() != null ? "WHERE " + f.clause().replace("m.", "mc.") : "",
-                    f.clause() != null ? "WHERE " + f.clause().replace("m.", "mc.") : "",
-                    machineWhere
-            );
+            """.formatted(subWhere, subWhere, machineWhere);
 
             var spec = template.getDatabaseClient().sql(sql);
-            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
+            if (f.memberId() != null) spec = spec.bind(0, f.memberId());
 
             return spec.map((row, metadata) -> {
                         try {
@@ -145,8 +142,8 @@ public class DashboardService {
             var calSpec   = template.getDatabaseClient().sql(calibrationSql);
             var maintSpec = template.getDatabaseClient().sql(maintenanceSql);
             if (f.memberId() != null) {
-                calSpec   = calSpec.bind("memberId", f.memberId());
-                maintSpec = maintSpec.bind("memberId", f.memberId());
+                calSpec   = calSpec.bind(0, f.memberId());
+                maintSpec = maintSpec.bind(0, f.memberId());
             }
 
             Flux<SoonDTO> calItems   = calSpec.map((row, meta) -> mapToSoonDTO(row)).all();
@@ -174,8 +171,11 @@ public class DashboardService {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
+
+            // memberId เป็น $2 เพราะ $1 คือ year
             String joinWhere = f.clause() != null
-                    ? "JOIN machine m ON mr.machine_code = m.machine_code AND " + f.clause()
+                    ? "JOIN machine m ON mr.machine_code = m.machine_code AND "
+                    + f.clause().replace("$1", "$2")
                     : "";
 
             String sql = """
@@ -199,7 +199,7 @@ public class DashboardService {
             """.formatted(joinWhere);
 
             var spec = template.getDatabaseClient().sql(sql).bind(0, currentYear);
-            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
+            if (f.memberId() != null) spec = spec.bind(1, f.memberId());
 
             return spec.map((row, metadata) -> {
                         Integer monthNum = row.get("month_num", Integer.class);
@@ -229,8 +229,11 @@ public class DashboardService {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
+
+            // memberId เป็น $2 เพราะ $1 คือ year
             String joinWhere = f.clause() != null
-                    ? "JOIN machine m ON cr.machine_code = m.machine_code AND " + f.clause()
+                    ? "JOIN machine m ON cr.machine_code = m.machine_code AND "
+                    + f.clause().replace("$1", "$2")
                     : "";
 
             String sql = """
@@ -254,7 +257,7 @@ public class DashboardService {
             """.formatted(joinWhere);
 
             var spec = template.getDatabaseClient().sql(sql).bind(0, currentYear);
-            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
+            if (f.memberId() != null) spec = spec.bind(1, f.memberId());
 
             return spec.map((row, metadata) -> {
                         Integer monthNum = row.get("month_num", Integer.class);
