@@ -301,9 +301,9 @@ public class ChecklistService {
 
                     Criteria criteria = Criteria
                             .where("checklist_status").is("PENDING SUPERVISOR")
-                            .and("supervisor").is(memberId)          // ← Long
+                            .and("supervisor").is(memberId)
                             .or(Criteria.where("checklist_status").is("PENDING MANAGER")
-                                    .and("manager").is(memberId));   // ← Long
+                                    .and("manager").is(memberId));
 
                     log.info("getPendingApprovals — memberId: {}", memberId);
 
