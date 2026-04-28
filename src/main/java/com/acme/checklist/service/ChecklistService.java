@@ -194,8 +194,7 @@ public class ChecklistService {
     }
 
     public Mono<PagedResponse<ChecklistListDTO>> getPersonalWithPage(Long userId, String keyword, int index, int size) {
-        String userIdStr = String.valueOf(userId);
-        Criteria criteria = Criteria.where("created_by").is(userIdStr);
+        Criteria criteria = Criteria.where("created_by").is(userId);
         if (StringUtils.hasText(keyword)) {
             criteria = criteria.and(
                     Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
@@ -242,7 +241,6 @@ public class ChecklistService {
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
-                    String memberIdStr = String.valueOf(memberId);
                     log.info("getWithRole — role: {}, memberId: {}", role, memberId);
 
                     return switch (role) {
@@ -256,7 +254,7 @@ public class ChecklistService {
                         }
                         default -> {
                             yield template.select(
-                                            Query.query(Criteria.where("responsible_person_id").is(memberId)), // ← memberId
+                                            Query.query(Criteria.where("responsible_person_id").is(memberId)),
                                             Machine.class)
                                     .map(Machine::getMachineCode)
                                     .collectList()
@@ -266,8 +264,8 @@ public class ChecklistService {
                                         Criteria criteria = Criteria
                                                 .where("created_by").is(memberId)
                                                 .or("machine_code").in(machineCodes)
-                                                .or("supervisor").is(memberIdStr)
-                                                .or("manager").is(memberIdStr);
+                                                .or("supervisor").is(memberId)   // ← Long
+                                                .or("manager").is(memberId);     // ← Long
 
                                         if (StringUtils.hasText(keyword)) {
                                             criteria = criteria.and(
@@ -292,9 +290,8 @@ public class ChecklistService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
-                    Long   memberId    = principal.memberId();
-                    String role        = principal.role();
-                    String memberIdStr = String.valueOf(memberId);
+                    Long   memberId = principal.memberId();
+                    String role     = principal.role();
 
                     log.info("getPendingApprovals — role: {}, memberId: {}", role, memberId);
 
@@ -304,11 +301,11 @@ public class ChecklistService {
 
                     Criteria criteria = Criteria
                             .where("checklist_status").is("PENDING SUPERVISOR")
-                            .and("supervisor").is(memberIdStr)
+                            .and("supervisor").is(memberId)          // ← Long
                             .or(Criteria.where("checklist_status").is("PENDING MANAGER")
-                                    .and("manager").is(memberIdStr));
+                                    .and("manager").is(memberId));   // ← Long
 
-                    log.info("getPendingApprovals — memberIdStr: {}", memberIdStr);
+                    log.info("getPendingApprovals — memberId: {}", memberId);
 
                     Query query = Query.query(criteria)
                             .with(commonService.pageable(0, 100, "created_at"));
@@ -333,7 +330,7 @@ public class ChecklistService {
                 .flatMap(principal -> {
                     int    targetYear = (year != null) ? year : LocalDate.now().getYear();
                     String role       = principal.role();
-                    Long   memberId   = principal.memberId();  // ← memberId
+                    Long   memberId   = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
@@ -385,14 +382,14 @@ public class ChecklistService {
                             memberIdStr, status, dto.getSupervisor(), dto.getManager());
 
                     if ("PENDING SUPERVISOR".equals(status)) {
-                        if (!memberIdStr.equals(dto.getSupervisor())) {
+                        if (!memberId.equals(dto.getSupervisor())) {
                             return Mono.error(new ThrowException("MS010"));
                         }
                         dto.setChecklistStatus(dto.getManager() != null ? "PENDING MANAGER" : "COMPLETED");
                         dto.setDateSupervisorChecked(now);
 
                     } else if ("PENDING MANAGER".equals(status)) {
-                        if (!memberIdStr.equals(dto.getManager())) {
+                        if (!memberId.equals(dto.getManager())) {
                             return Mono.error(new ThrowException("MS010"));
                         }
                         dto.setChecklistStatus("COMPLETED");
