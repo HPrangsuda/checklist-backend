@@ -155,7 +155,7 @@ public class MachineService {
                         Machine.class)
                 .switchIfEmpty(Mono.error(new ThrowException("MS030", "Machine not found: " + machineCode)))
                 .flatMap(machine -> {
-                    String oldPersonId = machine.getResponsiblePersonId();
+                    String oldPersonId = String.valueOf(machine.getResponsiblePersonId());
 
                     Mono<Void> closeOld = template.update(
                                     Query.query(Criteria.where("machine_code").is(machineCode)
@@ -171,7 +171,7 @@ public class MachineService {
                             .build();
                     Mono<Void> insertNew = template.insert(newHistory).then();
 
-                    machine.setResponsiblePersonId(newPersonId);
+                    machine.setResponsiblePersonId(Long.valueOf(newPersonId));
                     Mono<Void> updateMachine = template.update(machine).then();
 
                     return closeOld
@@ -532,13 +532,13 @@ public class MachineService {
                 .machineStatus(dto.getMachineStatus())
                 .machineTypeId(dto.getMachineTypeId())
                 .maintenancePeriod(dto.getMaintenancePeriod())
-                .managerId(dto.getManagerId())
+                .managerId(Long.valueOf(dto.getManagerId()))
                 .qrCode(dto.getQrCode())
                 .resetPeriod(dto.getResetPeriod())
-                .responsiblePersonId(dto.getResponsiblePersonId())
+                .responsiblePersonId(Long.valueOf(dto.getResponsiblePersonId()))
                 .responsiblePersonName(dto.getResponsiblePersonName())
                 .serialNumber(dto.getSerialNumber())
-                .supervisorId(dto.getSupervisorId())
+                .supervisorId(Long.valueOf(dto.getSupervisorId()))
                 .workInstruction(dto.getWorkInstruction())
                 .note(dto.getNote())
                 .businessUnit(dto.getBusinessUnit())

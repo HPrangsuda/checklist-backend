@@ -22,8 +22,8 @@ public class KpiResponseDTO {
     private String months;
     private Long   checkAll;
     private Long   checked;
-    private String managerId;
-    private String supervisorId;
+    private Long managerId;
+    private Long supervisorId;
 
     private List<ChecklistListDTO> checklists;
 

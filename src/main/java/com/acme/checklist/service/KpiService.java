@@ -234,8 +234,8 @@ public class KpiService {
                 .months(kpiDTO.getMonths())
                 .checkAll(kpiDTO.getCheckAll())
                 .checked(kpiDTO.getChecked())
-                .managerId(kpiDTO.getManagerId())
-                .supervisorId(kpiDTO.getSupervisorId())
+                .managerId(Long.valueOf(kpiDTO.getManagerId()))
+                .supervisorId(Long.valueOf(kpiDTO.getSupervisorId()))
                 .build();
     }
 

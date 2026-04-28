@@ -44,11 +44,11 @@ public class MachineResponseDTO {
     private String qrCode;
     private String resetPeriod;
     private String note;
-    private String responsiblePersonId;
+    private Long responsiblePersonId;
     private String responsiblePersonName;
-    private String supervisorId;
+    private Long supervisorId;
     private String supervisorName;
-    private String managerId;
+    private Long managerId;
     private String managerName;
     private String workInstruction;
     private LocalDate lastReview;

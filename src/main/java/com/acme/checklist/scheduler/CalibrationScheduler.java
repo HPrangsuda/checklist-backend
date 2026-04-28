@@ -180,8 +180,7 @@ public class CalibrationScheduler {
                 .collectList()
                 .flatMap(machines -> {
 
-                    // deduplicate by record id per person
-                    Map<String, Map<Long, CalibrationRecord>> byPersonMap = new HashMap<>();
+                    Map<Long, Map<Long, CalibrationRecord>> byPersonMap = new HashMap<>();
 
                     machines.forEach(machine -> {
                         List<CalibrationRecord> records = byMachineCode.getOrDefault(
@@ -189,19 +188,17 @@ public class CalibrationScheduler {
                         );
                         if (records.isEmpty()) return;
 
-                        List<String> personIds = switch (role) {
+                        List<Long> personIds = switch (role) {
                             case RESPONSIBLE_SUPERVISOR -> Stream.of(
                                             machine.getResponsiblePersonId(),
                                             machine.getSupervisorId()
                                     )
                                     .filter(Objects::nonNull)
-                                    .filter(s -> !s.isBlank())
                                     .distinct()
                                     .toList();
 
                             case MANAGER -> Stream.of(machine.getManagerId())
                                     .filter(Objects::nonNull)
-                                    .filter(s -> !s.isBlank())
                                     .toList();
                         };
 
@@ -213,7 +210,7 @@ public class CalibrationScheduler {
                         });
                     });
 
-                    Map<String, List<CalibrationRecord>> byPerson = byPersonMap.entrySet().stream()
+                    Map<Long, List<CalibrationRecord>> byPerson = byPersonMap.entrySet().stream()
                             .collect(Collectors.toMap(
                                     Map.Entry::getKey,
                                     e -> new ArrayList<>(e.getValue().values())
@@ -225,109 +222,77 @@ public class CalibrationScheduler {
 
                     if (byPerson.isEmpty()) return Mono.empty();
 
-                    return fetchMembersAndSend(byPerson, role);
+                    return fetchMembersAndSendByMemberId(byPerson, role);
                 });
     }
 
-    private Mono<Void> fetchMembersAndSend(Map<String, List<CalibrationRecord>> byPerson, Role role) {
+    private Mono<Void> fetchMembersAndSendByMemberId(Map<Long, List<CalibrationRecord>> byPerson, Role role) {
 
-        Set<String> employeeIds = byPerson.keySet();
+        Set<Long> memberIds = byPerson.keySet();
 
         return template.select(
-                        Query.query(Criteria.where("employee_id").in(employeeIds)),
+                        Query.query(Criteria.where("id").in(memberIds)),
                         Member.class
                 )
                 .collectList()
                 .flatMap(members -> {
                     if (members.isEmpty()) {
-                        log.warn("[SEND] No members found for employeeIds: {} — skipping", employeeIds);
+                        log.warn("[SEND] No members found for memberIds: {} — skipping", memberIds);
                         return Mono.empty();
                     }
 
                     // --- Email ---
                     Mono<Void> emailMono = Flux.fromIterable(members)
-                            .filter(m -> m.getEmployeeId() != null)
                             .filter(m -> m.getEmail() != null && !m.getEmail().isBlank())
                             .flatMap(member -> {
                                 List<CalibrationRecord> empRecords = byPerson.getOrDefault(
-                                        member.getEmployeeId(), List.of()
+                                        member.getId(), List.of()
                                 );
-                                if (empRecords.isEmpty()) {
-                                    log.warn("[SEND] No records for empId={} — skipping email", member.getEmployeeId());
-                                    return Mono.empty();
-                                }
+                                if (empRecords.isEmpty()) return Mono.empty();
 
                                 String subject = "Calibration Due Date Reminder - "
                                         + LocalDate.now().format(DateTimeFormatter.ISO_DATE);
                                 String emailContent = buildEmailContent(empRecords);
 
-                                log.info("[SEND] → Email to empId={}, email={}, records={}",
-                                        member.getEmployeeId(), member.getEmail(), empRecords.size());
+                                log.info("[SEND] → Email to memberId={}, email={}, records={}",
+                                        member.getId(), member.getEmail(), empRecords.size());
 
                                 return emailService.sendReminder(member.getEmail(), subject, emailContent)
-                                        .doOnSuccess(v -> log.info("[SEND] ✓ Email sent to empId={}", member.getEmployeeId()))
+                                        .doOnSuccess(v -> log.info("[SEND] ✓ Email sent to memberId={}", member.getId()))
                                         .onErrorResume(e -> {
-                                            log.warn("[SEND] ✗ Email failed empId={}: {}", member.getEmployeeId(), e.getMessage());
+                                            log.warn("[SEND] ✗ Email failed memberId={}: {}", member.getId(), e.getMessage());
                                             return Mono.empty();
                                         });
                             })
                             .then();
 
                     // --- Lark ---
-                    Map<String, String> mobileToEmpId = new HashMap<>();
+                    Map<String, Long> mobileToMemberId = new HashMap<>();
                     members.stream()
-                            .filter(m -> m.getEmployeeId() != null)
                             .filter(m -> m.getMobiles() != null && !m.getMobiles().isBlank())
-                            .forEach(m -> {
-                                mobileToEmpId.put(toInternationalFormat(m.getMobiles()), m.getEmployeeId());
-                                log.info("[SEND] Member found: empId={}, mobile={}", m.getEmployeeId(), m.getMobiles());
-                            });
+                            .forEach(m -> mobileToMemberId.put(toInternationalFormat(m.getMobiles()), m.getId()));
 
-                    members.stream()
-                            .filter(m -> m.getMobiles() == null || m.getMobiles().isBlank())
-                            .forEach(m -> log.warn("[SEND] empId={} has no mobile — skipping Lark", m.getEmployeeId()));
-
-                    employeeIds.stream()
-                            .filter(id -> members.stream().noneMatch(m -> id.equals(m.getEmployeeId())))
-                            .forEach(id -> log.warn("[SEND] empId={} not found in member table — skipping", id));
-
-                    Mono<Void> larkMono = mobileToEmpId.isEmpty()
+                    Mono<Void> larkMono = mobileToMemberId.isEmpty()
                             ? Mono.fromRunnable(() -> log.warn("[SEND] No valid mobiles — skipping Lark"))
-                            : larkService.batchGetOpenIdsByMobile(new ArrayList<>(mobileToEmpId.keySet()))
+                            : larkService.batchGetOpenIdsByMobile(new ArrayList<>(mobileToMemberId.keySet()))
                             .flatMap(openIdMap -> {
-                                log.info("[SEND] Resolved openIdMap: {}", openIdMap);
+                                if (openIdMap.isEmpty()) return Mono.empty();
 
-                                if (openIdMap.isEmpty()) {
-                                    log.warn("[SEND] No open_ids resolved — skipping Lark");
-                                    return Mono.empty();
-                                }
-
-                                return Flux.fromIterable(mobileToEmpId.entrySet())
+                                return Flux.fromIterable(mobileToMemberId.entrySet())
                                         .flatMap(entry -> {
                                             String mobile = entry.getKey();
-                                            String empId = entry.getValue();
+                                            Long memberId = entry.getValue();
                                             String openId = openIdMap.get(mobile);
 
-                                            if (openId == null) {
-                                                log.warn("[SEND] No open_id for mobile={}, empId={} — skipping", mobile, empId);
-                                                return Mono.empty();
-                                            }
+                                            if (openId == null) return Mono.empty();
 
-                                            List<CalibrationRecord> empRecords = byPerson.getOrDefault(empId, List.of());
-                                            if (empRecords.isEmpty()) {
-                                                log.warn("[SEND] No records for empId={} — skipping Lark", empId);
-                                                return Mono.empty();
-                                            }
+                                            List<CalibrationRecord> empRecords = byPerson.getOrDefault(memberId, List.of());
+                                            if (empRecords.isEmpty()) return Mono.empty();
 
                                             String message = buildMessage(empRecords, role);
-                                            log.info("[SEND] → Lark to openId={}, empId={}, records={}", openId, empId, empRecords.size());
-
                                             return larkService.sendCardMessage(openId, message)
-                                                    .doOnSuccess(v -> log.info("[SEND] ✓ Lark sent to empId={}", empId))
-                                                    .onErrorResume(e -> {
-                                                        log.warn("[SEND] ✗ Lark failed empId={}: {}", empId, e.getMessage());
-                                                        return Mono.empty();
-                                                    });
+                                                    .doOnSuccess(v -> log.info("[SEND] ✓ Lark sent to memberId={}", memberId))
+                                                    .onErrorResume(e -> Mono.empty());
                                         })
                                         .then();
                             });

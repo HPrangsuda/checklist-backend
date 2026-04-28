@@ -23,9 +23,9 @@ public class ChecklistDTO {
     private String image;
     private String userId;
     private String userName;
-    private String supervisor;
+    private Long supervisor;
     private Instant dateSupervisorChecked;
-    private String manager;
+    private Long manager;
     private Instant dateManagerChecked;
     private String checklistStatus;
     private String reasonNotChecked;
