@@ -33,24 +33,20 @@ public class DashboardService {
 
     // ── Machine filter clause (SQL fragment) ─────────────────────────────────
 
-    /**
-     * Returns WHERE clause fragment + the employeeId binding value.
-     * ADMIN → no filter (null = no extra clause)
-     */
-    private record MachineFilter(String clause, String employeeId) {}
+    private record MachineFilter(String clause, Long memberId) {}
 
-    private MachineFilter buildMachineFilter(String role, String employeeId) {
+    private MachineFilter buildMachineFilter(String role, Long memberId) {
         return switch (role) {
             case "MEMBER" ->
-                    new MachineFilter("m.responsible_person_id = :empId", employeeId);
+                    new MachineFilter("m.responsible_person_id = :memberId", memberId);
             case "SUPERVISOR" ->
                     new MachineFilter(
-                            "(m.responsible_person_id = :empId OR m.supervisor_id = :empId)",
-                            employeeId);
+                            "(m.responsible_person_id = :memberId OR m.supervisor_id = :memberId)",
+                            memberId);
             case "MANAGER" ->
                     new MachineFilter(
-                            "(m.responsible_person_id = :empId OR m.manager_id = :empId)",
-                            employeeId);
+                            "(m.responsible_person_id = :memberId OR m.manager_id = :memberId)",
+                            memberId);
             default -> new MachineFilter(null, null); // ADMIN
         };
     }
@@ -59,7 +55,7 @@ public class DashboardService {
 
     public Mono<SummaryDTO> getSummary() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.employeeId());
+            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String machineWhere = f.clause() != null ? "WHERE " + f.clause() : "";
 
             String sql = """
@@ -87,7 +83,7 @@ public class DashboardService {
             );
 
             var spec = template.getDatabaseClient().sql(sql);
-            if (f.employeeId() != null) spec = spec.bind("empId", f.employeeId());
+            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
 
             return spec.map((row, metadata) -> {
                         try {
@@ -117,7 +113,7 @@ public class DashboardService {
 
     public Mono<ListResponse<List<SoonDTO>>> getSoon() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.employeeId());
+            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String joinWhere = f.clause() != null ? "AND " + f.clause() : "";
 
             String calibrationSql = """
@@ -146,14 +142,14 @@ public class DashboardService {
                 ORDER BY mr.id, mr.due_date ASC
             """.formatted(joinWhere);
 
-            var calSpec  = template.getDatabaseClient().sql(calibrationSql);
+            var calSpec   = template.getDatabaseClient().sql(calibrationSql);
             var maintSpec = template.getDatabaseClient().sql(maintenanceSql);
-            if (f.employeeId() != null) {
-                calSpec   = calSpec.bind("empId", f.employeeId());
-                maintSpec = maintSpec.bind("empId", f.employeeId());
+            if (f.memberId() != null) {
+                calSpec   = calSpec.bind("memberId", f.memberId());
+                maintSpec = maintSpec.bind("memberId", f.memberId());
             }
 
-            Flux<SoonDTO> calItems  = calSpec.map((row, meta) -> mapToSoonDTO(row)).all();
+            Flux<SoonDTO> calItems   = calSpec.map((row, meta) -> mapToSoonDTO(row)).all();
             Flux<SoonDTO> maintItems = maintSpec.map((row, meta) -> mapToSoonDTO(row)).all();
 
             return Flux.concat(calItems, maintItems)
@@ -176,7 +172,7 @@ public class DashboardService {
 
     public Mono<ListResponse<List<MaintenanceStatsDTO>>> getMaintenanceStats() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.employeeId());
+            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
             String joinWhere = f.clause() != null
                     ? "JOIN machine m ON mr.machine_code = m.machine_code AND " + f.clause()
@@ -203,7 +199,7 @@ public class DashboardService {
             """.formatted(joinWhere);
 
             var spec = template.getDatabaseClient().sql(sql).bind(0, currentYear);
-            if (f.employeeId() != null) spec = spec.bind("empId", f.employeeId());
+            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
 
             return spec.map((row, metadata) -> {
                         Integer monthNum = row.get("month_num", Integer.class);
@@ -231,7 +227,7 @@ public class DashboardService {
 
     public Mono<ListResponse<List<CalibrationStatsDTO>>> getCalibrationStats() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.employeeId());
+            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
             String joinWhere = f.clause() != null
                     ? "JOIN machine m ON cr.machine_code = m.machine_code AND " + f.clause()
@@ -258,7 +254,7 @@ public class DashboardService {
             """.formatted(joinWhere);
 
             var spec = template.getDatabaseClient().sql(sql).bind(0, currentYear);
-            if (f.employeeId() != null) spec = spec.bind("empId", f.employeeId());
+            if (f.memberId() != null) spec = spec.bind("memberId", f.memberId());
 
             return spec.map((row, metadata) -> {
                         Integer monthNum = row.get("month_num", Integer.class);

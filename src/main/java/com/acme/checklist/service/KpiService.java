@@ -6,20 +6,20 @@ import com.acme.checklist.entity.Machine;
 import com.acme.checklist.entity.Member;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
+import com.acme.checklist.payload.MemberPrincipal;
+import com.acme.checklist.payload.checklist.ChecklistListDTO;
 import com.acme.checklist.payload.kpi.KpiDTO;
 import com.acme.checklist.payload.kpi.KpiResponseDTO;
-import com.acme.checklist.payload.checklist.ChecklistListDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
-import com.acme.checklist.payload.MemberPrincipal;
-import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 
 import java.time.DayOfWeek;
 import java.time.Instant;
@@ -132,8 +132,9 @@ public class KpiService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
                     String employeeId = principal.employeeId();
-                    String role       = principal.role();
 
                     Criteria base = Criteria
                             .where("years").is(year)
@@ -145,12 +146,12 @@ public class KpiService {
                         case "SUPERVISOR" ->
                                 base.and(
                                         Criteria.where("employee_id").is(employeeId)
-                                                .or("supervisor_id").is(employeeId)
+                                                .or("supervisor_id").is(memberId)  // ← Long
                                 );
                         case "MANAGER" ->
                                 base.and(
                                         Criteria.where("employee_id").is(employeeId)
-                                                .or("manager_id").is(employeeId)
+                                                .or("manager_id").is(memberId)     // ← Long
                                 );
                         default -> base;
                     };
@@ -176,8 +177,6 @@ public class KpiService {
                             Integer.parseInt(kpi.getMonths())
                     );
 
-                    // start = จันทร์ของสัปดาห์ที่มีศุกร์แรกของเดือน
-                    // end   = ศุกร์สุดท้ายของเดือน
                     LocalDate firstFriday = getFirstFridayOfMonth(ym);
                     LocalDate lastFriday  = getLastFridayOfMonth(ym);
                     LocalDate start       = firstFriday.with(DayOfWeek.MONDAY);
