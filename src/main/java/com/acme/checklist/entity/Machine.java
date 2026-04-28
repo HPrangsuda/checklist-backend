@@ -77,16 +77,16 @@ public class Machine extends DataAudit {
     private String image;
 
     @Column("responsible_person_id")
-    private String responsiblePersonId;
+    private Long responsiblePersonId;
 
     @Column("responsible_person_name")
     private String responsiblePersonName;
 
     @Column("supervisor_id")
-    private String supervisorId;
+    private Long supervisorId;
 
     @Column("manager_id")
-    private String managerId;
+    private Long managerId;
 
     @Column("work_instruction")
     private String workInstruction;

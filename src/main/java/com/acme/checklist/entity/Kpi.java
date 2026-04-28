@@ -33,8 +33,8 @@ public class Kpi {
     private Long checked;
 
     @Column("manager_id")
-    private String managerId;
+    private Long managerId;
 
     @Column("supervisor_id")
-    private String supervisorId;
+    private Long supervisorId;
 }

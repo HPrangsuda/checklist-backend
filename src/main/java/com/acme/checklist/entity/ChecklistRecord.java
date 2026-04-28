@@ -49,13 +49,13 @@ public class ChecklistRecord extends DataAudit {
     private String userName;
 
     @Column("supervisor")
-    private String supervisor;
+    private Long supervisor;
 
     @Column("date_supervisor_checked")
     private Instant dateSupervisorChecked;
 
     @Column("manager")
-    private String manager;
+    private Long manager;
 
     @Column("date_manager_checked")
     private Instant dateManagerChecked;
