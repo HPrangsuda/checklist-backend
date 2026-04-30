@@ -76,8 +76,12 @@ public class ChecklistService {
                 .flatMap(machine -> {
                     boolean isWeekend = LocalDate.now().getDayOfWeek() == DayOfWeek.SATURDAY
                             || LocalDate.now().getDayOfWeek() == DayOfWeek.SUNDAY;
-                    boolean isResponsible = Objects.equals(dto.getUserId(), machine.getResponsiblePersonId());
+                    boolean isResponsible = Objects.equals(dto.getMemberId(), machine.getResponsiblePersonId());
                     boolean isPending = "PENDING".equals(machine.getCheckStatus());
+
+                    log.info("isWeekend: {}, isResponsible: {}, isPending: {}", isWeekend, isResponsible, isPending);
+                    log.info("dto.getMemberId: {}, machine.getResponsiblePersonId: {}", dto.getMemberId(), machine.getResponsiblePersonId());
+                    log.info("machine.getCheckStatus: {}", machine.getCheckStatus());
 
                     ChecklistRecord record = buildFromDTO(dto);
 
@@ -105,7 +109,7 @@ public class ChecklistService {
                         return updateChecklistItems
                                 .then(commonService.save(record, ChecklistRecord.class))
                                 .flatMap(saved -> updateMachine
-                                        .then(updateKpi(dto.getUserId()))
+                                        .then(updateKpi(dto.getMemberId()))
                                         .then(Mono.just(ApiResponse.<Void>success("MS001"))));
                     } else {
                         record.setChecklistStatus("COMPLETED");
@@ -113,7 +117,8 @@ public class ChecklistService {
 
                         Mono<Void> updateMachine = template.update(Machine.class)
                                 .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
-                                .apply(Update.update("machine_status", dto.getMachineStatus()))
+                                .apply(Update.update("machine_status", dto.getMachineStatus())
+                                        .set("check_status", record.getChecklistStatus()))
                                 .then();
 
                         return commonService.save(record, ChecklistRecord.class)
@@ -264,8 +269,8 @@ public class ChecklistService {
                                         Criteria criteria = Criteria
                                                 .where("created_by").is(memberId)
                                                 .or("machine_code").in(machineCodes)
-                                                .or("supervisor").is(memberId)   // ← Long
-                                                .or("manager").is(memberId);     // ← Long
+                                                .or("supervisor").is(memberId)
+                                                .or("manager").is(memberId);
 
                                         if (StringUtils.hasText(keyword)) {
                                             criteria = criteria.and(
@@ -373,13 +378,12 @@ public class ChecklistService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
-                    Long   memberId    = principal.memberId();
-                    String memberIdStr = String.valueOf(memberId);
-                    String status      = dto.getChecklistStatus();
-                    Instant now        = Instant.now();
+                    Long    memberId = principal.memberId();
+                    String  status   = dto.getChecklistStatus();
+                    Instant now      = Instant.now();
 
                     log.info("validateDataUpdate — memberId: {}, status: {}, supervisor: {}, manager: {}",
-                            memberIdStr, status, dto.getSupervisor(), dto.getManager());
+                            memberId, status, dto.getSupervisor(), dto.getManager());
 
                     if ("PENDING SUPERVISOR".equals(status)) {
                         if (!memberId.equals(dto.getSupervisor())) {
@@ -465,12 +469,12 @@ public class ChecklistService {
 
     // ─── KPI ──────────────────────────────────────────────────────────────────
 
-    private Mono<Void> updateKpi(String userId) {
+    private Mono<Void> updateKpi(Long memberId) {
         LocalDate now = LocalDate.now();
         String year  = String.valueOf(now.getYear());
         String month = String.format("%02d", now.getMonthValue());
-        log.info("Updating KPI for user: {}, year: {}, month: {}", userId, year, month);
-        return kpiService.updateOrCreateKpi(userId, year, month);
+        log.info("Updating KPI for memberId: {}, year: {}, month: {}", memberId, year, month);
+        return kpiService.updateOrCreateKpi(memberId, year, month);
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────

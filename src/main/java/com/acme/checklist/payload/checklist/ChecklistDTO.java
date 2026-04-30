@@ -23,6 +23,7 @@ public class ChecklistDTO {
     private String image;
     private String userId;
     private String userName;
+    private Long memberId;
     private Long supervisor;
     private Instant dateSupervisorChecked;
     private Long manager;
