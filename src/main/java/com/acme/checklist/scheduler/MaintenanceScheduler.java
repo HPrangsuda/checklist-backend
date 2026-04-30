@@ -36,8 +36,7 @@ public class MaintenanceScheduler {
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
-    @Scheduled(cron = "0 7 14 * * *", zone = "Asia/Bangkok")
-    public void createNextYearMaintenanceRecords() {
+    @Scheduled(cron = "0 0 1 25 12 *", zone = "Asia/Bangkok")public void createNextYearMaintenanceRecords() {
         int currentYear = LocalDate.now().getYear();
         int nextYear = currentYear + 1;
 
