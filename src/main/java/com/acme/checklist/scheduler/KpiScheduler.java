@@ -25,7 +25,7 @@ public class KpiScheduler {
     private final R2dbcEntityTemplate template;
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
-    @Scheduled(cron = "0 30 0 1 * ?")
+    @Scheduled(cron = "0 35 3 2 * ?")
     public void createKpiRecords() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
