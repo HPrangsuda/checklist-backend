@@ -35,7 +35,7 @@ public class CalibrationScheduler {
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
-    @Scheduled(cron = "0 0 0 20 12 *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 1 25 12 *", zone = "Asia/Bangkok")
     public void createNextYearCalibrationRecords() {
         int currentYear = LocalDate.now().getYear();
         int nextYear = currentYear + 1;
@@ -129,7 +129,7 @@ public class CalibrationScheduler {
         return value != null ? spec.bind(index, value) : spec.bindNull(index, type);
     }
 
-    @Scheduled(cron = "0 0 9 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Bangkok")
     public void sendDailyToResponsibleAndSupervisor() {
         fetchDueCalibrations()
                 .collectList()

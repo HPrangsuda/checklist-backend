@@ -132,7 +132,7 @@ public class MaintenanceScheduler {
         return value != null ? spec.bind(index, value) : spec.bindNull(index, type);
     }
 
-    @Scheduled(cron = "0 10 9 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Bangkok")
     public void sendDailyToResponsibleAndSupervisor() {
         fetchDueMaintenances()
                 .collectList()
