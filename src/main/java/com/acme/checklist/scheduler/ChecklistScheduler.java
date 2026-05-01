@@ -76,7 +76,7 @@ public class ChecklistScheduler {
                 .subscribe();
     }
 
-    @Scheduled(cron = "0 20 1 * * SAT", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now();
         LocalDate monday = today.with(DayOfWeek.MONDAY);
