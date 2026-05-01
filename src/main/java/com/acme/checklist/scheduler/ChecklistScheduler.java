@@ -76,7 +76,7 @@ public class ChecklistScheduler {
                 .subscribe();
     }
 
-    @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 20 1 * * SAT", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now();
         LocalDate monday = today.with(DayOfWeek.MONDAY);
@@ -157,43 +157,40 @@ public class ChecklistScheduler {
     }
 
     private Mono<Void> saveDefaultRecord(Machine machine) {
+        if (machine.getResponsiblePersonId() == null) {
+            log.warn("[CHECKLIST-AUTO] Skip machine={} — responsiblePersonId is null", machine.getMachineCode());
+            return Mono.empty();
+        }
+
         String checklistStatus = machine.getSupervisorId() != null
                 ? "PENDING SUPERVISOR"
                 : "PENDING MANAGER";
 
-        return template.selectOne(
-                        Query.query(Criteria.where("id").is(machine.getResponsiblePersonId())),
-                        Member.class
-                )
-                .flatMap(member -> {
-                    ChecklistRecord record = ChecklistRecord.builder()
-                            .checkType("GENERAL")
-                            .recheck(true)
-                            .machineCode(machine.getMachineCode())
-                            .machineName(machine.getMachineName())
-                            .machineStatus(machine.getMachineStatus())
-                            .machineChecklist("")
-                            .machineNote("Automatic recording")
-                            .userId(member.getEmployeeId())
-                            .userName(machine.getResponsiblePersonName())
-                            .supervisor(machine.getSupervisorId())
-                            .dateSupervisorChecked(null)
-                            .manager(machine.getManagerId())
-                            .dateManagerChecked(null)
-                            .checklistStatus(checklistStatus)
-                            .reasonNotChecked("NO ACTION TAKEN")
-                            .build();
+        ChecklistRecord record = ChecklistRecord.builder()
+                .checkType("GENERAL")
+                .recheck(true)
+                .machineCode(machine.getMachineCode())
+                .machineName(machine.getMachineName())
+                .machineStatus(machine.getMachineStatus())
+                .machineChecklist("")
+                .machineNote("Automatic recording")
+                .userId(String.valueOf(machine.getResponsiblePersonId()))
+                .userName(machine.getResponsiblePersonName())
+                .supervisor(machine.getSupervisorId())
+                .dateSupervisorChecked(null)
+                .manager(machine.getManagerId())
+                .dateManagerChecked(null)
+                .checklistStatus(checklistStatus)
+                .reasonNotChecked("NO ACTION TAKEN")
+                .build();
+        record.setCreatedBy(machine.getResponsiblePersonId());
 
-                    record.setCreatedBy(machine.getResponsiblePersonId());
-
-                    return template.insert(record)
-                            .flatMap(saved -> template.update(Machine.class)
-                                    .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
-                                    .apply(Update.update("check_status", checklistStatus)
-                                            .set("machine_status", machine.getMachineStatus()))
-                                    .then()
-                            );
-                })
+        return template.insert(record)
+                .flatMap(saved -> template.update(Machine.class)
+                        .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
+                        .apply(Update.update("check_status", checklistStatus)
+                                .set("machine_status", machine.getMachineStatus()))
+                        .then())
                 .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] ✓ Auto-saved machineCode={}", machine.getMachineCode()))
                 .doOnError(e -> log.error("[CHECKLIST-AUTO] ✗ Failed machineCode={}: {}", machine.getMachineCode(), e.getMessage()))
                 .onErrorResume(e -> Mono.empty());
