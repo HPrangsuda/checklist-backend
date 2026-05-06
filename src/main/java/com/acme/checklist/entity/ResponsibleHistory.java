@@ -15,7 +15,7 @@ import java.time.LocalDate;
 @Table("responsible_history")
 public class ResponsibleHistory {
     private String machineCode;
-    private String responsiblePersonId;
+    private Long responsiblePersonId;
     private LocalDate effectiveFrom;
     private LocalDate effectiveTo;
 }

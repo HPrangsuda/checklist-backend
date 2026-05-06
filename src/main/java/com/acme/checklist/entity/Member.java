@@ -46,6 +46,12 @@ public class Member extends DataAudit {
     @Column("role_type")
     private RoleType roleType;
 
+    @Column("supervisor")
+    private Long supervisor;
+
+    @Column("manager")
+    private Long manager;
+
     @Column("languages")
     private String languages;
 

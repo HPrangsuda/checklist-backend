@@ -55,6 +55,8 @@ public class MachineService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
 
+    private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
+
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> create(MachineDTO dto) {
@@ -81,6 +83,17 @@ public class MachineService {
             tasks.add(createCalibrationRecord(machine, dto.getCalibration()));
         if (dto.getMaintenanceList() != null && !dto.getMaintenanceList().isEmpty())
             tasks.add(createMaintenanceRecords(machine, dto.getMaintenanceList()).then());
+
+        if (machine.getResponsiblePersonId() != null) {
+            ResponsibleHistory history = ResponsibleHistory.builder()
+                    .machineCode(machine.getMachineCode())
+                    .responsiblePersonId(machine.getResponsiblePersonId())
+                    .effectiveFrom(LocalDate.now())
+                    .effectiveTo(null)
+                    .build();
+            tasks.add(template.insert(history).then());
+        }
+
         return Mono.when(tasks);
     }
 
@@ -125,8 +138,46 @@ public class MachineService {
 
     public Mono<ApiResponse<Void>> update(MachineDTO machineDTO) {
         return validateData(machineDTO, true)
-                .flatMap(v -> commonService.update(machineDTO.getId(), buildUpdateFromDTO(v), Machine.class)
-                        .then(Mono.just(ApiResponse.success("MS003"))))
+                .flatMap(v -> template.selectOne(
+                                Query.query(Criteria.where("id").is(v.getId())),
+                                Machine.class)
+                        .flatMap(existing -> {
+                            Long oldPersonId = existing.getResponsiblePersonId();
+                            Long newPersonId = v.getResponsiblePersonId() != null
+                                    ? Long.valueOf(v.getResponsiblePersonId()) : null;
+                            boolean personChanged = newPersonId != null && !newPersonId.equals(oldPersonId);
+
+                            Mono<Void> updateMachine = commonService
+                                    .update(machineDTO.getId(), buildUpdateFromDTO(v), Machine.class).then();
+
+                            if (!personChanged) {
+                                return updateMachine.then(Mono.just(ApiResponse.<Void>success("MS003")));
+                            }
+
+                            LocalDate today     = LocalDate.now();
+                            LocalDate yesterday = today.minusDays(1);
+
+                            Mono<Void> closeOld = template.update(
+                                    Query.query(Criteria.where("machine_code").is(existing.getMachineCode())
+                                            .and("effective_to").isNull()),
+                                    Update.update("effective_to", yesterday),
+                                    ResponsibleHistory.class).then();
+
+                            ResponsibleHistory newHistory = ResponsibleHistory.builder()
+                                    .machineCode(existing.getMachineCode())
+                                    .responsiblePersonId(newPersonId)
+                                    .effectiveFrom(today)
+                                    .effectiveTo(null)
+                                    .build();
+                            Mono<Void> insertNew = template.insert(newHistory).then();
+
+                            return updateMachine
+                                    .then(closeOld)
+                                    .then(insertNew)
+                                    .then(recalculateKpiForPerson(oldPersonId))
+                                    .then(recalculateKpiForPerson(newPersonId))
+                                    .then(Mono.just(ApiResponse.<Void>success("MS003")));
+                        }))
                 .onErrorResume(e -> {
                     log.error("Failed to update the machine: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS004", e.getMessage()));
@@ -166,7 +217,7 @@ public class MachineService {
 
                     ResponsibleHistory newHistory = ResponsibleHistory.builder()
                             .machineCode(machineCode)
-                            .responsiblePersonId(String.valueOf(newPersonId))
+                            .responsiblePersonId(newPersonId)
                             .effectiveFrom(today)
                             .build();
                     Mono<Void> insertNew = template.insert(newHistory).then();
@@ -192,12 +243,12 @@ public class MachineService {
     private Mono<Void> recalculateKpiForPerson(Long memberId) {
         if (memberId == null) return Mono.empty();
 
-        LocalDate today    = LocalDate.now();
-        YearMonth ym       = YearMonth.from(today);
-        String year        = String.valueOf(today.getYear());
-        String month       = String.format("%02d", today.getMonthValue());
-        LocalDate firstDay = ym.atDay(1);
-        LocalDate lastDay  = ym.atEndOfMonth();
+        LocalDate today      = LocalDate.now();
+        YearMonth ym         = YearMonth.from(today);
+        String year          = String.valueOf(today.getYear());
+        String month         = String.format("%02d", today.getMonthValue());
+        LocalDate firstDay   = ym.atDay(1);
+        LocalDate lastDay    = ym.atEndOfMonth();
         LocalDate lastFriday = getLastFridayOfMonth(ym);
 
         Criteria historyCriteria = Criteria
@@ -216,46 +267,47 @@ public class MachineService {
                                 clampEnd(h.getEffectiveTo(), lastFriday)))
                         .sum());
 
-        return newCheckAllMono.flatMap(newCheckAll ->
-                template.selectOne(
-                                Query.query(Criteria.where("member_id").is(memberId)
-                                        .and("years").is(year)
-                                        .and("months").is(month)),
-                                Kpi.class)
-                        .flatMap(kpi -> {
-                            if (newCheckAll == 0) return Mono.empty();
-                            kpi.setCheckAll(newCheckAll);
-                            return template.update(kpi).then();
-                        })
-                        .switchIfEmpty(Mono.defer(() -> {
-                            if (newCheckAll == 0) return Mono.empty();
-                            return template.selectOne(
-                                            Query.query(Criteria.where("id").is(memberId)),
-                                            Member.class)
-                                    .flatMap(member -> template.select(
-                                                    Query.query(Criteria.where("responsible_person_id").is(memberId)
-                                                            .and("machine_status").not("CANCELLED")),
-                                                    Machine.class)
-                                            .next()
-                                            .flatMap(m -> {
-                                                Kpi newKpi = Kpi.builder()
-                                                        .memberId(memberId)
-                                                        .employeeName(member.getFirstName() + " " + member.getLastName())
-                                                        .years(year)
-                                                        .months(month)
-                                                        .checkAll(newCheckAll)
-                                                        .checked(0L)
-                                                        .managerId(m.getManagerId())
-                                                        .supervisorId(m.getSupervisorId())
-                                                        .build();
-                                                return template.insert(newKpi).then();
-                                            }));
-                        }))
-                        .doOnSuccess(v -> log.info("Recalculated KPI for memberId={} → checkAll={}", memberId, newCheckAll))
-                        .onErrorResume(e -> {
-                            log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
-                            return Mono.empty();
-                        }));
+        Mono<Member> memberMono = template.selectOne(
+                Query.query(Criteria.where("id").is(memberId)),
+                Member.class);
+
+        return Mono.zip(newCheckAllMono, memberMono)
+                .flatMap(tuple -> {
+                    long newCheckAll = tuple.getT1();
+                    Member member    = tuple.getT2();
+
+                    return template.selectOne(
+                                    Query.query(Criteria.where("member_id").is(memberId)
+                                            .and("years").is(year)
+                                            .and("months").is(month)),
+                                    Kpi.class)
+                            .flatMap(kpi -> {
+                                if (newCheckAll == 0) return Mono.empty();
+                                kpi.setCheckAll(newCheckAll);
+                                kpi.setManagerId(member.getManager());
+                                kpi.setSupervisorId(member.getSupervisor());
+                                return template.update(kpi).then();
+                            })
+                            .switchIfEmpty(Mono.defer(() -> {
+                                if (newCheckAll == 0) return Mono.empty();
+                                Kpi newKpi = Kpi.builder()
+                                        .memberId(memberId)
+                                        .employeeName(member.getFirstName() + " " + member.getLastName())
+                                        .years(year)
+                                        .months(month)
+                                        .checkAll(newCheckAll)
+                                        .checked(0L)
+                                        .managerId(member.getManager())
+                                        .supervisorId(member.getSupervisor())
+                                        .build();
+                                return template.insert(newKpi).then();
+                            }));
+                })
+                .doOnSuccess(v -> log.info("Recalculated KPI for memberId={}", memberId))
+                .onErrorResume(e -> {
+                    log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
+                    return Mono.empty();
+                });
     }
 
     // ─── GET WITH ROLE ────────────────────────────────────────────────────────
@@ -585,8 +637,12 @@ public class MachineService {
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Mono<Boolean> isMachineActive(String machineCode) {
-        return template.selectOne(Query.query(Criteria.where("machine_code").is(machineCode)), Machine.class)
-                .map(m -> !"CANCELLED".equals(m.getMachineStatus()) && !"MONTHLY".equals(m.getResetPeriod()))
+        return template.select(
+                        Query.query(Criteria.where("machine_code").is(machineCode)
+                                .and("machine_status").in(ACTIVE_STATUSES)),
+                        Machine.class)
+                .next()
+                .map(m -> !"MONTHLY".equals(m.getResetPeriod()))
                 .defaultIfEmpty(false);
     }
 

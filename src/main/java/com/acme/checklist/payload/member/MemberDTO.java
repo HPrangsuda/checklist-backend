@@ -16,5 +16,8 @@ public class MemberDTO {
     private String userName;
     private String password;
     private RoleType roleType;
+    private Long supervisor;
+    private Long manager;
     private String languages;
+    private String status;
 }
