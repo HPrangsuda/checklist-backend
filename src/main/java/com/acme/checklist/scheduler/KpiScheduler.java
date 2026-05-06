@@ -29,7 +29,7 @@ public class KpiScheduler {
     private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
-    @Scheduled(cron = "0 45 14 6 * ?")
+    @Scheduled(cron = "0 3 17 6 * ?")
     public void createKpiRecords() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
@@ -56,9 +56,10 @@ public class KpiScheduler {
                                     .sum();
 
                             return template.selectOne(
-                                            Query.query(Criteria.where("id").is(memberId)),
+                                            Query.query(Criteria.where("id").is(memberId)
+                                                    .and("status").not("INACTIVE")),
                                             Member.class)
-                                    .doOnSuccess(m -> { if (m == null) log.warn("Member NOT found for memberId={}", memberId); })
+                                    .doOnSuccess(m -> { if (m == null) log.warn("Member NOT found or INACTIVE for memberId={}", memberId); })
                                     .flatMap(member -> insertKpiIfAbsent(
                                             memberId,
                                             member.getFirstName() + " " + member.getLastName(),
@@ -77,7 +78,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 50 14 * * *")
+    @Scheduled(cron = "0 5 17 * * *")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
@@ -117,7 +118,8 @@ public class KpiScheduler {
                             ChecklistRecord.class);
 
                     Mono<Member> memberMono = template.selectOne(
-                            Query.query(Criteria.where("id").is(memberId)),
+                            Query.query(Criteria.where("id").is(memberId)
+                                    .and("status").not("INACTIVE")),
                             Member.class);
 
                     return Mono.zip(checkAllMono, checkedMono, memberMono)
