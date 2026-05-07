@@ -634,6 +634,20 @@ public class MachineService {
         return Update.from(p);
     }
 
+    public Flux<Machine> getAll() {
+        return template.select(
+                Query.empty().sort(Sort.by(Sort.Direction.ASC, "id")),
+                Machine.class
+        );
+    }
+
+    public Mono<Machine> getMachineById(Long id) {
+        return template.selectOne(
+                Query.query(Criteria.where("id").is(id)),
+                Machine.class
+        );
+    }
+
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Mono<Boolean> isMachineActive(String machineCode) {

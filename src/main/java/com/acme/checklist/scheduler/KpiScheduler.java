@@ -29,7 +29,7 @@ public class KpiScheduler {
     private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
-    @Scheduled(cron = "0 3 17 6 * ?")
+    @Scheduled(cron = "0 0 0 1 * ?")
     public void createKpiRecords() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
@@ -78,7 +78,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 5 17 * * *")
+    @Scheduled(cron = "0 5 0 * * *")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());

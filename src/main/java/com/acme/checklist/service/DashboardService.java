@@ -22,7 +22,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DashboardService {
     private final R2dbcEntityTemplate template;
-    private final CommonService commonService;
 
     private Mono<MemberPrincipal> getPrincipal() {
         return ReactiveSecurityContextHolder.getContext()
@@ -62,7 +61,7 @@ public class DashboardService {
             String sql = """
                 SELECT
                     COUNT(DISTINCT m.id) AS total,
-                    COUNT(DISTINCT CASE WHEN m.machine_status = 'READY TO USE' THEN m.id END) AS total_available,
+                    COUNT(DISTINCT CASE WHEN m.machine_status = 'OPERATIONAL' THEN m.id END) AS total_available,
                     (SELECT COUNT(DISTINCT cr.id)
                      FROM calibration_record cr
                      JOIN machine mc ON cr.machine_code = mc.machine_code
@@ -301,10 +300,12 @@ public class DashboardService {
 
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object value = row.get(columnName);
-        if (value == null) return 0L;
-        if (value instanceof Long l) return l;
-        if (value instanceof Number n) return n.longValue();
-        return 0L;
+        return switch (value) {
+            case null -> 0L;
+            case Long l -> l;
+            case Number n -> n.longValue();
+            default -> 0L;
+        };
     }
 
     private String getEngMonthAbbreviation(int month) {

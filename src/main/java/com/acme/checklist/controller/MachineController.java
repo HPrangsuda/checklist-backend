@@ -9,6 +9,7 @@ import com.acme.checklist.payload.machine.MachineListDTO;
 import com.acme.checklist.payload.machine.MachineResponseDTO;
 import com.acme.checklist.payload.machine.MachineSummaryDTO;
 import com.acme.checklist.payload.machine.ChangeResponsiblePersonRequest;
+import com.acme.checklist.service.LarkService;
 import com.acme.checklist.service.MachineService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
 
 @Slf4j
@@ -25,6 +27,7 @@ import java.util.List;
 public class MachineController {
 
     private final MachineService machineService;
+    private final LarkService larkService;
 
     @PostMapping("/create")
     public Mono<ApiResponse<Void>> create(@RequestBody MachineDTO dto) {
@@ -78,5 +81,27 @@ public class MachineController {
             @PathVariable String machineCode,
             @RequestBody ChangeResponsiblePersonRequest req) {
         return machineService.changeResponsiblePerson(machineCode, Long.valueOf(req.newPersonId()));
+    }
+
+    @PostMapping("/{id}/sync-to-lark")
+    public Mono<ApiResponse<Void>> syncToLark(@PathVariable Long id) {
+        return machineService.getMachineById(id)
+                .flatMap(larkService::upsertMachineRecord)
+                .then(Mono.just(ApiResponse.<Void>success("MS001")));
+    }
+
+    @PostMapping("/sync-all-to-lark")
+    public Mono<ApiResponse<Void>> syncAllToLark() {
+        return machineService.getAll()
+                .delayElements(Duration.ofMillis(200))
+                .flatMap(machine -> larkService.upsertMachineRecord(machine)
+                        .onErrorResume(e -> {
+                            log.error("Skip machine {} ({}): {}",
+                                    machine.getMachineCode(),
+                                    machine.getId(),
+                                    e.getMessage());
+                            return Mono.empty();
+                        }))
+                .then(Mono.just(ApiResponse.<Void>success("MS001")));
     }
 }
