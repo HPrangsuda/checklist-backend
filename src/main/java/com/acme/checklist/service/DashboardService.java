@@ -171,7 +171,6 @@ public class DashboardService {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
 
-            // memberId เป็น $2 เพราะ $1 คือ year
             String joinWhere = f.clause() != null
                     ? "JOIN machine m ON mr.machine_code = m.machine_code AND "
                     + f.clause().replace("$1", "$2")
@@ -229,7 +228,6 @@ public class DashboardService {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
 
-            // memberId เป็น $2 เพราะ $1 คือ year
             String joinWhere = f.clause() != null
                     ? "JOIN machine m ON cr.machine_code = m.machine_code AND "
                     + f.clause().replace("$1", "$2")
@@ -285,6 +283,7 @@ public class DashboardService {
     private SoonDTO mapToSoonDTO(io.r2dbc.spi.Row row) {
         try {
             return SoonDTO.builder()
+                    .id(row.get("id", Long.class))
                     .machineCode(row.get("machine_code", String.class))
                     .machineName(row.get("machine_name", String.class))
                     .type(row.get("type", String.class))

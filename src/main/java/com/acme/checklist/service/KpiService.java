@@ -7,6 +7,7 @@ import com.acme.checklist.entity.Member;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
+import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.checklist.ChecklistListDTO;
 import com.acme.checklist.payload.kpi.KpiDTO;
 import com.acme.checklist.payload.kpi.KpiResponseDTO;
@@ -19,6 +20,8 @@ import org.springframework.data.relational.core.query.Query;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.DayOfWeek;
@@ -26,7 +29,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.List;
 
 @Slf4j
 @Service
@@ -128,7 +130,7 @@ public class KpiService {
 
     // ─── GET LIST ─────────────────────────────────────────────────────────────
 
-    public Mono<List<Kpi>> getKpiByYearAndMonth(String year, String month) {
+    public Mono<PagedResponse<KpiResponseDTO>> getKpiByYearAndMonth(String year, String month, String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
@@ -138,6 +140,10 @@ public class KpiService {
                     Criteria base = Criteria
                             .where("years").is(year)
                             .and("months").is(month);
+
+                    if (StringUtils.hasText(keyword)) {
+                        base = base.and("employee_name").like("%" + keyword + "%").ignoreCase(true);
+                    }
 
                     Criteria criteria = switch (role) {
                         case "MEMBER" ->
@@ -155,9 +161,14 @@ public class KpiService {
                         default -> base;
                     };
 
-                    return template.select(Query.query(criteria), Kpi.class)
-                            .distinct(Kpi::getMemberId)
-                            .collectList();
+                    Query query = Query.query(criteria)
+                            .with(commonService.pageable(index, size, "employee_name"));
+
+                    return commonService.executePagedQuery(
+                            index, size, query, criteria,
+                            Kpi.class,
+                            records -> Flux.fromIterable(records).map(KpiResponseDTO::from)
+                    );
                 })
                 .doOnError(e -> log.error("Failed to fetch KPI: {}", e.getMessage()));
     }

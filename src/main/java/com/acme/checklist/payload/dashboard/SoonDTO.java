@@ -12,7 +12,7 @@ import java.time.LocalDate;
 @NoArgsConstructor
 @AllArgsConstructor
 public class SoonDTO {
-    private String id;
+    private Long id;
     private String machineCode;
     private String machineName;
     private String type;
