@@ -709,7 +709,24 @@ public class MachineService {
     }
 
     private Flux<MachineListDTO> convertMachineListDTOs(List<Machine> machines) {
-        return Flux.fromIterable(machines).map(MachineListDTO::from);
+        // ดึง department codes ที่ unique ออกมาก่อน
+        List<String> codes = machines.stream()
+                .map(Machine::getDepartment)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        // query ครั้งเดียวได้เลย
+        return template.select(
+                        Query.query(Criteria.where("department_code").in(codes)),
+                        Department.class)
+                .collectMap(Department::getDepartmentCode, Department::getDepartment)
+                .flatMapMany(deptMap -> Flux.fromIterable(machines)
+                        .map(machine -> {
+                            String deptName = deptMap.getOrDefault(machine.getDepartment(), machine.getDepartment());
+                            return MachineListDTO.from(machine, deptName);
+                        })
+                );
     }
 
     private Mono<String> generateQRCodeReactive(String qrContent, String machineCode) {
