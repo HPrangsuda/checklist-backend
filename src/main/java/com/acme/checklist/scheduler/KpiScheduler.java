@@ -78,7 +78,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 5 0 * * *")
+    @Scheduled(cron = "0 0 14 * * *")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
@@ -107,15 +107,33 @@ public class KpiScheduler {
                                             clampEnd(h.getEffectiveTo(), lastDay)))
                                     .sum());
 
-                    Mono<Long> checkedMono = template.count(
-                            Query.query(Criteria.where("created_by").is(memberId)
-                                    .and("recheck").is(true)
-                                    .and("check_type").is("GENERAL")
-                                    .and("created_at").greaterThanOrEquals(
-                                            start.atStartOfDay().toInstant(ZoneOffset.UTC))
-                                    .and("created_at").lessThanOrEquals(
-                                            endDate.atTime(23, 59, 59).toInstant(ZoneOffset.UTC))),
-                            ChecklistRecord.class);
+                    Mono<Long> checkedMono = template.getDatabaseClient()
+                            .sql("""
+                                SELECT COUNT(*) FROM checklist_record cr
+                                JOIN machine m ON cr.machine_code = m.machine_code
+                                WHERE cr.created_by = :memberId
+                                  AND cr.recheck = true
+                                  AND cr.check_type = 'GENERAL'
+                                  AND cr.created_at >= :start
+                                  AND cr.created_at <= :end
+                                  AND m.responsible_person_id = cr.created_by
+                                  AND (
+                                      cr.machine_note != 'Automatic recording'
+                                      OR (
+                                          cr.machine_note = 'Automatic recording'
+                                          AND (
+                                              cr.reason_not_checked IS NULL
+                                              OR cr.reason_not_checked NOT IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
+                                          )
+                                      )
+                                  )
+                                """)
+                            .bind("memberId", memberId)
+                            .bind("start", start.atStartOfDay().toInstant(ZoneOffset.UTC))
+                            .bind("end", endDate.atTime(23, 59, 59).toInstant(ZoneOffset.UTC))
+                            .map((row, meta) -> row.get(0, Long.class))
+                            .one()
+                            .defaultIfEmpty(0L);
 
                     Mono<Member> memberMono = template.selectOne(
                             Query.query(Criteria.where("id").is(memberId)
