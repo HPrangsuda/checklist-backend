@@ -2,8 +2,6 @@ package com.acme.checklist.scheduler;
 
 import com.acme.checklist.entity.ChecklistRecord;
 import com.acme.checklist.entity.Machine;
-import com.acme.checklist.entity.Member;
-import com.acme.checklist.service.CommonService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -12,13 +10,9 @@ import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.DayOfWeek;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.time.*;
 
 @Slf4j
 @Component
@@ -28,36 +22,20 @@ public class ChecklistScheduler {
 
     @Scheduled(cron = "0 1 0 * * MON")
     public void updateOverdueChecklistsWeek() {
-        Query query = Query.query(
-                Criteria.where("checklist_status").in("PENDING SUPERVISOR", "PENDING MANAGER")
-                        .and("reset_period").is("WEEKLY")
-        );
-        template.select(query, ChecklistRecord.class)
-                .flatMap(record -> {
-                    Update update = Update.update("checklist_status", record.getChecklistStatus() + "-OVERDUE");
-                    return template.update(
-                            Query.query(Criteria.where("id").is(record.getId())),
-                            update,
-                            ChecklistRecord.class
-                    ).then(
-                            template.update(
-                                    Query.query(Criteria.where("machine_code").is(record.getMachineCode())),
-                                    Update.update("check_status", "PENDING"),
-                                    Machine.class
-                            )
-                    );
-                })
-                .doOnError(e -> log.error("Failed to update overdue weekly checklists: {}", e.getMessage()))
-                .subscribe();
+        buildUpdateOverdue("WEEKLY").block();
     }
 
     @Scheduled(cron = "0 0 0 1 * *")
     public void updateOverdueChecklistsMonth() {
+        buildUpdateOverdue("MONTHLY").block();
+    }
+
+    private Mono<Void> buildUpdateOverdue(String period) {
         Query query = Query.query(
                 Criteria.where("checklist_status").in("PENDING SUPERVISOR", "PENDING MANAGER")
-                        .and("reset_period").is("MONTHLY")
+                        .and("reset_period").is(period)
         );
-        template.select(query, ChecklistRecord.class)
+        return template.select(query, ChecklistRecord.class)
                 .flatMap(record -> {
                     Update update = Update.update("checklist_status", record.getChecklistStatus() + "-OVERDUE");
                     return template.update(
@@ -72,18 +50,19 @@ public class ChecklistScheduler {
                             )
                     );
                 })
-                .doOnError(e -> log.error("Failed to update overdue monthly checklists: {}", e.getMessage()))
-                .subscribe();
+                .onErrorContinue((e, obj) -> log.error("[OVERDUE-{}] Skipping record: {}", period, e.getMessage()))
+                .then();
     }
 
     @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
-        LocalDate today  = LocalDate.now();
+        ZoneId zone = ZoneId.of("Asia/Bangkok");
+        LocalDate today  = LocalDate.now(zone);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
         LocalDate friday = today.with(DayOfWeek.FRIDAY);
 
-        Instant startOfWeek = monday.atStartOfDay(ZoneOffset.UTC).toInstant();
-        Instant endOfWeek   = friday.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
+        Instant startOfWeek = monday.atStartOfDay(zone).toInstant();
+        Instant endOfWeek   = friday.atTime(23, 59, 59).atZone(zone).toInstant();
 
         log.info("[CHECKLIST-AUTO] Weekly run — week {} ~ {}", monday, friday);
 
@@ -103,20 +82,22 @@ public class ChecklistScheduler {
                             return saveDefaultRecord(machine);
                         })
                 )
+                .onErrorContinue((e, obj) -> log.error("[CHECKLIST-AUTO] Weekly error: {}", e.getMessage()))
                 .doOnComplete(() -> log.info("[CHECKLIST-AUTO] Weekly run completed"))
-                .doOnError(e -> log.error("[CHECKLIST-AUTO] Weekly run error: {}", e.getMessage(), e))
-                .onErrorResume(e -> Flux.empty())
-                .subscribe();
+                .then()
+                .block();
     }
 
     @Scheduled(cron = "0 59 23 1 * *", zone = "Asia/Bangkok")
     public void autoSaveMonthlyChecklistRecords() {
-        LocalDate today                = LocalDate.now();
+        ZoneId zone = ZoneId.of("Asia/Bangkok");
+
+        LocalDate today                = LocalDate.now(zone);
         LocalDate firstDayOfPrevMonth  = today.minusMonths(1).withDayOfMonth(1);
         LocalDate lastDayOfPrevMonth   = today.minusMonths(1).withDayOfMonth(today.minusMonths(1).lengthOfMonth());
 
-        Instant startOfPrevMonth = firstDayOfPrevMonth.atStartOfDay(ZoneOffset.UTC).toInstant();
-        Instant endOfPrevMonth   = lastDayOfPrevMonth.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
+        Instant startOfPrevMonth = firstDayOfPrevMonth.atStartOfDay(zone).toInstant();
+        Instant endOfPrevMonth   = lastDayOfPrevMonth.atTime(23, 59, 59).atZone(zone).toInstant();
 
         log.info("[CHECKLIST-AUTO] Monthly run — {} ~ {}", firstDayOfPrevMonth, lastDayOfPrevMonth);
 
@@ -136,10 +117,10 @@ public class ChecklistScheduler {
                             return saveDefaultRecord(machine);
                         })
                 )
+                .onErrorContinue((e, obj) -> log.error("[CHECKLIST-AUTO] Monthly error: {}", e.getMessage()))
                 .doOnComplete(() -> log.info("[CHECKLIST-AUTO] Monthly run completed"))
-                .doOnError(e -> log.error("[CHECKLIST-AUTO] Monthly run error: {}", e.getMessage(), e))
-                .onErrorResume(e -> Flux.empty())
-                .subscribe();
+                .then()
+                .block();
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────

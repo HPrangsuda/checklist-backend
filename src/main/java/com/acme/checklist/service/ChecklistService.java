@@ -30,6 +30,7 @@ import reactor.core.publisher.Mono;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 
 @Slf4j
@@ -41,6 +42,7 @@ public class ChecklistService {
     private final ObjectMapper objectMapper;
     private final FileStorageService fileStorageService;
     private final KpiService kpiService;
+    private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
@@ -74,8 +76,9 @@ public class ChecklistService {
                         Machine.class)
                 .switchIfEmpty(Mono.error(new RuntimeException("Machine not found: " + dto.getMachineCode())))
                 .flatMap(machine -> {
-                    boolean isWeekend = LocalDate.now().getDayOfWeek() == DayOfWeek.SATURDAY
-                            || LocalDate.now().getDayOfWeek() == DayOfWeek.SUNDAY;
+                    LocalDate today = LocalDate.now(ZONE);
+                    boolean isWeekend = today.getDayOfWeek() == DayOfWeek.SATURDAY
+                            || today.getDayOfWeek() == DayOfWeek.SUNDAY;
                     boolean isResponsible = Objects.equals(dto.getMemberId(), machine.getResponsiblePersonId());
                     boolean isPending = "PENDING".equals(machine.getCheckStatus());
 
@@ -333,7 +336,7 @@ public class ChecklistService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
-                    int    targetYear = (year != null) ? year : LocalDate.now().getYear();
+                    int targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
                     String role       = principal.role();
                     Long   memberId   = principal.memberId();
 
@@ -470,7 +473,7 @@ public class ChecklistService {
     // ─── KPI ──────────────────────────────────────────────────────────────────
 
     private Mono<Void> updateKpi(Long memberId) {
-        LocalDate now = LocalDate.now();
+        LocalDate now = LocalDate.now(ZONE);
         String year  = String.valueOf(now.getYear());
         String month = String.format("%02d", now.getMonthValue());
         log.info("Updating KPI for memberId: {}, year: {}, month: {}", memberId, year, month);
