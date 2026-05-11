@@ -116,7 +116,6 @@ public class KpiScheduler {
                                   AND cr.check_type = 'GENERAL'
                                   AND cr.created_at >= :start
                                   AND cr.created_at <= :end
-                                  AND m.responsible_person_id = cr.created_by
                                   AND (
                                       cr.machine_note != 'Automatic recording'
                                       OR (
