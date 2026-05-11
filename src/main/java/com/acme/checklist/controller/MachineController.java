@@ -46,10 +46,12 @@ public class MachineController {
 
     @GetMapping("/get/page")
     public Mono<PagedResponse<MachineListDTO>> getByRole(
-            @RequestParam(required = false)        String keyword,
-            @RequestParam(defaultValue = "0")  int index,
-            @RequestParam(defaultValue = "10") int size) {
-        return machineService.getByRole(keyword, index, size);
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "0") int index,
+            @RequestParam(defaultValue = "10") int size,
+            @RequestParam(defaultValue = "false") boolean mine,
+            @RequestParam(required = false) String checkStatus) {
+        return machineService.getByRole(keyword, index, size, mine, checkStatus);
     }
 
     @GetMapping("/get/list")

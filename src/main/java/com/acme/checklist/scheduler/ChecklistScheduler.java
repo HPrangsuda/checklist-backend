@@ -68,7 +68,7 @@ public class ChecklistScheduler {
 
         template.select(
                         Query.query(
-                                Criteria.where("machine_status").in("IN USE", "NOT IN USE", "UNDER MAINTENANCE")
+                                Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
                                         .and("reset_period").is("WEEKLY")
                         ),
                         Machine.class
@@ -103,7 +103,7 @@ public class ChecklistScheduler {
 
         template.select(
                         Query.query(
-                                Criteria.where("machine_status").in("IN USE", "NOT IN USE", "UNDER MAINTENANCE")
+                                Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
                                         .and("reset_period").is("MONTHLY")
                         ),
                         Machine.class

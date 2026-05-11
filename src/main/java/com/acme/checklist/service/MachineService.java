@@ -312,31 +312,61 @@ public class MachineService {
 
     // ─── GET WITH ROLE ────────────────────────────────────────────────────────
 
-    public Mono<PagedResponse<MachineListDTO>> getByRole(String keyword, int index, int size) {
+    public Mono<PagedResponse<MachineListDTO>> getByRole(
+            String keyword, int index, int size, boolean mine, String checkStatus) {
+
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
-                            yield commonService.executePagedQuery(index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
+                    // non-ADMIN: กรอง machine_status
+                    Criteria baseCriteria = role.equals("ADMIN")
+                            ? Criteria.empty()
+                            : Criteria.where("machine_status")
+                            .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+
+                    // ทุก role: ถ้าส่ง checkStatus มา ให้ filter เพิ่ม
+                    if (StringUtils.hasText(checkStatus)) {
+                        baseCriteria = baseCriteria.equals(Criteria.empty())
+                                ? Criteria.where("check_status").is(checkStatus)
+                                : baseCriteria.and(Criteria.where("check_status").is(checkStatus));
+                    }
+
+                    if (role.equals("ADMIN")) {
+                        Criteria criteria = buildKeywordCriteria(keyword);
+                        if (StringUtils.hasText(checkStatus)) {
+                            criteria = criteria.equals(Criteria.empty())
+                                    ? Criteria.where("check_status").is(checkStatus)
+                                    : criteria.and(Criteria.where("check_status").is(checkStatus));
                         }
-                        case "MANAGER" -> fetchWithRoleAndKeyword(
+                        Query query = Query.query(criteria)
+                                .with(commonService.pageable(index, size, "created_at"));
+                        return commonService.executePagedQuery(
+                                index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
+                    }
+
+                    // mine=true → เฉพาะ responsible_person_id ตัวเอง (ทุก role)
+                    if (mine) {
+                        return fetchWithRoleAndKeyword(
+                                baseCriteria.and(
+                                        Criteria.where("responsible_person_id").is(memberId)),
+                                keyword, index, size);
+                    }
+
+                    Criteria roleCriteria = switch (role) {
+                        case "MANAGER" -> baseCriteria.and(
                                 Criteria.where("responsible_person_id").is(memberId)
-                                        .or("manager_id").is(memberId),
-                                keyword, index, size);
-                        case "SUPERVISOR" -> fetchWithRoleAndKeyword(
+                                        .or("manager_id").is(memberId));
+                        case "SUPERVISOR" -> baseCriteria.and(
                                 Criteria.where("responsible_person_id").is(memberId)
-                                        .or("supervisor_id").is(memberId),
-                                keyword, index, size);
-                        default -> fetchWithRoleAndKeyword(
-                                Criteria.where("responsible_person_id").is(memberId),
-                                keyword, index, size);
+                                        .or("supervisor_id").is(memberId));
+                        default -> baseCriteria.and(
+                                Criteria.where("responsible_person_id").is(memberId));
                     };
+
+                    return fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
                 });
     }
 
