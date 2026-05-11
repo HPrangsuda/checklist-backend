@@ -473,11 +473,8 @@ public class ChecklistService {
     // ─── KPI ──────────────────────────────────────────────────────────────────
 
     private Mono<Void> updateKpi(Long memberId) {
-        LocalDate now = LocalDate.now(ZONE);
-        String year  = String.valueOf(now.getYear());
-        String month = String.format("%02d", now.getMonthValue());
-        log.info("Updating KPI for memberId: {}, year: {}, month: {}", memberId, year, month);
-        return kpiService.updateOrCreateKpi(memberId, year, month);
+        log.info("Updating KPI for memberId: {}", memberId);
+        return kpiService.recalculateKpiForPerson(memberId);
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────

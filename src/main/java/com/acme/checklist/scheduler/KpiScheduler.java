@@ -26,7 +26,7 @@ public class KpiScheduler {
 
     private final R2dbcEntityTemplate template;
 
-    private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
+    private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
     @Scheduled(cron = "0 0 0 1 * ?")
@@ -78,7 +78,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 5 0 * * *")
+    @Scheduled(cron = "0 35 3 * * *")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());

@@ -41,9 +41,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.time.DayOfWeek;
 import java.time.LocalDate;
-import java.time.YearMonth;
 import java.util.*;
 import java.util.List;
 
@@ -54,6 +52,7 @@ public class MachineService {
 
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
+    private final KpiService kpiService; // ← inject KpiService แทน duplicate logic
 
     private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
 
@@ -174,8 +173,8 @@ public class MachineService {
                             return updateMachine
                                     .then(closeOld)
                                     .then(insertNew)
-                                    .then(recalculateKpiForPerson(oldPersonId))
-                                    .then(recalculateKpiForPerson(newPersonId))
+                                    .then(kpiService.recalculateKpiForPerson(oldPersonId)) // ← ใช้ KpiService
+                                    .then(kpiService.recalculateKpiForPerson(newPersonId)) // ← ใช้ KpiService
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
                 .onErrorResume(e -> {
@@ -228,8 +227,8 @@ public class MachineService {
                     return closeOld
                             .then(insertNew)
                             .then(updateMachine)
-                            .then(recalculateKpiForPerson(oldPersonId))
-                            .then(recalculateKpiForPerson(newPersonId))
+                            .then(kpiService.recalculateKpiForPerson(oldPersonId)) // ← ใช้ KpiService
+                            .then(kpiService.recalculateKpiForPerson(newPersonId)) // ← ใช้ KpiService
                             .doOnSuccess(v -> log.info("Changed responsible {} → {} for machine {}",
                                     oldPersonId, newPersonId, machineCode))
                             .then(Mono.just(ApiResponse.<Void>success("MS031")));
@@ -237,76 +236,6 @@ public class MachineService {
                 .onErrorResume(e -> {
                     log.error("Failed to change responsible person: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS032", e.getMessage()));
-                });
-    }
-
-    private Mono<Void> recalculateKpiForPerson(Long memberId) {
-        if (memberId == null) return Mono.empty();
-
-        LocalDate today      = LocalDate.now();
-        YearMonth ym         = YearMonth.from(today);
-        String year          = String.valueOf(today.getYear());
-        String month         = String.format("%02d", today.getMonthValue());
-        LocalDate firstDay   = ym.atDay(1);
-        LocalDate lastDay    = ym.atEndOfMonth();
-        LocalDate lastFriday = getLastFridayOfMonth(ym);
-
-        Criteria historyCriteria = Criteria
-                .where("responsible_person_id").is(memberId)
-                .and("effective_from").lessThanOrEquals(lastDay)
-                .and(Criteria.where("effective_to").isNull()
-                        .or(Criteria.where("effective_to").greaterThanOrEquals(firstDay)));
-
-        Mono<Long> newCheckAllMono = template.select(
-                        Query.query(historyCriteria), ResponsibleHistory.class)
-                .filterWhen(h -> isMachineActive(h.getMachineCode()))
-                .collectList()
-                .map(histories -> histories.stream()
-                        .mapToLong(h -> countFridaysInRange(
-                                clampStart(h.getEffectiveFrom(), firstDay),
-                                clampEnd(h.getEffectiveTo(), lastFriday)))
-                        .sum());
-
-        Mono<Member> memberMono = template.selectOne(
-                Query.query(Criteria.where("id").is(memberId)),
-                Member.class);
-
-        return Mono.zip(newCheckAllMono, memberMono)
-                .flatMap(tuple -> {
-                    long newCheckAll = tuple.getT1();
-                    Member member    = tuple.getT2();
-
-                    return template.selectOne(
-                                    Query.query(Criteria.where("member_id").is(memberId)
-                                            .and("years").is(year)
-                                            .and("months").is(month)),
-                                    Kpi.class)
-                            .flatMap(kpi -> {
-                                if (newCheckAll == 0) return Mono.empty();
-                                kpi.setCheckAll(newCheckAll);
-                                kpi.setManagerId(member.getManager());
-                                kpi.setSupervisorId(member.getSupervisor());
-                                return template.update(kpi).then();
-                            })
-                            .switchIfEmpty(Mono.defer(() -> {
-                                if (newCheckAll == 0) return Mono.empty();
-                                Kpi newKpi = Kpi.builder()
-                                        .memberId(memberId)
-                                        .employeeName(member.getFirstName() + " " + member.getLastName())
-                                        .years(year)
-                                        .months(month)
-                                        .checkAll(newCheckAll)
-                                        .checked(0L)
-                                        .managerId(member.getManager())
-                                        .supervisorId(member.getSupervisor())
-                                        .build();
-                                return template.insert(newKpi).then();
-                            }));
-                })
-                .doOnSuccess(v -> log.info("Recalculated KPI for memberId={}", memberId))
-                .onErrorResume(e -> {
-                    log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
-                    return Mono.empty();
                 });
     }
 
@@ -399,22 +328,22 @@ public class MachineService {
                     };
 
                     String sql = """
-                    SELECT
-                        d.department_code,
-                        d.department as department_name,
-                        COUNT(m.id) as total,
-                        COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
-                        COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
-                        COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
-                        COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
-                        COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
-                        COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
-                    FROM machine m
-                    JOIN department d ON m.department = d.department_code
-                    WHERE 1=1 %s
-                    GROUP BY d.department_code, d.department
-                    ORDER BY d.department
-                    """.formatted(roleFilter);
+                            SELECT
+                                d.department_code,
+                                d.department as department_name,
+                                COUNT(m.id) as total,
+                                COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
+                                COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
+                                COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
+                                COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
+                                COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
+                                COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
+                            FROM machine m
+                            JOIN department d ON m.department = d.department_code
+                            WHERE 1=1 %s
+                            GROUP BY d.department_code, d.department
+                            ORDER BY d.department
+                            """.formatted(roleFilter);
 
                     return template.getDatabaseClient()
                             .sql(sql)
@@ -584,7 +513,10 @@ public class MachineService {
                         int max = existing.stream()
                                 .map(Machine::getMachineCode)
                                 .filter(c -> c.length() > 9)
-                                .mapToInt(c -> { try { return Integer.parseInt(c.substring(9)); } catch (NumberFormatException e) { return 0; } })
+                                .mapToInt(c -> {
+                                    try { return Integer.parseInt(c.substring(9)); }
+                                    catch (NumberFormatException e) { return 0; }
+                                })
                                 .max().orElse(0);
                         String newCode = prefix + "-" + String.format("%04d", max + 1);
                         dto.setMachineCode(newCode);
@@ -667,53 +599,16 @@ public class MachineService {
     public Flux<Machine> getAll() {
         return template.select(
                 Query.empty().sort(Sort.by(Sort.Direction.ASC, "id")),
-                Machine.class
-        );
+                Machine.class);
     }
 
     public Mono<Machine> getMachineById(Long id) {
         return template.selectOne(
                 Query.query(Criteria.where("id").is(id)),
-                Machine.class
-        );
+                Machine.class);
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
-
-    private Mono<Boolean> isMachineActive(String machineCode) {
-        return template.select(
-                        Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").in(ACTIVE_STATUSES)),
-                        Machine.class)
-                .next()
-                .map(m -> !"MONTHLY".equals(m.getResetPeriod()))
-                .defaultIfEmpty(false);
-    }
-
-    private long countFridaysInRange(LocalDate from, LocalDate to) {
-        if (from.isAfter(to)) return 0;
-        long count = 0;
-        LocalDate d = from;
-        while (!d.isAfter(to)) {
-            if (d.getDayOfWeek() == DayOfWeek.FRIDAY) count++;
-            d = d.plusDays(1);
-        }
-        return count;
-    }
-
-    private LocalDate clampStart(LocalDate from, LocalDate monthStart) {
-        return from.isBefore(monthStart) ? monthStart : from;
-    }
-
-    private LocalDate clampEnd(LocalDate to, LocalDate cap) {
-        return (to == null || to.isAfter(cap)) ? cap : to;
-    }
-
-    private LocalDate getLastFridayOfMonth(YearMonth ym) {
-        LocalDate d = ym.atEndOfMonth();
-        while (d.getDayOfWeek() != DayOfWeek.FRIDAY) d = d.minusDays(1);
-        return d;
-    }
 
     private Mono<String> resolveMemberName(Long memberId) {
         if (memberId == null) return Mono.just("");
@@ -739,14 +634,12 @@ public class MachineService {
     }
 
     private Flux<MachineListDTO> convertMachineListDTOs(List<Machine> machines) {
-        // ดึง department codes ที่ unique ออกมาก่อน
         List<String> codes = machines.stream()
                 .map(Machine::getDepartment)
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
 
-        // query ครั้งเดียวได้เลย
         return template.select(
                         Query.query(Criteria.where("department_code").in(codes)),
                         Department.class)
@@ -755,8 +648,7 @@ public class MachineService {
                         .map(machine -> {
                             String deptName = deptMap.getOrDefault(machine.getDepartment(), machine.getDepartment());
                             return MachineListDTO.from(machine, deptName);
-                        })
-                );
+                        }));
     }
 
     private Mono<String> generateQRCodeReactive(String qrContent, String machineCode) {
@@ -780,7 +672,8 @@ public class MachineService {
                     if (bitMatrix.get(x, y)) g.fillRect(x, y, 1, 1);
             g.setFont(new Font("Arial", Font.BOLD, 12));
             FontMetrics fm = g.getFontMetrics();
-            g.drawString(machineCode, (qrSize - fm.stringWidth(machineCode)) / 2, qrSize + (textAreaHeight / 2) + (fm.getAscent() / 2));
+            g.drawString(machineCode, (qrSize - fm.stringWidth(machineCode)) / 2,
+                    qrSize + (textAreaHeight / 2) + (fm.getAscent() / 2));
             g.dispose();
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(img, "PNG", baos);
