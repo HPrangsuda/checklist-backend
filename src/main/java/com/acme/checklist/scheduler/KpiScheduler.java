@@ -78,7 +78,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 35 3 * * *")
+    @Scheduled(cron = "0 5 0 * * *")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now();
         String year  = String.valueOf(today.getYear());
