@@ -142,8 +142,7 @@ public class MachineService {
                                 Machine.class)
                         .flatMap(existing -> {
                             Long oldPersonId = existing.getResponsiblePersonId();
-                            Long newPersonId = v.getResponsiblePersonId() != null
-                                    ? Long.valueOf(v.getResponsiblePersonId()) : null;
+                            Long newPersonId = v.getResponsiblePersonId();
                             boolean personChanged = newPersonId != null && !newPersonId.equals(oldPersonId);
 
                             Mono<Void> updateMachine = commonService
@@ -178,7 +177,7 @@ public class MachineService {
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
                 .onErrorResume(e -> {
-                    log.error("Failed to update the machine: {}", e.getMessage());
+                    log.error("Failed to update the machine: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.error("MS004", e.getMessage()));
                 });
     }
@@ -250,25 +249,13 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // non-ADMIN: กรอง machine_status
-                    Criteria baseCriteria = role.equals("ADMIN")
-                            ? Criteria.empty()
-                            : Criteria.where("machine_status")
-                            .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
-
-                    // ทุก role: ถ้าส่ง checkStatus มา ให้ filter เพิ่ม
-                    if (StringUtils.hasText(checkStatus)) {
-                        baseCriteria = baseCriteria.equals(Criteria.empty())
-                                ? Criteria.where("check_status").is(checkStatus)
-                                : baseCriteria.and(Criteria.where("check_status").is(checkStatus));
-                    }
-
+                    // ─── ADMIN: ไม่กรอง machine_status ───────────────────────────
                     if (role.equals("ADMIN")) {
                         Criteria criteria = buildKeywordCriteria(keyword);
                         if (StringUtils.hasText(checkStatus)) {
-                            criteria = criteria.equals(Criteria.empty())
-                                    ? Criteria.where("check_status").is(checkStatus)
-                                    : criteria.and(Criteria.where("check_status").is(checkStatus));
+                            criteria = StringUtils.hasText(keyword)
+                                    ? criteria.and(Criteria.where("check_status").is(checkStatus))
+                                    : Criteria.where("check_status").is(checkStatus);
                         }
                         Query query = Query.query(criteria)
                                 .with(commonService.pageable(index, size, "created_at"));
@@ -276,7 +263,16 @@ public class MachineService {
                                 index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
                     }
 
-                    // mine=true → เฉพาะ responsible_person_id ตัวเอง (ทุก role)
+                    // ─── non-ADMIN: กรอง machine_status เสมอ ────────────────────
+                    Criteria baseCriteria = Criteria.where("machine_status")
+                            .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+
+                    if (StringUtils.hasText(checkStatus)) {
+                        baseCriteria = baseCriteria.and(
+                                Criteria.where("check_status").is(checkStatus));
+                    }
+
+                    // mine=true → เฉพาะของตัวเอง
                     if (mine) {
                         return fetchWithRoleAndKeyword(
                                 baseCriteria.and(
@@ -498,7 +494,7 @@ public class MachineService {
             return Mono.error(new ThrowException("MS012", "Machine type is required"));
         if (dto.getResetPeriod() == null || dto.getResetPeriod().isEmpty())
             return Mono.error(new ThrowException("MS013", "Reset period is required"));
-        if (dto.getResponsiblePersonId() == null || dto.getResponsiblePersonId().isEmpty())
+        if (dto.getResponsiblePersonId() == null)
             return Mono.error(new ThrowException("MS014", "Responsible person is required"));
         if (dto.getMachineGroupId() == null || dto.getMachineGroupId().isEmpty())
             return Mono.error(new ThrowException("MS016", "Machine group is required"));
@@ -546,13 +542,13 @@ public class MachineService {
                 .machineStatus(dto.getMachineStatus())
                 .machineTypeId(dto.getMachineTypeId())
                 .maintenancePeriod(dto.getMaintenancePeriod())
-                .managerId(Long.valueOf(dto.getManagerId()))
+                .managerId(dto.getManagerId())
                 .qrCode(dto.getQrCode())
                 .resetPeriod(dto.getResetPeriod())
-                .responsiblePersonId(Long.valueOf(dto.getResponsiblePersonId()))
+                .responsiblePersonId(dto.getResponsiblePersonId())
                 .responsiblePersonName(dto.getResponsiblePersonName())
                 .serialNumber(dto.getSerialNumber())
-                .supervisorId(Long.valueOf(dto.getSupervisorId()))
+                .supervisorId(dto.getSupervisorId())
                 .workInstruction(dto.getWorkInstruction())
                 .note(dto.getNote())
                 .businessUnit(dto.getBusinessUnit())
@@ -583,16 +579,18 @@ public class MachineService {
         addIfNotNull(p, "maintenance_period",      dto.getMaintenancePeriod());
         addIfNotNull(p, "certificate_period",      dto.getCertificatePeriod());
         addIfNotNull(p, "reset_period",            dto.getResetPeriod());
-        addIfNotNull(p, "manager_id",              dto.getManagerId());
-        addIfNotNull(p, "responsible_person_id",   dto.getResponsiblePersonId());
         addIfNotNull(p, "responsible_person_name", dto.getResponsiblePersonName());
-        addIfNotNull(p, "supervisor_id",           dto.getSupervisorId());
         addIfNotNull(p, "work_instruction",        dto.getWorkInstruction());
         addIfNotNull(p, "image",                   dto.getImage());
         addIfNotNull(p, "qr_code",                 dto.getQrCode());
         addIfNotNull(p, "register_id",             dto.getRegisterId());
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
+
+        p.put(SqlIdentifier.quoted("responsible_person_id"), dto.getResponsiblePersonId());
+        p.put(SqlIdentifier.quoted("supervisor_id"),         dto.getSupervisorId());
+        p.put(SqlIdentifier.quoted("manager_id"),            dto.getManagerId());
+
         return Update.from(p);
     }
 

@@ -37,10 +37,10 @@ public class MachineDTO {
     private String qrCode;
     private String resetPeriod;
     private String note;
-    private String responsiblePersonId;
+    private Long responsiblePersonId;
     private String responsiblePersonName;
-    private String supervisorId;
-    private String managerId;
+    private Long supervisorId;
+    private Long managerId;
     private String workInstruction;
     private LocalDate lastReview;
     private String reviewBy;

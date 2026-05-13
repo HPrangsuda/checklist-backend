@@ -306,6 +306,8 @@ public class MemberService {
         dto.setUserName(member.getUserName());
         dto.setRoleType(member.getRoleType());
         dto.setLanguages(member.getLanguages());
+        dto.setSupervisor(member.getSupervisor());
+        dto.setManager(member.getManager());
         return dto;
     }
 
