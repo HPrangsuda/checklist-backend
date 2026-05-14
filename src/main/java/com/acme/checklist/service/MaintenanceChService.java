@@ -265,8 +265,8 @@ public class MaintenanceChService {
                 .image(dto.getImage())
                 .userId(dto.getUserId())
                 .userName(dto.getUserName())
-                .supervisor(Long.valueOf(dto.getSupervisor()))
-                .manager(Long.valueOf(dto.getManager()))
+                .supervisor(parseLong(dto.getSupervisor()))
+                .manager(parseLong(dto.getManager()))
                 .jobDetail(dto.getJobDetail())
                 .checklistStatus("COMPLETED")
                 .recheck(false)
@@ -312,5 +312,11 @@ public class MaintenanceChService {
                     log.error("Failed to process maintenance save: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.error("MN004", e.getMessage()));
                 });
+    }
+
+    private Long parseLong(String value) {
+        if (value == null || value.isBlank()) return null;
+        try { return Long.valueOf(value); }
+        catch (NumberFormatException e) { return null; }
     }
 }
