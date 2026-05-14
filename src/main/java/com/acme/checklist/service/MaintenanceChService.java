@@ -256,12 +256,9 @@ public class MaintenanceChService {
 
     private Mono<ApiResponse<Void>> processSave(MaintenanceSaveDTO dto) {
         log.info("processSave dto: maintenanceRecordId={}, machineCode={}, machineStatus={}, responsibleMaintenance={}, maintenanceBy={}",
-                dto.getMaintenanceRecordId(),
-                dto.getMachineCode(),
-                dto.getMachineStatus(),
-                dto.getResponsibleMaintenance(),
-                dto.getMaintenanceBy()
-        );
+                dto.getMaintenanceRecordId(), dto.getMachineCode(), dto.getMachineStatus(),
+                dto.getResponsibleMaintenance(), dto.getMaintenanceBy());
+
         ChecklistRecord record = ChecklistRecord.builder()
                 .checkType("MAINTENANCE")
                 .machineCode(dto.getMachineCode())
@@ -272,8 +269,8 @@ public class MaintenanceChService {
                 .image(dto.getImage())
                 .userId(dto.getUserId())
                 .userName(dto.getUserName())
-                .supervisor(parseLong(dto.getSupervisor()))
-                .manager(parseLong(dto.getManager()))
+                .supervisor(parseLong(dto.getSupervisor()))   // ✅ safe parse
+                .manager(parseLong(dto.getManager()))         // ✅ safe parse
                 .jobDetail(dto.getJobDetail())
                 .checklistStatus("COMPLETED")
                 .recheck(false)
@@ -285,27 +282,22 @@ public class MaintenanceChService {
 
         return commonService.save(record, ChecklistRecord.class)
                 .flatMap(savedRecord -> {
-                    // อัปเดต MaintenanceRecord
                     Mono<Void> updateMaintenance = template.selectOne(
                                     Query.query(Criteria.where("id").is(dto.getMaintenanceRecordId())),
                                     MaintenanceRecord.class)
                             .switchIfEmpty(Mono.error(new RuntimeException(
-                                    "Maintenance not found: " + dto.getMaintenanceRecordId())))
+                                    "Maintenance record not found: " + dto.getMaintenanceRecordId())))
                             .flatMap(maintenance -> {
                                 maintenance.setActualDate(actualDate);
                                 maintenance.setStatus(status);
                                 maintenance.setMaintenanceBy(dto.getMaintenanceBy());
-                                String respId = dto.getResponsibleMaintenance();
-                                maintenance.setResponsibleMaintenance(
-                                        (respId != null && !respId.isBlank()) ? Long.valueOf(respId) : null
-                                );
+                                maintenance.setResponsibleMaintenance(parseLong(dto.getResponsibleMaintenance())); // ✅
                                 maintenance.setAttachment(dto.getImage());
                                 maintenance.setNote(dto.getMachineNote());
                                 maintenance.setChecklistRecordId(savedRecord.getId());
                                 return template.update(maintenance).then();
                             });
 
-                    // อัปเดต Machine status
                     Mono<Void> updateMachine = template.update(Machine.class)
                             .matching(Query.query(Criteria.where("machine_code").is(dto.getMachineCode())))
                             .apply(Update.update("machine_status", dto.getMachineStatus()))
@@ -321,9 +313,13 @@ public class MaintenanceChService {
                 });
     }
 
+    // ✅ เพิ่ม helper
     private Long parseLong(String value) {
         if (value == null || value.isBlank()) return null;
         try { return Long.valueOf(value); }
-        catch (NumberFormatException e) { return null; }
+        catch (NumberFormatException e) {
+            log.warn("Cannot parse Long from value: '{}'", value);
+            return null;
+        }
     }
 }
