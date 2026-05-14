@@ -255,6 +255,13 @@ public class MaintenanceChService {
     // =========================
 
     private Mono<ApiResponse<Void>> processSave(MaintenanceSaveDTO dto) {
+        log.info("processSave dto: maintenanceRecordId={}, machineCode={}, machineStatus={}, responsibleMaintenance={}, maintenanceBy={}",
+                dto.getMaintenanceRecordId(),
+                dto.getMachineCode(),
+                dto.getMachineStatus(),
+                dto.getResponsibleMaintenance(),
+                dto.getMaintenanceBy()
+        );
         ChecklistRecord record = ChecklistRecord.builder()
                 .checkType("MAINTENANCE")
                 .machineCode(dto.getMachineCode())
