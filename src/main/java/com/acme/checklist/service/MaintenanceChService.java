@@ -283,7 +283,7 @@ public class MaintenanceChService {
                                     Query.query(Criteria.where("id").is(dto.getMaintenanceRecordId())),
                                     MaintenanceRecord.class)
                             .switchIfEmpty(Mono.error(new RuntimeException(
-                                    "Maintenance record not found: " + dto.getMaintenanceRecordId())))
+                                    "Maintenance not found: " + dto.getMaintenanceRecordId())))
                             .flatMap(maintenance -> {
                                 maintenance.setActualDate(actualDate);
                                 maintenance.setStatus(status);
