@@ -288,7 +288,7 @@ public class MaintenanceChService {
                                 maintenance.setActualDate(actualDate);
                                 maintenance.setStatus(status);
                                 maintenance.setMaintenanceBy(dto.getMaintenanceBy());
-                                maintenance.setResponsibleMaintenance(dto.getResponsibleMaintenance());
+                                maintenance.setResponsibleMaintenance(Long.valueOf(dto.getResponsibleMaintenance()));
                                 maintenance.setAttachment(dto.getImage());
                                 maintenance.setNote(dto.getMachineNote());
                                 maintenance.setChecklistRecordId(savedRecord.getId());

@@ -24,7 +24,7 @@ public class MaintenanceDTO {
     private LocalDate actualDate;
     private String status;
     private String maintenanceBy;
-    private String responsibleMaintenance;
+    private Long responsibleMaintenance;
     private String note;
     private String attachment;
     private String maintenanceType;

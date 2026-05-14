@@ -309,6 +309,6 @@ public class MaintenanceService {
     }
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
-        if (value != null) params.put(SqlIdentifier.unquoted(fieldName), value);
+        if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
 }

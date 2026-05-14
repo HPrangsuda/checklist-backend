@@ -50,7 +50,7 @@ public class MaintenanceRecord extends DataAudit {
     private String maintenanceBy;
 
     @Column("responsible_maintenance")
-    private String responsibleMaintenance;
+    private Long responsibleMaintenance;
 
     @Column("note")
     private String note;
