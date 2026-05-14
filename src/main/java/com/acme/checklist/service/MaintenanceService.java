@@ -7,7 +7,6 @@ import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
-import com.acme.checklist.payload.audit.AuditMemberDTO;
 import com.acme.checklist.payload.file.FileUploadDTO;
 import com.acme.checklist.payload.maintenance.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -310,6 +309,6 @@ public class MaintenanceService {
     }
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
-        if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
+        if (value != null) params.put(SqlIdentifier.unquoted(fieldName), value);
     }
 }
