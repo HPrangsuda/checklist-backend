@@ -18,6 +18,7 @@ public class MachineListDTO {
     private String machineStatus;
     private String checkStatus;
     private String responsiblePersonName;
+    private String qrCode;
 
     public static MachineListDTO from(Machine machine, String departmentName) {
         if (machine == null) {
@@ -31,6 +32,7 @@ public class MachineListDTO {
                 .machineStatus(machine.getMachineStatus())
                 .checkStatus(machine.getCheckStatus())
                 .responsiblePersonName(machine.getResponsiblePersonName())
+                .qrCode(machine.getQrCode())
                 .build();
     }
 }
