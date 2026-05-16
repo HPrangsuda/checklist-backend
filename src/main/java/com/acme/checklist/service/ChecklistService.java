@@ -439,6 +439,7 @@ public class ChecklistService {
         addIfNotNull(params, "checklist_status",        dto.getChecklistStatus());
         addIfNotNull(params, "date_supervisor_checked", dto.getDateSupervisorChecked());
         addIfNotNull(params, "date_manager_checked",    dto.getDateManagerChecked());
+        addIfNotNull(params, "reason_not_checked",      dto.getReasonNotChecked());
         return Update.from(params);
     }
 
