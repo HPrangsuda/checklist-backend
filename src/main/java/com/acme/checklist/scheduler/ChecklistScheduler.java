@@ -10,9 +10,11 @@ import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.*;
+import java.util.List;
 
 @Slf4j
 @Component
@@ -31,26 +33,40 @@ public class ChecklistScheduler {
     }
 
     private Mono<Void> buildUpdateOverdue(String period) {
-        Query query = Query.query(
-                Criteria.where("checklist_status").in("PENDING SUPERVISOR", "PENDING MANAGER")
-                        .and("reset_period").is(period)
-        );
-        return template.select(query, ChecklistRecord.class)
-                .flatMap(record -> {
-                    Update update = Update.update("checklist_status", record.getChecklistStatus() + "-OVERDUE");
-                    return template.update(
-                            Query.query(Criteria.where("id").is(record.getId())),
-                            update,
-                            ChecklistRecord.class
-                    ).then(
-                            template.update(
-                                    Query.query(Criteria.where("machine_code").is(record.getMachineCode())),
-                                    Update.update("check_status", "PENDING"),
-                                    Machine.class
-                            )
+        List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
+
+        return Flux.fromIterable(statuses)
+                .flatMap(status -> {
+                    Query query = Query.query(
+                            Criteria.where("checklist_status").is(status)
+                                    .and("reset_period").is(period)
                     );
+                    Update update = Update.update("checklist_status", status + "-OVERDUE");
+
+                    return template.update(query, update, ChecklistRecord.class)
+                            .flatMap(updatedCount -> {
+                                log.info("[OVERDUE-{}] Updated {} records from '{}' to '{}-OVERDUE'",
+                                        period, updatedCount, status, status);
+
+                                return template.select(
+                                                Query.query(
+                                                        Criteria.where("checklist_status").is(status + "-OVERDUE")
+                                                                .and("reset_period").is(period)
+                                                ),
+                                                ChecklistRecord.class
+                                        )
+                                        .flatMap(record -> template.update(
+                                                Query.query(Criteria.where("machine_code").is(record.getMachineCode())),
+                                                Update.update("check_status", "PENDING"),
+                                                Machine.class
+                                        ))
+                                        .onErrorContinue((e, obj) -> log.error(
+                                                "[OVERDUE-{}] Failed to update machine check_status: {}",
+                                                period, e.getMessage()))
+                                        .then();
+                            });
                 })
-                .onErrorContinue((e, obj) -> log.error("[OVERDUE-{}] Skipping record: {}", period, e.getMessage()))
+                .onErrorContinue((e, obj) -> log.error("[OVERDUE-{}] Skipping status: {}", period, e.getMessage()))
                 .then();
     }
 
