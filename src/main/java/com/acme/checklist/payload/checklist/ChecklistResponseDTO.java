@@ -2,6 +2,7 @@ package com.acme.checklist.payload.checklist;
 
 import com.acme.checklist.entity.ChecklistRecord;
 import com.acme.checklist.payload.audit.AuditMemberDTO;
+import com.acme.checklist.payload.member.MemberDTO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -23,9 +24,9 @@ public class ChecklistResponseDTO {
     private String machineNote;
     private String image;
     private String userName;
-    private AuditMemberDTO supervisor;
+    private MemberDTO supervisor;
     private Instant dateSupervisorChecked;
-    private AuditMemberDTO manager;
+    private MemberDTO manager;
     private Instant dateManagerChecked;
     private String checklistStatus;
     private String reasonNotChecked;
@@ -38,8 +39,8 @@ public class ChecklistResponseDTO {
             ChecklistRecord record,
             AuditMemberDTO createdBy,
             AuditMemberDTO updatedBy,
-            AuditMemberDTO supervisor,
-            AuditMemberDTO manager) {
+            MemberDTO supervisor,
+            MemberDTO manager) {
         return ChecklistResponseDTO.builder()
                 .id(record.getId())
                 .recheck(record.getRecheck())
