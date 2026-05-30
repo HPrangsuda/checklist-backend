@@ -12,7 +12,6 @@ import com.acme.checklist.payload.checklist.ChecklistListDTO;
 import com.acme.checklist.payload.checklist.ChecklistResponseDTO;
 import com.acme.checklist.payload.checklist.ChecklistStatsDTO;
 import com.acme.checklist.payload.file.FileUploadDTO;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -26,6 +25,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.DayOfWeek;
 import java.time.Instant;
@@ -218,22 +218,24 @@ public class ChecklistService {
 
     public Mono<ApiResponse<ChecklistResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), ChecklistRecord.class)
-                .flatMap(checklistRecord -> {
+                .flatMap(record -> {
                     List<Long> memberIds = new ArrayList<>();
-                    if (checklistRecord.getCreatedBy() != null) memberIds.add(checklistRecord.getCreatedBy());
-                    if (checklistRecord.getUpdatedBy() != null) memberIds.add(checklistRecord.getUpdatedBy());
+                    if (record.getCreatedBy()  != null) memberIds.add(record.getCreatedBy());
+                    if (record.getUpdatedBy()  != null) memberIds.add(record.getUpdatedBy());
+                    if (record.getSupervisor() != null) memberIds.add(record.getSupervisor());
+                    if (record.getManager()    != null) memberIds.add(record.getManager());
 
                     Mono<Map<Long, Member>> membersMono = memberIds.isEmpty()
                             ? Mono.just(new HashMap<>())
                             : commonService.fetchMembersByIds(memberIds);
 
                     return membersMono.map(memberMap -> {
-                        AuditMemberDTO createdByDTO = checklistRecord.getCreatedBy() != null
-                                ? AuditMemberDTO.from(memberMap.get(checklistRecord.getCreatedBy())) : null;
-                        AuditMemberDTO updatedByDTO = checklistRecord.getUpdatedBy() != null
-                                ? AuditMemberDTO.from(memberMap.get(checklistRecord.getUpdatedBy())) : null;
+                        AuditMemberDTO createdByDTO    = record.getCreatedBy()  != null ? AuditMemberDTO.from(memberMap.get(record.getCreatedBy()))  : null;
+                        AuditMemberDTO updatedByDTO    = record.getUpdatedBy()  != null ? AuditMemberDTO.from(memberMap.get(record.getUpdatedBy()))  : null;
+                        AuditMemberDTO supervisorDTO   = record.getSupervisor() != null ? AuditMemberDTO.from(memberMap.get(record.getSupervisor())) : null;
+                        AuditMemberDTO managerDTO      = record.getManager()    != null ? AuditMemberDTO.from(memberMap.get(record.getManager()))    : null;
                         return ApiResponse.success("MS017",
-                                ChecklistResponseDTO.from(checklistRecord, createdByDTO, updatedByDTO));
+                                ChecklistResponseDTO.from(record, createdByDTO, updatedByDTO, supervisorDTO, managerDTO));
                     });
                 })
                 .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Checklist not found")))

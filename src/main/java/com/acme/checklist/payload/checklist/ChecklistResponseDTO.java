@@ -23,37 +23,43 @@ public class ChecklistResponseDTO {
     private String machineNote;
     private String image;
     private String userName;
-    private String supervisor;
+    private AuditMemberDTO supervisor;
     private Instant dateSupervisorChecked;
-    private String manager;
+    private AuditMemberDTO manager;
     private Instant dateManagerChecked;
     private String checklistStatus;
     private String reasonNotChecked;
     private String jobDetail;
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
+    private Instant createdAt;
 
-    public static ChecklistResponseDTO from(ChecklistRecord checklistRecord, AuditMemberDTO createdBy, AuditMemberDTO updatedBy) {
+    public static ChecklistResponseDTO from(
+            ChecklistRecord record,
+            AuditMemberDTO createdBy,
+            AuditMemberDTO updatedBy,
+            AuditMemberDTO supervisor,
+            AuditMemberDTO manager) {
         return ChecklistResponseDTO.builder()
-                .id(checklistRecord.getId())
-                .recheck(checklistRecord.getRecheck())
-                .machineCode(checklistRecord.getMachineCode())
-                .machineName(checklistRecord.getMachineName())
-                .machineStatus(checklistRecord.getMachineStatus())
-                .machineChecklist(checklistRecord.getMachineChecklist())
-                .machineNote(checklistRecord.getMachineNote())
-                .image(checklistRecord.getImage())
-                .userName(checklistRecord.getUserName())
-                .supervisor(String.valueOf(checklistRecord.getSupervisor()))
-                .dateSupervisorChecked(checklistRecord.getDateSupervisorChecked())
-                .manager(String.valueOf(checklistRecord.getManager()))
-                .dateManagerChecked(checklistRecord.getDateManagerChecked())
-                .checklistStatus(checklistRecord.getChecklistStatus())
-                .reasonNotChecked(checklistRecord.getReasonNotChecked())
-                .jobDetail(checklistRecord.getJobDetail())
+                .id(record.getId())
+                .recheck(record.getRecheck())
+                .machineCode(record.getMachineCode())
+                .machineName(record.getMachineName())
+                .machineStatus(record.getMachineStatus())
+                .machineChecklist(record.getMachineChecklist())
+                .machineNote(record.getMachineNote())
+                .image(record.getImage())
+                .userName(record.getUserName())
+                .supervisor(supervisor)
+                .dateSupervisorChecked(record.getDateSupervisorChecked())
+                .manager(manager)
+                .dateManagerChecked(record.getDateManagerChecked())
+                .checklistStatus(record.getChecklistStatus())
+                .reasonNotChecked(record.getReasonNotChecked())
+                .jobDetail(record.getJobDetail())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
-
+                .createdAt(record.getCreatedAt())
                 .build();
     }
 }
