@@ -119,23 +119,33 @@ public class ChecklistScheduler {
     // ─── CORE ─────────────────────────────────────────────────────────────────
 
     private Mono<Void> buildUpdateOverdue(String period) {
-        List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
+        return template.select(
+                        Query.query(Criteria.where("reset_period").is(period)),
+                        Machine.class
+                )
+                .map(Machine::getMachineCode)
+                .collectList()
+                .flatMap(machineCodes -> {
+                    if (machineCodes.isEmpty()) {
+                        log.info("[OVERDUE-{}] No machines found for period", period);
+                        return Mono.empty();
+                    }
 
-        return Flux.fromIterable(statuses)
-                .flatMap(status -> {
-                    Query query = Query.query(
-                            Criteria.where("checklist_status").is(status)
-                                    .and("reset_period").is(period)
-                    );
-                    Update update = Update.update("checklist_status", status + "-OVERDUE");
-
-                    return template.update(query, update, ChecklistRecord.class)
-                            .doOnSuccess(updatedCount -> log.info(
-                                    "[OVERDUE-{}] Updated {} records '{}' → '{}-OVERDUE'",
-                                    period, updatedCount, status, status));
-                })
-                .onErrorContinue((e, obj) -> log.error("[OVERDUE-{}] Skipping status: {}", period, e.getMessage()))
-                .then();
+                    List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
+                    return Flux.fromIterable(statuses)
+                            .flatMap(status -> {
+                                Query query = Query.query(
+                                        Criteria.where("checklist_status").is(status)
+                                                .and("machine_code").in(machineCodes)
+                                );
+                                Update update = Update.update("checklist_status", status + "-OVERDUE");
+                                return template.update(query, update, ChecklistRecord.class)
+                                        .doOnSuccess(count -> log.info(
+                                                "[OVERDUE-{}] Updated {} records '{}' → '{}-OVERDUE'",
+                                                period, count, status, status));
+                            })
+                            .then();
+                });
     }
 
     private Mono<Void> resetMachineCheckStatus(String period) {
