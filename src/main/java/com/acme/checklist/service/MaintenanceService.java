@@ -9,7 +9,6 @@ import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.file.FileUploadDTO;
 import com.acme.checklist.payload.maintenance.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -25,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.HashMap;

@@ -65,4 +65,10 @@ public class RegisterRequest extends DataAudit {
 
     @Column("calibration")
     private String calibration;
+
+    @Column("has_insurance")
+    private String hasInsurance;
+
+    @Column("insurance_note")
+    private String insuranceNote;
 }

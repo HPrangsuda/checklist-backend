@@ -31,6 +31,8 @@ public class RegisterDTO extends DataAudit {
     private List<FileUploadDTO> attachments;
     private List<MaintenanceDTO> maintenance;
     private List<CalibrationDTO> calibration;
+    private String hasInsurance;
+    private String insuranceNote;
 
     private Long createdBy;
     private Long updatedBy;

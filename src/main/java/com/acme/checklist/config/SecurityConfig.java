@@ -1,27 +1,21 @@
 package com.acme.checklist.config;
 
-import com.acme.checklist.entity.Member;
-import com.acme.checklist.entity.enums.RoleType;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.secutrity.JwtAuthenticationManager;
 import com.acme.checklist.secutrity.JwtSecurityContextRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.event.EventListener;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.data.domain.ReactiveAuditorAware;
 import org.springframework.data.r2dbc.config.EnableR2dbcAuditing;
-import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
-import org.springframework.data.relational.core.query.Criteria;
-import org.springframework.data.relational.core.query.Query;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -46,14 +40,11 @@ public class SecurityConfig {
 
     private final JwtAuthenticationManager authManager;
     private final JwtSecurityContextRepository securityContextRepo;
-    private final R2dbcEntityTemplate template;
 
     public SecurityConfig(JwtAuthenticationManager authManager,
-                          JwtSecurityContextRepository securityContextRepo,
-                          R2dbcEntityTemplate template) {
+                          JwtSecurityContextRepository securityContextRepo) {
         this.authManager = authManager;
         this.securityContextRepo = securityContextRepo;
-        this.template = template;
     }
 
     @Bean
@@ -132,8 +123,8 @@ public class SecurityConfig {
     @Bean
     public ReactiveAuditorAware<Long> auditorAware() {
         return () -> ReactiveSecurityContextHolder.getContext()
-                .map(SecurityContext::getAuthentication)
-                .filter(auth -> auth != null && auth.isAuthenticated())
+                .mapNotNull(SecurityContext::getAuthentication)
+                .filter(Authentication::isAuthenticated)
                 .mapNotNull(auth -> {
                     Object principal = auth.getPrincipal();
                     if (principal instanceof MemberPrincipal mp) {
@@ -145,7 +136,7 @@ public class SecurityConfig {
     }
 
     @Configuration
-    public class WebConfig implements WebFluxConfigurer {
+    public static class WebConfig implements WebFluxConfigurer {
         @Value("${storage.upload-dir:uploads}")
         private String uploadDir;
 

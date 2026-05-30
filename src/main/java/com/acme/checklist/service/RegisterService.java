@@ -9,7 +9,6 @@ import com.acme.checklist.payload.audit.AuditMemberDTO;
 import com.acme.checklist.payload.register.RegisterListDTO;
 import com.acme.checklist.payload.register.RegisterDTO;
 import com.acme.checklist.payload.register.RegisterResponseDTO;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -22,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.*;
 
@@ -74,7 +74,7 @@ public class RegisterService {
 
     public Mono<PagedResponse<RegisterListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
@@ -245,13 +245,11 @@ public class RegisterService {
 
     public RegisterRequest buildFromDTO(RegisterDTO registerDTO) {
         try {
-            // ✅ Convert Maintenance List to JSON
             String maintenanceJson = null;
             if (registerDTO.getMaintenance() != null && !registerDTO.getMaintenance().isEmpty()) {
                 maintenanceJson = objectMapper.writeValueAsString(registerDTO.getMaintenance());
             }
 
-            // ✅ Convert Calibration List to JSON
             String calibrationJson = null;
             if (registerDTO.getCalibration() != null && !registerDTO.getCalibration().isEmpty()) {
                 calibrationJson = objectMapper.writeValueAsString(registerDTO.getCalibration());
@@ -283,69 +281,45 @@ public class RegisterService {
                     .attachment(attachmentJson)
                     .maintenance(maintenanceJson)
                     .calibration(calibrationJson)
+                    .hasInsurance(registerDTO.getHasInsurance())
+                    .insuranceNote("YES".equals(registerDTO.getHasInsurance())
+                            ? registerDTO.getInsuranceNote() : null)
                     .build();
 
         } catch (Exception e) {
-            log.error("❌ Error converting data to JSON", e);
             throw new RuntimeException("Failed to process data: " + e.getMessage());
         }
     }
 
     private Update buildUpdateFromDTO(RegisterDTO registerDTO) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
-        addIfNotNull(params, "department", registerDTO.getDepartment());
+        addIfNotNull(params, "department",   registerDTO.getDepartment());
         addIfNotNull(params, "machine_name", registerDTO.getMachineName());
-        addIfNotNull(params, "brand", registerDTO.getBrand());
-        addIfNotNull(params, "model", registerDTO.getModel());
-        addIfNotNull(params, "note", registerDTO.getNote());
-        addIfNotNull(params, "price", registerDTO.getPrice());
-        addIfNotNull(params, "quantity", registerDTO.getQuantity());
-        addIfNotNull(params, "watt", registerDTO.getWatt());
-        addIfNotNull(params, "housePower", registerDTO.getHorsePower());
-        addIfNotNull(params, "manager_id", registerDTO.getManagerId());
+        addIfNotNull(params, "brand",        registerDTO.getBrand());
+        addIfNotNull(params, "model",        registerDTO.getModel());
+        addIfNotNull(params, "note",         registerDTO.getNote());
+        addIfNotNull(params, "price",        registerDTO.getPrice());
+        addIfNotNull(params, "quantity",     registerDTO.getQuantity());
+        addIfNotNull(params, "watt",         registerDTO.getWatt());
+        addIfNotNull(params, "horse_power",  registerDTO.getHorsePower());
+        addIfNotNull(params, "manager_id",   registerDTO.getManagerId());
 
-        // ✅ Convert attachments to JSON for update
         if (registerDTO.getAttachments() != null) {
             try {
-                String attachmentJson = objectMapper.writeValueAsString(registerDTO.getAttachments());
-                addIfNotNull(params, "attachment", attachmentJson);
+                addIfNotNull(params, "attachment",
+                        objectMapper.writeValueAsString(registerDTO.getAttachments()));
             } catch (Exception e) {
                 log.error("❌ Error converting attachments to JSON during update", e);
             }
         }
 
+        addIfNotNull(params, "has_insurance",  registerDTO.getHasInsurance());
+        params.put(SqlIdentifier.quoted("insurance_note"),
+                "YES".equals(registerDTO.getHasInsurance())
+                        ? registerDTO.getInsuranceNote() : null);
+
         return Update.from(params);
     }
-
-//    private Flux<RegisterResponseDTO> convertRegisterListDTOs(List<RegisterRequest> registerRequests) {
-//        if (registerRequests.isEmpty()) {
-//            return Flux.empty();
-//        }
-//        List<Long> createdByIds = registerRequests.stream()
-//                .map(RegisterRequest::getCreatedBy)
-//                .filter(Objects::nonNull)
-//                .distinct()
-//                .toList();
-//        List<Long> updatedByIds = registerRequests.stream()
-//                .map(RegisterRequest::getUpdatedBy)
-//                .filter(Objects::nonNull)
-//                .distinct()
-//                .toList();
-//        return Mono.zip(
-//                        commonService.fetchMembersByIds(createdByIds),
-//                        commonService.fetchMembersByIds(updatedByIds)
-//                )
-//                .flatMapMany(tuple -> {
-//                    Map<Long, Member> createdByMap = tuple.getT1();
-//                    Map<Long, Member> updatedByMap = tuple.getT2();
-//                    return Flux.fromIterable(registerRequests)
-//                            .map(registerRequest -> RegisterResponseDTO.from(
-//                                    registerRequest,
-//                                    AuditMemberDTO.from(createdByMap.get(registerRequest.getCreatedBy())),
-//                                    AuditMemberDTO.from(updatedByMap.get(registerRequest.getUpdatedBy()))
-//                            ));
-//                });
-//    }
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
         if (value != null) {

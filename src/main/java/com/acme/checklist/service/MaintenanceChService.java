@@ -11,7 +11,6 @@ import com.acme.checklist.payload.maintenance.MaintenanceChDTO;
 import com.acme.checklist.payload.maintenance.MaintenanceDTO;
 import com.acme.checklist.payload.maintenance.MaintenanceSaveDTO;
 import com.acme.checklist.payload.question.QuestionDTO;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -22,6 +21,7 @@ import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -36,7 +36,7 @@ public class MaintenanceChService {
     private final R2dbcEntityTemplate template;
     private final CommonService        commonService;
     private final FileStorageService   fileStorageService;
-    private final ObjectMapper         objectMapper;
+    private final ObjectMapper objectMapper;
 
     // =========================
     // CREATE ITEM

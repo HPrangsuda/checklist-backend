@@ -2,6 +2,8 @@ package com.acme.checklist.secutrity;
 
 import com.acme.checklist.payload.MemberPrincipal;
 import io.jsonwebtoken.Claims;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
 import org.springframework.security.authentication.ReactiveAuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -12,6 +14,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Objects;
 
 @Component
 public class JwtAuthenticationManager implements ReactiveAuthenticationManager {
@@ -22,9 +25,11 @@ public class JwtAuthenticationManager implements ReactiveAuthenticationManager {
         this.jwtService = jwtService;
     }
 
+
+    @NonNull
     @Override
     public Mono<Authentication> authenticate(Authentication authentication) {
-        String token = authentication.getCredentials().toString();
+        String token = Objects.requireNonNull(authentication.getCredentials()).toString();
         Claims claims = jwtService.validate(token);
 
         if (claims == null) {

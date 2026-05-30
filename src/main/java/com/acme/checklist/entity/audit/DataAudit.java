@@ -10,6 +10,7 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.relational.core.mapping.Column;
 
 import java.time.Instant;
+import java.time.OffsetDateTime;
 
 @Data
 public class DataAudit {
