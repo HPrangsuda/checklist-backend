@@ -16,7 +16,8 @@ import reactor.core.publisher.Mono;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.YearMonth;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 
 @Slf4j
@@ -27,11 +28,12 @@ public class KpiScheduler {
     private final R2dbcEntityTemplate template;
 
     private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+    private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
     @Scheduled(cron = "0 0 0 1 * ?")
     public void createKpiRecords() {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(BKK);
         String year  = String.valueOf(today.getYear());
         String month = String.format("%02d", today.getMonthValue());
         YearMonth ym = YearMonth.from(today);
@@ -78,9 +80,9 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 3 2 * * *")
+    @Scheduled(cron = "0 15 2 * * *")
     public void recalculateCurrentMonthKpi() {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(BKK);
         String year  = String.valueOf(today.getYear());
         String month = String.format("%02d", today.getMonthValue());
         YearMonth ym = YearMonth.from(today);
@@ -128,8 +130,8 @@ public class KpiScheduler {
                                   )
                                 """)
                             .bind("memberId", memberId)
-                            .bind("start", start.atStartOfDay().toInstant(ZoneOffset.UTC))
-                            .bind("end", endDate.atTime(23, 59, 59).toInstant(ZoneOffset.UTC))
+                            .bind("start", start.atStartOfDay(BKK).toInstant())
+                            .bind("end",   endDate.atTime(23, 59, 59).atZone(BKK).toInstant())
                             .map((row, meta) -> row.get(0, Long.class))
                             .one()
                             .defaultIfEmpty(0L);
@@ -149,8 +151,8 @@ public class KpiScheduler {
 
                                 kpi.setCheckAll(newCheckAll);
                                 kpi.setChecked(checkedCount);
-                                kpi.setManagerId(member.getManager());        // ← จาก Member
-                                kpi.setSupervisorId(member.getSupervisor());  // ← จาก Member
+                                kpi.setManagerId(member.getManager());
+                                kpi.setSupervisorId(member.getSupervisor());
 
                                 return template.update(kpi)
                                         .doOnSuccess(v -> log.info("Updated KPI memberId={} → checkAll={}, checked={}",
