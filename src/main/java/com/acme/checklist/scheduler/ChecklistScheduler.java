@@ -26,7 +26,7 @@ public class ChecklistScheduler {
 
     // ─── WEEKLY ───────────────────────────────────────────────────────────────
 
-    @Scheduled(cron = "0 1 0 * * MON", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 2 * * MON", zone = "Asia/Bangkok")
     public void updateOverdueChecklistsWeek() {
         buildUpdateOverdue("WEEKLY")
                 .then(resetMachineCheckStatus("WEEKLY"))
