@@ -4,6 +4,7 @@ import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.kpi.KpiDTO;
 import com.acme.checklist.payload.kpi.KpiResponseDTO;
+import com.acme.checklist.scheduler.KpiScheduler;
 import com.acme.checklist.service.KpiService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +17,7 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class KpiController {
     private final KpiService kpiService;
+    private final KpiScheduler kpiScheduler;
 
     @PostMapping("/create")
     public Mono<ApiResponse<Void>> create(@RequestBody KpiDTO dto) {
