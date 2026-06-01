@@ -52,7 +52,7 @@ public class MachineService {
 
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
-    private final KpiService kpiService; // ← inject KpiService แทน duplicate logic
+    private final KpiService kpiService;
 
     private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
 
@@ -172,8 +172,8 @@ public class MachineService {
                             return updateMachine
                                     .then(closeOld)
                                     .then(insertNew)
-                                    .then(kpiService.recalculateKpiForPerson(oldPersonId)) // ← ใช้ KpiService
-                                    .then(kpiService.recalculateKpiForPerson(newPersonId)) // ← ใช้ KpiService
+                                    .then(kpiService.recalculateKpiForPerson(oldPersonId))
+                                    .then(kpiService.recalculateKpiForPerson(newPersonId))
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
                 .onErrorResume(e -> {
@@ -226,8 +226,8 @@ public class MachineService {
                     return closeOld
                             .then(insertNew)
                             .then(updateMachine)
-                            .then(kpiService.recalculateKpiForPerson(oldPersonId)) // ← ใช้ KpiService
-                            .then(kpiService.recalculateKpiForPerson(newPersonId)) // ← ใช้ KpiService
+                            .then(kpiService.recalculateKpiForPerson(oldPersonId))
+                            .then(kpiService.recalculateKpiForPerson(newPersonId))
                             .doOnSuccess(v -> log.info("Changed responsible {} → {} for machine {}",
                                     oldPersonId, newPersonId, machineCode))
                             .then(Mono.just(ApiResponse.<Void>success("MS031")));
@@ -299,9 +299,11 @@ public class MachineService {
             Criteria roleCriteria, String keyword, int index, int size) {
         Criteria criteria = roleCriteria;
         if (StringUtils.hasText(keyword)) {
+            String kw = "%" + keyword + "%";
             criteria = roleCriteria.and(
-                    Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
-                            .or("machine_code").like("%" + keyword + "%").ignoreCase(true));
+                    Criteria.where("machine_name").like(kw).ignoreCase(true)
+                            .or("machine_code").like(kw).ignoreCase(true)
+                            .or("responsible_person_name").like(kw).ignoreCase(true));
         }
         Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
         return commonService.executePagedQuery(index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
@@ -625,9 +627,12 @@ public class MachineService {
     }
 
     private Criteria buildKeywordCriteria(String keyword) {
-        if (StringUtils.hasText(keyword))
-            return Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
-                    .or("machine_code").like("%" + keyword + "%").ignoreCase(true);
+        if (StringUtils.hasText(keyword)) {
+            String kw = "%" + keyword + "%";
+            return Criteria.where("machine_name").like(kw).ignoreCase(true)
+                    .or("machine_code").like(kw).ignoreCase(true)
+                    .or("responsible_person_name").like(kw).ignoreCase(true);
+        }
         return Criteria.empty();
     }
 
