@@ -94,17 +94,13 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 5 14 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
-        log.info("recalculateCurrentMonthKpi started");
         LocalDate today = LocalDate.now(BKK);
 
-        String year  = "2026";
-        String month = "05";
-        YearMonth ym = YearMonth.of(2026, 5);
-//        String year  = String.valueOf(today.getYear());
-//        String month = String.format("%02d", today.getMonthValue());
-//        YearMonth ym = YearMonth.from(today);
+        String year  = String.valueOf(today.getYear());
+        String month = String.format("%02d", today.getMonthValue());
+        YearMonth ym = YearMonth.from(today);
 
         LocalDate firstDay    = ym.atDay(1);
         LocalDate lastDay     = ym.atEndOfMonth();
@@ -138,9 +134,6 @@ public class KpiScheduler {
 
                     // checked = นับ recheck=true ในช่วง kpiStart→kpiEnd
                     // JOIN responsible_history เพื่อให้แน่ใจว่า member รับผิดชอบ machine นั้น
-                    // ในวันที่บันทึกจริง (รองรับการเปลี่ยนผู้รับผิดชอบ)
-                    // ระบบการันตีว่าแต่ละสัปดาห์มี recheck=true ได้แค่ 1 ต่อเครื่อง
-                    // จึงนับ COUNT(*) ได้เลย
                     Mono<Long> checkedMono = template.getDatabaseClient()
                             .sql("""
                                 SELECT COUNT(*) FROM checklist_record cr
