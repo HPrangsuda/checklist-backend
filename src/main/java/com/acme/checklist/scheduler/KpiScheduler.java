@@ -94,7 +94,7 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 0 14 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 14 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
         log.info("recalculateCurrentMonthKpi started");
         LocalDate today = LocalDate.now(BKK);
