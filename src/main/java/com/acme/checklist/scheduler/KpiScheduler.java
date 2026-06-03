@@ -94,13 +94,16 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 5 0 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 50 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now(BKK);
 
-        String year  = String.valueOf(today.getYear());
-        String month = String.format("%02d", today.getMonthValue());
-        YearMonth ym = YearMonth.from(today);
+//        String year  = String.valueOf(today.getYear());
+//        String month = String.format("%02d", today.getMonthValue());
+//        YearMonth ym = YearMonth.from(today);
+        String year  = "2026";
+        String month = "05";
+        YearMonth ym = YearMonth.of(2026, 5);
 
         LocalDate firstDay    = ym.atDay(1);
         LocalDate lastDay     = ym.atEndOfMonth();
