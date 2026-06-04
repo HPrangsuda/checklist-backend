@@ -7,6 +7,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDate;
+
 @Data
 @Builder
 @NoArgsConstructor
@@ -32,9 +34,16 @@ public class RegisterResponseDTO {
     private String managerName;
 
     private String note;
-    private String attachment;
+    private String attachment;        // รูปภาพ (JSON)
+    private String workInstruction;   // ✅ work instruction (JSON)
     private Object maintenance;
     private Object calibration;
+
+    // ── warranty ──────────────────────────────────────────────────────────────
+    private String    hasWarranty;
+    private String    warrantyNote;
+    private LocalDate warrantyExpireDate;
+    private String    warrantyFiles;  // ✅ warranty files (JSON)
 
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
@@ -58,8 +67,14 @@ public class RegisterResponseDTO {
                 .managerId(r.getManagerId())
                 .note(r.getNote())
                 .attachment(r.getAttachment())
+                .workInstruction(r.getWorkInstruction())
                 .maintenance(r.getMaintenance())
                 .calibration(r.getCalibration())
+                // ── warranty ──────────────────────────────────────────────────
+                .hasWarranty(r.getHasWarranty())
+                .warrantyNote(r.getWarrantyNote())
+                .warrantyExpireDate(r.getWarrantyExpireDate())
+                .warrantyFiles(r.getWarrantyFiles())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
                 .build();

@@ -5,6 +5,7 @@ import com.acme.checklist.payload.maintenance.MaintenanceDTO;
 import lombok.*;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Data
@@ -44,6 +45,12 @@ public class MachineDTO {
     private String workInstruction;
     private LocalDate lastReview;
     private String reviewBy;
+
+    // ── warranty ──────────────────────────────────────────────────────────────
+    private String        hasWarranty;
+    private String        warrantyNote;
+    private LocalDateTime warrantyExpireDate;
+    private String        warrantyFiles;
 
     private CalibrationDTO calibration;
     private List<MaintenanceDTO> maintenanceList;

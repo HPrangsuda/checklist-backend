@@ -249,7 +249,6 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // ─── ADMIN: ไม่กรอง machine_status ───────────────────────────
                     if (role.equals("ADMIN")) {
                         Criteria criteria = buildKeywordCriteria(keyword);
                         if (StringUtils.hasText(checkStatus)) {
@@ -263,7 +262,6 @@ public class MachineService {
                                 index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
                     }
 
-                    // ─── non-ADMIN: กรอง machine_status เสมอ ────────────────────
                     Criteria baseCriteria = Criteria.where("machine_status")
                             .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
 
@@ -272,7 +270,6 @@ public class MachineService {
                                 Criteria.where("check_status").is(checkStatus));
                     }
 
-                    // mine=true → เฉพาะของตัวเอง
                     if (mine) {
                         return fetchWithRoleAndKeyword(
                                 baseCriteria.and(
@@ -558,6 +555,12 @@ public class MachineService {
                 .registerDate(dto.getRegisterDate())
                 .certificatePeriod(dto.getCertificatePeriod())
                 .reasonCancel(dto.getReasonCancel())
+                // ── warranty ──────────────────────────────────────────────────
+                .hasWarranty(dto.getHasWarranty())
+                .warrantyNote("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null)
+                .warrantyExpireDate("YES".equals(dto.getHasWarranty()) && dto.getWarrantyExpireDate() != null
+                        ? dto.getWarrantyExpireDate().toLocalDate() : null)
+                .warrantyFiles("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyFiles() : null)
                 .build();
     }
 
@@ -588,6 +591,16 @@ public class MachineService {
         addIfNotNull(p, "register_id",             dto.getRegisterId());
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
+
+        // ── warranty ──────────────────────────────────────────────────────────
+        addIfNotNull(p, "has_warranty", dto.getHasWarranty());
+        p.put(SqlIdentifier.quoted("warranty_note"),
+                "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
+        p.put(SqlIdentifier.quoted("warranty_expire_date"),
+                "YES".equals(dto.getHasWarranty()) && dto.getWarrantyExpireDate() != null
+                        ? dto.getWarrantyExpireDate().toLocalDate() : null);
+        p.put(SqlIdentifier.quoted("warranty_files"),
+                "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyFiles() : null);
 
         p.put(SqlIdentifier.quoted("responsible_person_id"), dto.getResponsiblePersonId());
         p.put(SqlIdentifier.quoted("supervisor_id"),         dto.getSupervisorId());

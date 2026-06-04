@@ -60,15 +60,24 @@ public class RegisterRequest extends DataAudit {
     @Column("attachment")
     private String attachment;
 
+    @Column("work_instruction")
+    private String workInstruction;
+
     @Column("maintenance")
     private String maintenance;
 
     @Column("calibration")
     private String calibration;
 
-    @Column("has_insurance")
-    private String hasInsurance;
+    @Column("has_warranty")
+    private String hasWarranty;
 
-    @Column("insurance_note")
-    private String insuranceNote;
+    @Column("warranty_note")
+    private String warrantyNote;
+
+    @Column("warranty_expire_date")
+    private LocalDate warrantyExpireDate;
+
+    @Column("warranty_files")
+    private String warrantyFiles;
 }

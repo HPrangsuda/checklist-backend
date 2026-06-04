@@ -53,6 +53,13 @@ public class MachineResponseDTO {
     private String workInstruction;
     private LocalDate lastReview;
     private String reviewBy;
+
+    // ── warranty ──────────────────────────────────────────────────────────────
+    private String    hasWarranty;
+    private String    warrantyNote;
+    private LocalDate warrantyExpireDate;
+    private String    warrantyFiles;
+
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
 
@@ -87,9 +94,15 @@ public class MachineResponseDTO {
                 .workInstruction(machine.getWorkInstruction())
                 .note(machine.getNote())
                 .businessUnit(machine.getBusinessUnit())
-                .registerId(machine.getRegisterId() != null ? machine.getRegisterId().toString() : null)
+                .registerId(machine.getRegisterId() != null ? machine.getRegisterId() : null)
                 .registerDate(machine.getRegisterDate())
                 .certificatePeriod(machine.getCertificatePeriod())
+                .reasonCancel(machine.getReasonCancel())
+                // ── warranty ──────────────────────────────────────────────────
+                .hasWarranty(machine.getHasWarranty())
+                .warrantyNote(machine.getWarrantyNote())
+                .warrantyExpireDate(machine.getWarrantyExpireDate())
+                .warrantyFiles(machine.getWarrantyFiles())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
                 .build();

@@ -109,4 +109,16 @@ public class Machine extends DataAudit {
     @Column("review_by")
     private String reviewBy;
 
+    // ── warranty ──────────────────────────────────────────────────────────────
+    @Column("has_warranty")
+    private String hasWarranty;
+
+    @Column("warranty_note")
+    private String warrantyNote;
+
+    @Column("warranty_expire_date")
+    private LocalDate warrantyExpireDate;
+
+    @Column("warranty_files")
+    private String warrantyFiles;
 }

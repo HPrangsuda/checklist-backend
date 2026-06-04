@@ -6,6 +6,7 @@ import com.acme.checklist.payload.file.FileUploadDTO;
 import com.acme.checklist.payload.maintenance.MaintenanceDTO;
 import lombok.*;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @Data
@@ -29,10 +30,15 @@ public class RegisterDTO extends DataAudit {
     private String managerId;
     private String note;
     private List<FileUploadDTO> attachments;
+    private List<FileUploadDTO> workInstructions;
+    private List<FileUploadDTO> warrantyFiles;
+
     private List<MaintenanceDTO> maintenance;
     private List<CalibrationDTO> calibration;
-    private String hasInsurance;
-    private String insuranceNote;
+    // ── warranty ──────────────────────────────────────────────────────────────
+    private String hasWarranty;
+    private String warrantyNote;
+    private LocalDate warrantyExpireDate;
 
     private Long createdBy;
     private Long updatedBy;
