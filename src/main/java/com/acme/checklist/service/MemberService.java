@@ -125,7 +125,7 @@ public class MemberService {
 
         return commonService.getSelectedItems(hasIds, ids, index, size, Member.class)
                 .flatMap(selectedItems -> {
-                    Criteria criteria = Criteria.empty();
+                    Criteria criteria = Criteria.where("status").is("ACTIVE");
                     if (StringUtils.hasText(keyword) && hasIds) {
                         criteria = Criteria
                                 .where("first_name").like("%" + keyword + "%").ignoreCase(true)
