@@ -13,21 +13,21 @@ import java.util.List;
 @AllArgsConstructor
 @NoArgsConstructor
 public class MaintenanceDTO {
-    private Long id;
-    private String machineCode;
-    private String machineName;
-    private String years;
-    private Integer round;
-    private LocalDate dueDate;
-    private LocalDate planDate;
-    private LocalDate startDate;
-    private LocalDate actualDate;
-    private String status;
-    private String maintenanceBy;
-    private Long responsibleMaintenance;
-    private String note;
-    private String attachment;
-    private String maintenanceType;
-    private Integer checklist_record_id;
+    private Long                  id;
+    private String                machineCode;
+    private String                machineName;
+    private String                years;
+    private Integer               round;
+    private LocalDate             dueDate;
+    private LocalDate             planDate;
+    private LocalDate             startDate;
+    private LocalDate             actualDate;
+    private String                status;
+    private String                maintenanceBy;
+    private Long                  responsibleMaintenance;
+    private String                note;
+    private String                attachment;
+    private String                maintenanceType;
+    private Long                  checklistRecordId;
     private List<MaintenanceChDTO> checklistItems;
 }

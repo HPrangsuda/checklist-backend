@@ -13,25 +13,24 @@ import java.time.LocalDate;
 @AllArgsConstructor
 @NoArgsConstructor
 public class MaintenanceResponseDTO {
-    private Long id;
-    private String machineCode;
-    private String machineName;
-    private String years;
-    private Integer round;
+    private Long      id;
+    private String    machineCode;
+    private String    machineName;
+    private String    years;
+    private Integer   round;
     private LocalDate dueDate;
     private LocalDate planDate;
     private LocalDate startDate;
     private LocalDate actualDate;
-    private String status;
-    private String maintenanceBy;
-    private Long responsibleMaintenance;
-    private String note;
-    private String attachment;
+    private String    status;
+    private String    maintenanceBy;
+    private Long      responsibleMaintenance;
+    private String    note;
+    private String    attachment;
+    private Long      checklistRecordId;   // ← เพิ่ม: null = ยังไม่ submit, มีค่า = submit แล้ว
 
     public static MaintenanceResponseDTO from(MaintenanceRecord maintenanceRecord) {
-        if (maintenanceRecord == null) {
-            return null;
-        }
+        if (maintenanceRecord == null) return null;
 
         return MaintenanceResponseDTO.builder()
                 .id(maintenanceRecord.getId())
@@ -48,6 +47,7 @@ public class MaintenanceResponseDTO {
                 .responsibleMaintenance(maintenanceRecord.getResponsibleMaintenance())
                 .note(maintenanceRecord.getNote())
                 .attachment(maintenanceRecord.getAttachment())
+                .checklistRecordId(maintenanceRecord.getChecklistRecordId())
                 .build();
     }
 }
