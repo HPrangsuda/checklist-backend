@@ -30,7 +30,9 @@ public class KpiScheduler {
     private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
-    @Scheduled(cron = "0 13 0 * * *", zone = "Asia/Bangkok")
+    // check_all = (เครื่อง non-MONTHLY × จำนวน Friday ทั้งเดือน) + (เครื่อง MONTHLY × 1)
+    // fix ไว้ตั้งแต่ต้นเดือน ไม่เปลี่ยนจนกว่าจะมีการโอนเครื่อง
+    @Scheduled(cron = "0 36 0 8 * ?", zone = "Asia/Bangkok")
     public void createKpiRecords() {
         log.info("createKpiRecords started");
         LocalDate today = LocalDate.now(BKK);
@@ -41,7 +43,7 @@ public class KpiScheduler {
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        LocalDate kpiEnd      = lastFriday;
+        LocalDate kpiEnd      = lastFriday; // ใช้ทั้งเดือนเสมอ
 
         log.info("createKpiRecords year={} month={} kpiStart={} kpiEnd={}", year, month, kpiStart, kpiEnd);
 
@@ -95,22 +97,23 @@ public class KpiScheduler {
                 .subscribe(null, e -> log.error("createKpiRecords failed: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e));
     }
 
-    // ─── 2. Recalculate รายวัน ──────────────────────────────────────────────────
-    @Scheduled(cron = "0 15 0 * * *", zone = "Asia/Bangkok")
+    // ─── 2. Recalculate checked รายวัน (ไม่แตะ check_all) ─────────────────────
+    // check_all ถูก fix ตั้งแต่ต้นเดือน อัปเดตเฉพาะเมื่อมีการเปลี่ยนผู้รับผิดชอบ (recalculateCheckAll)
+    // method นี้อัปเดตแค่ checked (จำนวนที่ตรวจสอบจริงสะสมถึงวันนี้)
+    @Scheduled(cron = "0 37 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now(BKK);
         String year  = String.valueOf(today.getYear());
         String month = String.format("%02d", today.getMonthValue());
         YearMonth ym = YearMonth.from(today);
 
-        LocalDate firstDay    = ym.atDay(1);
-        LocalDate lastDay     = ym.atEndOfMonth();
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        LocalDate kpiEnd      = today.isBefore(lastFriday) ? getLastFridayOnOrBefore(today) : lastFriday;
+        // checked นับตั้งแต่ kpiStart ถึงวันนี้ (หรือ lastFriday ถ้าเลยแล้ว)
+        LocalDate checkedEnd  = today.isAfter(lastFriday) ? lastFriday : today;
 
-        log.info("recalculateCurrentMonthKpi year={} month={} kpiStart={} kpiEnd={}", year, month, kpiStart, kpiEnd);
+        log.info("recalculateCurrentMonthKpi year={} month={} kpiStart={} checkedEnd={}", year, month, kpiStart, checkedEnd);
 
         template.select(
                         Query.query(Criteria.where("years").is(year).and("months").is(month)),
@@ -119,27 +122,11 @@ public class KpiScheduler {
                 .flatMapSequential(kpi -> {
                     Long memberId = kpi.getMemberId();
 
-                    // checkAll = นับตาม resetPeriod ของแต่ละเครื่อง
-                    // MONTHLY → 1, อื่นๆ → นับ Friday จริง
-                    Mono<Long> checkAllMono = fetchHistoryForMember(memberId, firstDay, lastDay)
-                            .flatMap(h -> findActiveMachine(h.getMachineCode())
-                                    .map(machine -> {
-                                        LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
-                                        LocalDate ce = clampEnd(h.getEffectiveTo(), kpiEnd);
-                                        long contribution = "MONTHLY".equals(machine.getResetPeriod())
-                                                ? 1L
-                                                : countFridaysInRange(cs, ce);
-                                        log.info("Machine {} resetPeriod={} contribution={}", h.getMachineCode(), machine.getResetPeriod(), contribution);
-                                        return contribution;
-                                    })
-                                    .defaultIfEmpty(0L)
-                            )
-                            .reduce(0L, Long::sum)
-                            .doOnSuccess(total -> log.info("checkAll memberId={} → {}", memberId, total));
-
-                    // checked = นับ recheck=true ในช่วง kpiStart→kpiEnd (ทั้ง MONTHLY และ non-MONTHLY)
-                    // R2DBC PostgreSQL driver ต้องใช้ positional parameter $1,$2,... เท่านั้น
-                    // $1 = memberId (responsible_person_id), $2 = memberId (created_by), $3 = start, $4 = end
+                    // checked = นับ recheck=true ในช่วง kpiStart→checkedEnd
+                    // $1 = memberId (rh.responsible_person_id)
+                    // $2 = memberId (cr.created_by)
+                    // $3 = kpiStart (instant)
+                    // $4 = checkedEnd 23:59:59 (instant)
                     Mono<Long> checkedMono = template.getDatabaseClient()
                             .sql("""
                                 SELECT COUNT(*) FROM checklist_record cr
@@ -165,44 +152,22 @@ public class KpiScheduler {
                             .bind(0, memberId)
                             .bind(1, memberId)
                             .bind(2, kpiStart.atStartOfDay(BKK).toInstant())
-                            .bind(3, kpiEnd.atTime(23, 59, 59).atZone(BKK).toInstant())
+                            .bind(3, checkedEnd.atTime(23, 59, 59).atZone(BKK).toInstant())
                             .map((row, meta) -> row.get(0, Long.class))
                             .one()
                             .defaultIfEmpty(0L)
                             .doOnSuccess(c -> log.info("checked memberId={} → {}", memberId, c));
 
-                    Mono<Member> memberMono = template.selectOne(
-                                    Query.query(Criteria.where("id").is(memberId)
-                                            .and("status").not("INACTIVE")),
-                                    Member.class)
-                            .doOnSuccess(m -> {
-                                if (m == null) log.warn("Member NOT found or INACTIVE memberId={}", memberId);
-                                else log.info("Member found memberId={}", memberId);
-                            });
-
-                    return Mono.zip(checkAllMono, checkedMono, memberMono)
-                            .flatMap(tuple -> {
-                                long newCheckAll  = tuple.getT1();
-                                long checkedCount = tuple.getT2();
-                                Member member     = tuple.getT3();
-
-                                if (newCheckAll == 0) {
-                                    log.warn("checkAll=0 skipping memberId={}", memberId);
-                                    return Mono.empty();
-                                }
-
-                                kpi.setCheckAll(newCheckAll);
+                    // อัปเดตแค่ checked ไม่แตะ check_all
+                    return checkedMono
+                            .flatMap(checkedCount -> {
                                 kpi.setChecked(checkedCount);
-                                kpi.setManagerId(member.getManager());
-                                kpi.setSupervisorId(member.getSupervisor());
-
                                 return template.update(kpi)
-                                        .doOnSuccess(v -> log.info("Updated KPI memberId={} → checkAll={}, checked={}",
-                                                memberId, newCheckAll, checkedCount))
+                                        .doOnSuccess(v -> log.info("Updated checked memberId={} → {}", memberId, checkedCount))
                                         .then();
                             })
                             .onErrorResume(e -> {
-                                log.error("Failed to recalculate KPI for memberId={}: {} - {}", memberId, e.getClass().getSimpleName(), e.getMessage(), e);
+                                log.error("Failed to recalculate checked for memberId={}: {} - {}", memberId, e.getClass().getSimpleName(), e.getMessage(), e);
                                 return Mono.empty();
                             });
                 })
@@ -212,12 +177,63 @@ public class KpiScheduler {
                 .subscribe(null, e -> log.error("recalculateCurrentMonthKpi failed: {}", e.getMessage(), e));
     }
 
+    // ─── 3. Recalculate check_all เมื่อมีการเปลี่ยนผู้รับผิดชอบ ────────────────
+    // เรียกจาก Service ที่ insert/update responsible_history
+    // ส่ง memberId ทั้ง old owner และ new owner ที่ได้รับผลกระทบ
+    public Mono<Void> recalculateCheckAll(Long memberId) {
+        LocalDate today = LocalDate.now(BKK);
+        String year  = String.valueOf(today.getYear());
+        String month = String.format("%02d", today.getMonthValue());
+        YearMonth ym = YearMonth.from(today);
+
+        LocalDate firstDay    = ym.atDay(1);
+        LocalDate lastDay     = ym.atEndOfMonth();
+        LocalDate firstFriday = getFirstFridayOfMonth(ym);
+        LocalDate lastFriday  = getLastFridayOfMonth(ym);
+        LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
+        LocalDate kpiEnd      = lastFriday; // check_all ใช้ทั้งเดือนเสมอ
+
+        log.info("recalculateCheckAll memberId={} year={} month={} kpiStart={} kpiEnd={}", memberId, year, month, kpiStart, kpiEnd);
+
+        Mono<Long> checkAllMono = fetchHistoryForMember(memberId, firstDay, lastDay)
+                .flatMap(h -> findActiveMachine(h.getMachineCode())
+                        .map(machine -> {
+                            LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
+                            LocalDate ce = clampEnd(h.getEffectiveTo(), kpiEnd);
+                            long contribution = "MONTHLY".equals(machine.getResetPeriod())
+                                    ? 1L
+                                    : countFridaysInRange(cs, ce);
+                            log.info("recalculateCheckAll machine={} resetPeriod={} contribution={}", h.getMachineCode(), machine.getResetPeriod(), contribution);
+                            return contribution;
+                        })
+                        .defaultIfEmpty(0L)
+                )
+                .reduce(0L, Long::sum)
+                .doOnSuccess(total -> log.info("recalculateCheckAll memberId={} newCheckAll={}", memberId, total));
+
+        return checkAllMono
+                .flatMap(newCheckAll -> template.getDatabaseClient()
+                        .sql("""
+                            UPDATE kpi SET check_all = $1
+                            WHERE member_id = $2 AND years = $3 AND months = $4
+                            """)
+                        .bind(0, newCheckAll)
+                        .bind(1, memberId)
+                        .bind(2, year)
+                        .bind(3, month)
+                        .fetch()
+                        .rowsUpdated()
+                        .doOnSuccess(rows -> log.info("Updated check_all memberId={} → {} (rows={})", memberId, newCheckAll, rows))
+                        .then()
+                )
+                .doOnError(e -> log.error("recalculateCheckAll failed memberId={}: {}", memberId, e.getMessage(), e));
+    }
+
     // ─── INSERT with upsert (null-safe) ────────────────────────────────────────
     private Mono<Void> insertKpiIfAbsent(Long memberId, String employeeName,
                                          String year, String month,
                                          long checkAll,
                                          Long managerId, Long supervisorId) {
-        // R2DBC PostgreSQL: ใช้ positional $1..$7 และ .bind(index, value)
         // $1=memberId $2=employeeName $3=years $4=months $5=checkAll $6=checked $7=managerId $8=supervisorId
         DatabaseClient.GenericExecuteSpec spec = template.getDatabaseClient()
                 .sql("""
@@ -254,10 +270,7 @@ public class KpiScheduler {
 
     // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-    /**
-     * ดึง Machine ที่ active เพื่อตรวจ resetPeriod
-     * คืน empty ถ้า machine ไม่อยู่ใน ACTIVE_STATUSES
-     */
+    // ดึง Machine active เพื่อตรวจ resetPeriod — คืน empty ถ้า status ไม่ active
     private Mono<Machine> findActiveMachine(String machineCode) {
         return template.select(
                         Query.query(Criteria.where("machine_code").is(machineCode)
@@ -326,17 +339,6 @@ public class KpiScheduler {
 
     private LocalDate clampEnd(LocalDate effectiveTo, LocalDate rangeEnd) {
         return (effectiveTo == null || effectiveTo.isAfter(rangeEnd)) ? rangeEnd : effectiveTo;
-    }
-
-    /**
-     * หา Friday ล่าสุดที่ <= today
-     * ใช้ใน recalculate เพื่อไม่ให้ kpiEnd เป็นวันกลางสัปดาห์
-     * ซึ่งจะทำให้ countFridaysInRange น้อยกว่า checked จริง
-     */
-    private LocalDate getLastFridayOnOrBefore(LocalDate date) {
-        LocalDate d = date;
-        while (d.getDayOfWeek() != DayOfWeek.FRIDAY) d = d.minusDays(1);
-        return d;
     }
 
     private LocalDate getFirstFridayOfMonth(YearMonth ym) {
