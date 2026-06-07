@@ -32,7 +32,7 @@ public class KpiScheduler {
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
     // check_all = (เครื่อง non-MONTHLY × จำนวน Friday ทั้งเดือน) + (เครื่อง MONTHLY × 1)
     // fix ไว้ตั้งแต่ต้นเดือน ไม่เปลี่ยนจนกว่าจะมีการโอนเครื่อง
-    @Scheduled(cron = "0 36 0 8 * ?", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 0 0 1 * ?", zone = "Asia/Bangkok")
     public void createKpiRecords() {
         log.info("createKpiRecords started");
         LocalDate today = LocalDate.now(BKK);
@@ -100,7 +100,7 @@ public class KpiScheduler {
     // ─── 2. Recalculate checked รายวัน (ไม่แตะ check_all) ─────────────────────
     // check_all ถูก fix ตั้งแต่ต้นเดือน อัปเดตเฉพาะเมื่อมีการเปลี่ยนผู้รับผิดชอบ (recalculateCheckAll)
     // method นี้อัปเดตแค่ checked (จำนวนที่ตรวจสอบจริงสะสมถึงวันนี้)
-    @Scheduled(cron = "0 37 0 * * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now(BKK);
         String year  = String.valueOf(today.getYear());
@@ -239,7 +239,11 @@ public class KpiScheduler {
                 .sql("""
                     INSERT INTO kpi (member_id, employee_name, years, months, check_all, checked, manager_id, supervisor_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (member_id, years, months) DO NOTHING
+                    ON CONFLICT (member_id, years, months) DO UPDATE
+                      SET check_all     = EXCLUDED.check_all,
+                          employee_name = EXCLUDED.employee_name,
+                          manager_id    = EXCLUDED.manager_id,
+                          supervisor_id = EXCLUDED.supervisor_id
                     """)
                 .bind(0, memberId)
                 .bind(1, employeeName)
