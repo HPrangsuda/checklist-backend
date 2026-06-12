@@ -90,18 +90,24 @@ public class MaintenanceService {
                                     index, size, query, criteria,
                                     MaintenanceRecord.class, this::convertMaintenanceListDTOs);
                         }
-                        case "MANAGER"    -> fetchByMachineRole(memberId,   "manager_id",            keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(memberId,   "supervisor_id",         keyword, index, size);
-                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", keyword, index, size);
+                        case "MANAGER"    -> fetchByMachineRole(memberId, "manager_id",    keyword, index, size);
+                        case "SUPERVISOR" -> fetchByMachineRole(memberId, "supervisor_id", keyword, index, size);
+
+                        // ผู้รับผิดชอบ: เห็น record ที่ machine.responsible_person_id = memberId (BIGINT)
+                        //               หรือ maintenance_record.responsible_maintenance = employeeId (VARCHAR)
+                        default -> fetchByResponsible(memberId, employeeId, keyword, index, size);
                     };
                 });
     }
 
+    /**
+     * MANAGER / SUPERVISOR — filter ผ่านตาราง machine ด้วย roleColumn
+     */
     private Mono<PagedResponse<MaintenanceListDTO>> fetchByMachineRole(
-            Object roleValue, String roleColumn, String keyword, int index, int size) {
+            Long memberId, String roleColumn, String keyword, int index, int size) {
 
         return template.select(
-                        Query.query(Criteria.where(roleColumn).is(roleValue)),
+                        Query.query(Criteria.where(roleColumn).is(memberId)),
                         Machine.class)
                 .map(Machine::getMachineCode)
                 .collectList()
@@ -133,6 +139,44 @@ public class MaintenanceService {
                 });
     }
 
+    /**
+     * ผู้รับผิดชอบ — เห็น record ที่:
+     *   (1) machine.responsible_person_id = memberId   (BIGINT)  →  ได้ machineCode แล้วเอาไป OR
+     *   (2) maintenance_record.responsible_maintenance = employeeId  (VARCHAR)
+     */
+    private Mono<PagedResponse<MaintenanceListDTO>> fetchByResponsible(
+            Long memberId, String employeeId, String keyword, int index, int size) {
+
+        return template.select(
+                        Query.query(Criteria.where("responsible_person_id").is(memberId)),
+                        Machine.class)
+                .map(Machine::getMachineCode)
+                .collectList()
+                .flatMap(machineCodes -> {
+
+                    // OR: machine ที่รับผิดชอบ (BIGINT)  หรือ  record ที่ถูก assign โดยตรง (VARCHAR)
+                    Criteria criteria;
+                    if (machineCodes.isEmpty()) {
+                        criteria = Criteria.where("responsible_maintenance").is(employeeId);
+                    } else {
+                        criteria = Criteria.where("machine_code").in(machineCodes)
+                                .or(Criteria.where("responsible_maintenance").is(employeeId));
+                    }
+
+                    if (StringUtils.hasText(keyword)) {
+                        criteria = criteria.and(
+                                Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
+                    }
+
+                    Query query = Query.query(criteria)
+                            .with(PageRequest.of(index, size, Sort.by("due_date").ascending()));
+
+                    return commonService.executePagedQuery(
+                            index, size, query, criteria,
+                            MaintenanceRecord.class, this::convertMaintenanceListDTOs);
+                });
+    }
+
     // ─── DEPARTMENT SUMMARY WITH ROLE ─────────────────────────────────────────
 
     public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummaryWithRole() {
@@ -143,11 +187,14 @@ public class MaintenanceService {
                     String employeeId = principal.employeeId();
                     Long   memberId   = principal.memberId();
 
+                    // machine.responsible_person_id = BIGINT → ใช้ memberId
+                    // maintenance_record.responsible_maintenance = VARCHAR → ใช้ employeeId
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
                         case "MANAGER"    -> "AND m.manager_id = " + memberId;
                         case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-                        default           -> "AND m.responsible_person_id = '" + employeeId + "'";
+                        default           -> "AND (m.responsible_person_id = " + memberId +
+                                " OR mr.responsible_maintenance = '" + employeeId + "')";
                     };
 
                     return template.getDatabaseClient()
@@ -249,8 +296,11 @@ public class MaintenanceService {
         if (!isUpdate && dto.getDueDate() == null) {
             return Mono.error(new ThrowException("MS001", "Maintenance due date is required"));
         }
-        return template.select(Query.query(Criteria.where("id").is(dto.getId())), MaintenanceRecord.class)
-                .collectList()
+        // ตรวจสอบว่า record มีอยู่จริง
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(dto.getId())),
+                        MaintenanceRecord.class)
+                .switchIfEmpty(Mono.error(new ThrowException("MS018", "Maintenance record not found")))
                 .flatMap(existing -> Mono.just(dto));
     }
 
@@ -302,8 +352,8 @@ public class MaintenanceService {
 
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object value = row.get(columnName);
-        if (value == null)           return 0L;
-        if (value instanceof Long l) return l;
+        if (value == null)             return 0L;
+        if (value instanceof Long l)   return l;
         if (value instanceof Number n) return n.longValue();
         return 0L;
     }

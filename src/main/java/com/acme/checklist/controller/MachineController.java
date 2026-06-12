@@ -4,6 +4,7 @@ import com.acme.checklist.entity.Machine;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.ListResponse;
 import com.acme.checklist.payload.PagedResponse;
+import com.acme.checklist.payload.machine.FilterOptionsDTO;
 import com.acme.checklist.payload.machine.MachineDTO;
 import com.acme.checklist.payload.machine.MachineListDTO;
 import com.acme.checklist.payload.machine.MachineResponseDTO;
@@ -50,8 +51,13 @@ public class MachineController {
             @RequestParam(defaultValue = "0") int index,
             @RequestParam(defaultValue = "10") int size,
             @RequestParam(defaultValue = "false") boolean mine,
-            @RequestParam(required = false) String checkStatus) {
-        return machineService.getByRole(keyword, index, size, mine, checkStatus);
+            @RequestParam(required = false) String checkStatus,
+            @RequestParam(required = false) String department,
+            @RequestParam(required = false) String machineStatus,
+            @RequestParam(required = false) String responsiblePersonName) {
+        return machineService.getByRole(
+                keyword, index, size, mine,
+                checkStatus, department, machineStatus, responsiblePersonName);
     }
 
     @GetMapping("/get/list")
@@ -61,6 +67,15 @@ public class MachineController {
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
         return machineService.getList(keyword, ids, index, size);
+    }
+
+    /**
+     * ดึง distinct filter options ทั้งหมดตาม role ของ user ที่ login
+     * departments → [{code, name}] โดย name = "dept - division" หรือ "dept"
+     */
+    @GetMapping("/filter-options")
+    public Mono<ApiResponse<FilterOptionsDTO>> getFilterOptions() {
+        return machineService.getFilterOptions();
     }
 
     @GetMapping("/machine-code/{machineCode}")

@@ -9,6 +9,7 @@ import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.audit.AuditMemberDTO;
 import com.acme.checklist.payload.calibration.CalibrationDTO;
 import com.acme.checklist.payload.calibration.CalibrationResponseDTO;
+import com.acme.checklist.payload.machine.FilterOptionsDTO;
 import com.acme.checklist.payload.machine.MachineDTO;
 import com.acme.checklist.payload.machine.MachineListDTO;
 import com.acme.checklist.payload.machine.MachineResponseDTO;
@@ -241,7 +242,9 @@ public class MachineService {
     // ─── GET WITH ROLE ────────────────────────────────────────────────────────
 
     public Mono<PagedResponse<MachineListDTO>> getByRole(
-            String keyword, int index, int size, boolean mine, String checkStatus) {
+            String keyword, int index, int size, boolean mine,
+            String checkStatus, String department,
+            String machineStatus, String responsiblePersonName) {
 
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
@@ -251,11 +254,7 @@ public class MachineService {
 
                     if (role.equals("ADMIN")) {
                         Criteria criteria = buildKeywordCriteria(keyword);
-                        if (StringUtils.hasText(checkStatus)) {
-                            criteria = StringUtils.hasText(keyword)
-                                    ? criteria.and(Criteria.where("check_status").is(checkStatus))
-                                    : Criteria.where("check_status").is(checkStatus);
-                        }
+                        criteria = applyExtraFilters(criteria, checkStatus, department, machineStatus, responsiblePersonName);
                         Query query = Query.query(criteria)
                                 .with(commonService.pageable(index, size, "created_at"));
                         return commonService.executePagedQuery(
@@ -264,16 +263,11 @@ public class MachineService {
 
                     Criteria baseCriteria = Criteria.where("machine_status")
                             .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
-
-                    if (StringUtils.hasText(checkStatus)) {
-                        baseCriteria = baseCriteria.and(
-                                Criteria.where("check_status").is(checkStatus));
-                    }
+                    baseCriteria = applyExtraFilters(baseCriteria, checkStatus, department, machineStatus, responsiblePersonName);
 
                     if (mine) {
                         return fetchWithRoleAndKeyword(
-                                baseCriteria.and(
-                                        Criteria.where("responsible_person_id").is(memberId)),
+                                baseCriteria.and(Criteria.where("responsible_person_id").is(memberId)),
                                 keyword, index, size);
                     }
 
@@ -290,6 +284,119 @@ public class MachineService {
 
                     return fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
                 });
+    }
+
+    // ─── FILTER OPTIONS ───────────────────────────────────────────────────────
+    // ดึง distinct values ทั้งหมดตาม role สำหรับ dropdown filter
+    // department label = "department - division" ถ้า division มีค่า ไม่งั้นแค่ "department"
+
+    public Mono<ApiResponse<FilterOptionsDTO>> getFilterOptions() {
+        return ReactiveSecurityContextHolder.getContext()
+                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .flatMap(principal -> {
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
+
+                    String roleFilter = switch (role) {
+                        case "ADMIN"      -> "";
+                        case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId +
+                                " OR m.manager_id = " + memberId + ")";
+                        case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId +
+                                " OR m.supervisor_id = " + memberId + ")";
+                        default           -> "AND m.responsible_person_id = " + memberId;
+                    };
+
+                    // ✅ SELECT d.division ด้วย เพื่อ build label "dept - division"
+                    String sql = """
+                            SELECT DISTINCT
+                                m.department,
+                                d.department       AS department_name,
+                                d.division         AS division,
+                                m.machine_status,
+                                m.check_status,
+                                m.responsible_person_name
+                            FROM machine m
+                            LEFT JOIN department d ON m.department = d.department_code
+                            WHERE m.machine_status IN ('OPERATIONAL','NON-OPERATIONAL','UNDER MAINTENANCE')
+                            %s
+                            ORDER BY m.department, m.machine_status, m.check_status, m.responsible_person_name
+                            """.formatted(roleFilter);
+
+                    return template.getDatabaseClient()
+                            .sql(sql)
+                            .map((row, meta) -> new Object[]{
+                                    row.get("department",            String.class),
+                                    row.get("department_name",       String.class),
+                                    row.get("division",              String.class),
+                                    row.get("machine_status",        String.class),
+                                    row.get("check_status",          String.class),
+                                    row.get("responsible_person_name", String.class)
+                            })
+                            .all()
+                            .collectList()
+                            .map(rows -> {
+                                // LinkedHashMap รักษาลำดับ insert แรก (putIfAbsent)
+                                Map<String, String> deptMap         = new LinkedHashMap<>();
+                                Set<String>         machineStatuses = new LinkedHashSet<>();
+                                Set<String>         checkStatuses   = new LinkedHashSet<>();
+                                Set<String>         responsiblePersons = new LinkedHashSet<>();
+
+                                for (Object[] row : rows) {
+                                    String deptCode  = (String) row[0];
+                                    String deptName  = (String) row[1];
+                                    String division  = (String) row[2];
+                                    String mStatus   = (String) row[3];
+                                    String cStatus   = (String) row[4];
+                                    String person    = (String) row[5];
+
+                                    if (deptCode != null && deptName != null) {
+                                        // ✅ "department - division" ถ้า division มีค่า
+                                        String label = buildDeptLabel(deptName, division);
+                                        deptMap.putIfAbsent(deptCode, label);
+                                    }
+                                    if (StringUtils.hasText(mStatus)) machineStatuses.add(mStatus);
+                                    if (StringUtils.hasText(cStatus)) checkStatuses.add(cStatus);
+                                    if (StringUtils.hasText(person))  responsiblePersons.add(person);
+                                }
+
+                                // แปลง deptMap → List<Map<code, name>>
+                                List<Map<String, String>> departments = deptMap.entrySet().stream()
+                                        .map(e -> Map.of("code", e.getKey(), "name", e.getValue()))
+                                        .toList();
+
+                                FilterOptionsDTO dto = new FilterOptionsDTO();
+                                dto.setDepartments(departments);
+                                dto.setMachineStatuses(new ArrayList<>(machineStatuses));
+                                dto.setCheckStatuses(new ArrayList<>(checkStatuses));
+                                dto.setResponsiblePersons(new ArrayList<>(responsiblePersons));
+                                return ApiResponse.success("MS040", dto);
+                            });
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch filter options: {}", e.getMessage());
+                    return Mono.just(ApiResponse.error("MS041", e.getMessage()));
+                });
+    }
+
+    // ─── APPLY EXTRA FILTERS ──────────────────────────────────────────────────
+
+    private Criteria applyExtraFilters(
+            Criteria criteria,
+            String checkStatus,
+            String department,
+            String machineStatus,
+            String responsiblePersonName) {
+
+        if (StringUtils.hasText(department))
+            criteria = criteria.and(Criteria.where("department").is(department));
+        if (StringUtils.hasText(machineStatus))
+            criteria = criteria.and(Criteria.where("machine_status").is(machineStatus));
+        if (StringUtils.hasText(checkStatus))
+            criteria = criteria.and(Criteria.where("check_status").is(checkStatus));
+        if (StringUtils.hasText(responsiblePersonName))
+            criteria = criteria.and(Criteria.where("responsible_person_name").is(responsiblePersonName));
+
+        return criteria;
     }
 
     private Mono<PagedResponse<MachineListDTO>> fetchWithRoleAndKeyword(
@@ -442,7 +549,7 @@ public class MachineService {
                             .flatMap(code -> template.selectOne(
                                             Query.query(Criteria.where("department_code").is(code)),
                                             Department.class)
-                                    .map(Department::getDepartment))
+                                    .map(dept -> buildDeptLabel(dept.getDepartment(), dept.getDivision())))
                             .defaultIfEmpty(deptCode != null ? deptCode : "");
 
                     return Mono.zip(calibMono, maintMono, auditMono, qrMono, supNameMono, mgrNameMono)
@@ -555,7 +662,6 @@ public class MachineService {
                 .registerDate(dto.getRegisterDate())
                 .certificatePeriod(dto.getCertificatePeriod())
                 .reasonCancel(dto.getReasonCancel())
-                // ── warranty ──────────────────────────────────────────────────
                 .hasWarranty(dto.getHasWarranty())
                 .warrantyNote("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null)
                 .warrantyExpireDate("YES".equals(dto.getHasWarranty()) && dto.getWarrantyExpireDate() != null
@@ -591,9 +697,7 @@ public class MachineService {
         addIfNotNull(p, "register_id",             dto.getRegisterId());
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
-
-        // ── warranty ──────────────────────────────────────────────────────────
-        addIfNotNull(p, "has_warranty", dto.getHasWarranty());
+        addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
         p.put(SqlIdentifier.quoted("warranty_note"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
         p.put(SqlIdentifier.quoted("warranty_expire_date"),
@@ -601,7 +705,6 @@ public class MachineService {
                         ? dto.getWarrantyExpireDate().toLocalDate() : null);
         p.put(SqlIdentifier.quoted("warranty_files"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyFiles() : null);
-
         p.put(SqlIdentifier.quoted("responsible_person_id"), dto.getResponsiblePersonId());
         p.put(SqlIdentifier.quoted("supervisor_id"),         dto.getSupervisorId());
         p.put(SqlIdentifier.quoted("manager_id"),            dto.getManagerId());
@@ -622,6 +725,19 @@ public class MachineService {
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
+
+    /**
+     * Build department display label:
+     * - มี division → "department - division"
+     * - ไม่มี division → "department"
+     */
+    private String buildDeptLabel(String deptName, String division) {
+        if (deptName == null) return "";
+        if (StringUtils.hasText(division)) {
+            return deptName + " - " + division.trim();
+        }
+        return deptName;
+    }
 
     private Mono<String> resolveMemberName(Long memberId) {
         if (memberId == null) return Mono.just("");
@@ -649,6 +765,7 @@ public class MachineService {
         return Criteria.empty();
     }
 
+    // ✅ ใช้ buildDeptLabel เพื่อ format "dept - division" หรือ "dept"
     private Flux<MachineListDTO> convertMachineListDTOs(List<Machine> machines) {
         List<String> codes = machines.stream()
                 .map(Machine::getDepartment)
@@ -656,14 +773,19 @@ public class MachineService {
                 .distinct()
                 .toList();
 
+        if (codes.isEmpty()) {
+            return Flux.fromIterable(machines)
+                    .map(machine -> MachineListDTO.from(machine, ""));
+        }
+
         return template.select(
                         Query.query(Criteria.where("department_code").in(codes)),
                         Department.class)
-                .collectMap(Department::getDepartmentCode, Department::getDepartment)
+                .collectMap(Department::getDepartmentCode, dept -> buildDeptLabel(dept.getDepartment(), dept.getDivision()))
                 .flatMapMany(deptMap -> Flux.fromIterable(machines)
                         .map(machine -> {
-                            String deptName = deptMap.getOrDefault(machine.getDepartment(), machine.getDepartment());
-                            return MachineListDTO.from(machine, deptName);
+                            String label = deptMap.getOrDefault(machine.getDepartment(), machine.getDepartment() != null ? machine.getDepartment() : "");
+                            return MachineListDTO.from(machine, label);
                         }));
     }
 
