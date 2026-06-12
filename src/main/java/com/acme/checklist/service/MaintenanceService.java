@@ -26,10 +26,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -75,10 +72,9 @@ public class MaintenanceService {
 
     public Mono<PagedResponse<MaintenanceListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role       = principal.role();
-                    String employeeId = principal.employeeId();
                     Long   memberId   = principal.memberId();
 
                     return switch (role) {
@@ -94,8 +90,8 @@ public class MaintenanceService {
                         case "SUPERVISOR" -> fetchByMachineRole(memberId, "supervisor_id", keyword, index, size);
 
                         // ผู้รับผิดชอบ: เห็น record ที่ machine.responsible_person_id = memberId (BIGINT)
-                        //               หรือ maintenance_record.responsible_maintenance = employeeId (VARCHAR)
-                        default -> fetchByResponsible(memberId, employeeId, keyword, index, size);
+                        //               หรือ maintenance_record.responsible_maintenance = memberId (BIGINT)
+                        default -> fetchByResponsible(memberId, keyword, index, size);
                     };
                 });
     }
@@ -141,11 +137,11 @@ public class MaintenanceService {
 
     /**
      * ผู้รับผิดชอบ — เห็น record ที่:
-     *   (1) machine.responsible_person_id = memberId   (BIGINT)  →  ได้ machineCode แล้วเอาไป OR
-     *   (2) maintenance_record.responsible_maintenance = employeeId  (VARCHAR)
+     *   (1) machine.responsible_person_id = memberId   (BIGINT)
+     *   (2) maintenance_record.responsible_maintenance = memberId  (BIGINT)
      */
     private Mono<PagedResponse<MaintenanceListDTO>> fetchByResponsible(
-            Long memberId, String employeeId, String keyword, int index, int size) {
+            Long memberId, String keyword, int index, int size) {
 
         return template.select(
                         Query.query(Criteria.where("responsible_person_id").is(memberId)),
@@ -154,13 +150,13 @@ public class MaintenanceService {
                 .collectList()
                 .flatMap(machineCodes -> {
 
-                    // OR: machine ที่รับผิดชอบ (BIGINT)  หรือ  record ที่ถูก assign โดยตรง (VARCHAR)
+                    // OR: machine ที่รับผิดชอบ (BIGINT)  หรือ  record ที่ถูก assign โดยตรง (BIGINT)
                     Criteria criteria;
                     if (machineCodes.isEmpty()) {
-                        criteria = Criteria.where("responsible_maintenance").is(employeeId);
+                        criteria = Criteria.where("responsible_maintenance").is(memberId);
                     } else {
                         criteria = Criteria.where("machine_code").in(machineCodes)
-                                .or(Criteria.where("responsible_maintenance").is(employeeId));
+                                .or(Criteria.where("responsible_maintenance").is(memberId));
                     }
 
                     if (StringUtils.hasText(keyword)) {
@@ -181,20 +177,19 @@ public class MaintenanceService {
 
     public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummaryWithRole() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    String role       = principal.role();
-                    String employeeId = principal.employeeId();
-                    Long   memberId   = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
 
-                    // machine.responsible_person_id = BIGINT → ใช้ memberId
-                    // maintenance_record.responsible_maintenance = VARCHAR → ใช้ employeeId
+                    // ทุก column เป็น BIGINT → ใช้ memberId ทั้งหมด (ปลอดภัยจาก SQL Injection)
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
                         case "MANAGER"    -> "AND m.manager_id = " + memberId;
                         case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+                        // machine.responsible_person_id (BIGINT) หรือ maintenance_record.responsible_maintenance (BIGINT)
                         default           -> "AND (m.responsible_person_id = " + memberId +
-                                " OR mr.responsible_maintenance = '" + employeeId + "')";
+                                " OR mr.responsible_maintenance = " + memberId + ")";
                     };
 
                     return template.getDatabaseClient()
@@ -352,10 +347,11 @@ public class MaintenanceService {
 
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object value = row.get(columnName);
-        if (value == null)             return 0L;
-        if (value instanceof Long l)   return l;
-        if (value instanceof Number n) return n.longValue();
-        return 0L;
+        return switch (value) {
+            case Long l -> l;
+            case Number n -> n.longValue();
+            case null, default -> 0L;
+        };
     }
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
