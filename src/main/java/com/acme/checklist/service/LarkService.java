@@ -1,6 +1,7 @@
 package com.acme.checklist.service;
 
 import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.RegisterRequest;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.request.RequestOptions;
 import com.lark.oapi.service.contact.v3.model.BatchGetIdUserReq;
@@ -98,6 +99,33 @@ public class LarkService {
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .then();
+    }
+
+    // LarkService.java — เพิ่ม method นี้
+    public Mono<Void> sendRegisterNotification(String openId, RegisterRequest registerRequest) {
+        String cardJson = buildRegisterCardJson(registerRequest);
+        return sendCardMessage(openId, cardJson);
+    }
+
+    private String buildRegisterCardJson(RegisterRequest req) {
+        String machineName = req.getMachineName() != null ? req.getMachineName() : "-";
+        String department  = req.getDepartment()  != null ? req.getDepartment()  : "-";
+        String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
+
+        return """
+        {
+          "type": "template",
+          "data": {
+            "template_id": "AAqkOi53Gw8W5",
+            "template_variable": {
+              "title": "🔔 มีการลงทะเบียนเครื่องจักรใหม่",
+              "machine_name": "%s",
+              "department": "%s",
+              "serial_number": "%s"
+            }
+          }
+        }
+        """.formatted(machineName, department, serialNo);
     }
 
     public void updateRecord(String recordId, Map<String, Object> fields) throws Exception {

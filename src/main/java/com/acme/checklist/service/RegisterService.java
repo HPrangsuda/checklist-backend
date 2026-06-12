@@ -29,6 +29,7 @@ import java.util.*;
 @Service
 @AllArgsConstructor
 public class RegisterService {
+    private final LarkService larkService;
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
     private final ObjectMapper objectMapper;
@@ -38,6 +39,7 @@ public class RegisterService {
                 .flatMap(validateDTO -> {
                     RegisterRequest registerRequest = buildFromDTO(validateDTO);
                     return commonService.save(registerRequest, RegisterRequest.class)
+                            .flatMap(this::sendLarkNotificationToMember)
                             .then(Mono.just(ApiResponse.success("RG001")));
                 })
                 .onErrorResume(e -> {
@@ -69,6 +71,107 @@ public class RegisterService {
                 RegisterRequest::getMachineName,
                 names -> Mono.empty()
         );
+    }
+
+    private Mono<Void> sendLarkNotificationToMember(RegisterRequest saved) {
+        List<Long> targetMemberIds = List.of(1L, 3L);
+
+        return template.getDatabaseClient()
+                .sql("SELECT id, first_name, mobiles FROM member WHERE id = ANY($1)")
+                .bind(0, targetMemberIds.toArray(new Long[0]))
+                .fetch().all()
+                .collectList()
+                .flatMap(rows -> {
+                    List<String> rawMobiles = rows.stream()
+                            .map(row -> row.get("mobiles"))
+                            .filter(v -> v != null && !v.toString().isBlank())
+                            .map(Object::toString)
+                            .toList();
+
+                    log.info("Raw mobiles for ids={}: {}", targetMemberIds, rawMobiles);
+
+                    if (rawMobiles.isEmpty()) {
+                        log.warn("No mobile found for member ids={}", targetMemberIds);
+                        return Mono.<Void>empty();
+                    }
+
+                    return larkService.batchGetOpenIdsByMobile(rawMobiles)
+                            .flatMap(openIdMap -> {
+                                List<Mono<Void>> sends = rawMobiles.stream()
+                                        .map(mobile -> {
+                                            // ลอง +66 format ด้วย
+                                            String normalized = mobile.startsWith("+66")
+                                                    ? "0" + mobile.substring(3) : mobile;
+                                            String openId = openIdMap.getOrDefault(mobile,
+                                                    openIdMap.get(normalized));
+                                            if (openId == null) {
+                                                log.warn("Cannot resolve open_id for mobile={}", mobile);
+                                                return Mono.<Void>empty();
+                                            }
+                                            log.info("Sending to openId={}", openId);
+                                            return larkService.sendCardMessage(openId, buildRegisterCardJson(saved));
+                                        })
+                                        .toList();
+
+                                return Mono.when(sends); // ส่งพร้อมกันทุก member
+                            });
+                })
+                .onErrorResume(e -> {
+                    log.error("Lark notify error: {}", e.getMessage(), e);
+                    return Mono.empty();
+                });
+    }
+
+    private String buildRegisterCardJson(RegisterRequest req) {
+        String machineName = req.getMachineName() != null ? req.getMachineName() : "-";
+        String department  = req.getDepartment()  != null ? req.getDepartment()  : "-";
+        String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
+
+        return """
+            {
+              "config": { "wide_screen_mode": true },
+              "header": {
+                "title": {
+                  "tag": "plain_text",
+                  "content": "🔔 มีการลงทะเบียนเครื่องจักรใหม่"
+                },
+                "template": "blue"
+              },
+              "elements": [
+                {
+                  "tag": "div",
+                  "fields": [
+                    {
+                      "is_short": true,
+                      "text": {
+                        "tag": "lark_md",
+                        "content": "**ชื่อเครื่องจักร**\\n%s"
+                      }
+                    },
+                    {
+                      "is_short": true,
+                      "text": {
+                        "tag": "lark_md",
+                        "content": "**แผนก**\\n%s"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "tag": "div",
+                  "fields": [
+                    {
+                      "is_short": true,
+                      "text": {
+                        "tag": "lark_md",
+                        "content": "**Serial No**\\n%s"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """.formatted(machineName, department, serialNo);
     }
 
     public Mono<PagedResponse<RegisterListDTO>> getWithRole(String keyword, int index, int size) {
