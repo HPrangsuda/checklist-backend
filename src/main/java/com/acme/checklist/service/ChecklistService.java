@@ -73,9 +73,9 @@ public class ChecklistService {
     private Mono<ApiResponse<Void>> processSave(ChecklistDTO dto) {
         dto.setCheckType("GENERAL");
         return template.selectOne(
-                        Query.query(Criteria.where("machine_code").is(dto.getMachineCode())),
+                        Query.query(Criteria.where("id").is(dto.getMachineId())),  // ← แก้
                         Machine.class)
-                .switchIfEmpty(Mono.error(new RuntimeException("Machine not found: " + dto.getMachineCode())))
+                .switchIfEmpty(Mono.error(new RuntimeException("Machine not found: " + dto.getMachineId())))
                 .flatMap(machine -> ReactiveSecurityContextHolder.getContext()
                         .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                         .flatMap(principal -> {
@@ -107,7 +107,7 @@ public class ChecklistService {
                                         .then();
 
                                 Mono<Void> updateMachine = template.update(Machine.class)
-                                        .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
+                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))  // ← แก้
                                         .apply(Update.update("check_status", record.getChecklistStatus())
                                                 .set("machine_status", dto.getMachineStatus()))
                                         .then();
@@ -122,7 +122,7 @@ public class ChecklistService {
                                 record.setRecheck(false);
 
                                 Mono<Void> updateMachine = template.update(Machine.class)
-                                        .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
+                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))  // ← แก้
                                         .apply(Update.update("machine_status", dto.getMachineStatus())
                                                 .set("check_status", record.getChecklistStatus()))
                                         .then();
@@ -220,7 +220,6 @@ public class ChecklistService {
     public Mono<ApiResponse<ChecklistResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), ChecklistRecord.class)
                 .flatMap(record -> {
-                    // ── audit member ids (createdBy, updatedBy) ──
                     List<Long> auditIds = new ArrayList<>();
                     if (record.getCreatedBy() != null) auditIds.add(record.getCreatedBy());
                     if (record.getUpdatedBy() != null) auditIds.add(record.getUpdatedBy());
@@ -229,7 +228,6 @@ public class ChecklistService {
                             ? Mono.just(new HashMap<>())
                             : commonService.fetchMembersByIds(auditIds);
 
-                    // ── supervisor ──
                     Mono<MemberDTO> supervisorMono = (record.getSupervisor() != null)
                             ? template.selectOne(
                                     Query.query(Criteria.where("id").is(record.getSupervisor())),
@@ -238,7 +236,6 @@ public class ChecklistService {
                             .defaultIfEmpty(new MemberDTO())
                             : Mono.just(new MemberDTO());
 
-                    // ── manager ──
                     Mono<MemberDTO> managerMono = (record.getManager() != null)
                             ? template.selectOne(
                                     Query.query(Criteria.where("id").is(record.getManager())),
@@ -258,7 +255,6 @@ public class ChecklistService {
                                 AuditMemberDTO updatedByDTO = record.getUpdatedBy() != null && auditMap.get(record.getUpdatedBy()) != null
                                         ? AuditMemberDTO.from(auditMap.get(record.getUpdatedBy())) : null;
 
-                                // ถ้า supervisor/manager ไม่มี id ให้ส่ง null แทน empty object
                                 MemberDTO supervisorDTO = (supervisor.getId() != null) ? supervisor : null;
                                 MemberDTO managerDTO    = (manager.getId()    != null) ? manager    : null;
 

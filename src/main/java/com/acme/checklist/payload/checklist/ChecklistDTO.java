@@ -15,6 +15,7 @@ public class ChecklistDTO {
     private Long id;
     private String checkType;
     private Boolean recheck;
+    private Long machineId;
     private String machineCode;
     private String machineName;
     private String machineStatus;

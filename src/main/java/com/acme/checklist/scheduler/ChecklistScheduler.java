@@ -55,7 +55,7 @@ public class ChecklistScheduler {
         LocalDate friday = today.with(DayOfWeek.FRIDAY);
 
         Instant startOfWeek = monday.atStartOfDay(ZONE).toInstant();
-        Instant endOfWeek   = friday.atTime(23, 59, 59).atZone(ZONE).toInstant();
+        Instant endOfWeek   = friday.plusDays(1).atStartOfDay(ZONE).toInstant().minusNanos(1);
 
         log.info("[CHECKLIST-AUTO] Weekly run — week {} ~ {}", monday, friday);
 
@@ -63,6 +63,7 @@ public class ChecklistScheduler {
                         Query.query(
                                 Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
                                         .and("reset_period").is("WEEKLY")
+                                        .and("check_status").is("PENDING")
                         ),
                         Machine.class
                 )
@@ -75,8 +76,6 @@ public class ChecklistScheduler {
                             return saveDefaultRecord(machine);
                         })
                 )
-                .onErrorContinue((e, obj) -> log.error("[CHECKLIST-AUTO] Weekly error: {}", e.getMessage()))
-                .doOnComplete(() -> log.info("[CHECKLIST-AUTO] Weekly run completed"))
                 .then()
                 .block();
     }
@@ -90,7 +89,7 @@ public class ChecklistScheduler {
         LocalDate lastDayOfPrevMonth  = today.minusMonths(1).withDayOfMonth(today.minusMonths(1).lengthOfMonth());
 
         Instant startOfPrevMonth = firstDayOfPrevMonth.atStartOfDay(ZONE).toInstant();
-        Instant endOfPrevMonth   = lastDayOfPrevMonth.atTime(23, 59, 59).atZone(ZONE).toInstant();
+        Instant endOfPrevMonth   = lastDayOfPrevMonth.plusDays(1).atStartOfDay(ZONE).toInstant().minusNanos(1);
 
         log.info("[CHECKLIST-AUTO] Monthly run — {} ~ {}", firstDayOfPrevMonth, lastDayOfPrevMonth);
 
@@ -98,20 +97,18 @@ public class ChecklistScheduler {
                         Query.query(
                                 Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
                                         .and("reset_period").is("MONTHLY")
+                                        .and("check_status").is("PENDING")
                         ),
                         Machine.class
                 )
                 .flatMap(machine -> hasChecklistRecord(machine, startOfPrevMonth, endOfPrevMonth)
                         .flatMap(exists -> {
                             if (exists) {
-                                log.info("[CHECKLIST-AUTO] Skip machine={} (record exists)", machine.getMachineCode());
                                 return Mono.empty();
                             }
                             return saveDefaultRecord(machine);
                         })
                 )
-                .onErrorContinue((e, obj) -> log.error("[CHECKLIST-AUTO] Monthly error: {}", e.getMessage()))
-                .doOnComplete(() -> log.info("[CHECKLIST-AUTO] Monthly run completed"))
                 .then()
                 .block();
     }
@@ -139,10 +136,7 @@ public class ChecklistScheduler {
                                                 .and("machine_code").in(machineCodes)
                                 );
                                 Update update = Update.update("checklist_status", status + "-OVERDUE");
-                                return template.update(query, update, ChecklistRecord.class)
-                                        .doOnSuccess(count -> log.info(
-                                                "[OVERDUE-{}] Updated {} records '{}' → '{}-OVERDUE'",
-                                                period, count, status, status));
+                                return template.update(query, update, ChecklistRecord.class);
                             })
                             .then();
                 });
@@ -156,8 +150,7 @@ public class ChecklistScheduler {
                         ),
                         Update.update("check_status", "PENDING"),
                         Machine.class
-                ).doOnSuccess(count -> log.info("[RESET-{}] Reset {} machines to PENDING", period, count))
-                .then();
+                ).then();
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
@@ -166,7 +159,8 @@ public class ChecklistScheduler {
         return template.count(
                 Query.query(
                         Criteria.where("machine_code").is(machine.getMachineCode())
-                                .and("user_id").is(String.valueOf(machine.getResponsiblePersonId()))
+                                .and("created_by").is(machine.getResponsiblePersonId())
+                                .and("recheck").is(true)
                                 .and("created_at").greaterThanOrEquals(from)
                                 .and("created_at").lessThanOrEquals(to)
                 ),
@@ -215,8 +209,6 @@ public class ChecklistScheduler {
                                     .apply(Update.update("check_status", checklistStatus)
                                             .set("machine_status", machine.getMachineStatus()))
                                     .then())
-                            .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] ✓ Auto-saved machineCode={}", machine.getMachineCode()))
-                            .doOnError(e -> log.error("[CHECKLIST-AUTO] ✗ Failed machineCode={}: {}", machine.getMachineCode(), e.getMessage()))
                             .onErrorResume(e -> Mono.empty());
                 });
     }
