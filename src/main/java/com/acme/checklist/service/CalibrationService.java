@@ -20,10 +20,7 @@ import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -49,7 +46,7 @@ public class CalibrationService {
 
     public Mono<PagedResponse<CalibrationListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role       = principal.role();
                     String employeeId = principal.employeeId();
@@ -58,7 +55,7 @@ public class CalibrationService {
                     return switch (role) {
                         case "ADMIN" -> {
                             Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
+                            Query query = Query.query(criteria).with(commonService.pageable(index, size, "id"));
                             yield commonService.executePagedQuery(index, size, query, criteria,
                                     CalibrationRecord.class, this::convertCalibrationListDTOs);
                         }
