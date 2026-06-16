@@ -21,6 +21,7 @@ import java.util.List;
 @Component
 @RequiredArgsConstructor
 public class ChecklistScheduler {
+
     private final R2dbcEntityTemplate template;
     private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
 
@@ -47,7 +48,6 @@ public class ChecklistScheduler {
     }
 
     // ─── AUTO SAVE WEEKLY ─────────────────────────────────────────────────────
-
     @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
@@ -70,7 +70,8 @@ public class ChecklistScheduler {
                 .flatMap(machine -> hasChecklistRecord(machine, startOfWeek, endOfWeek)
                         .flatMap(exists -> {
                             if (exists) {
-                                log.info("[CHECKLIST-AUTO] Skip machine={} (record exists)", machine.getMachineCode());
+                                log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (recheck record exists)",
+                                        machine.getId(), machine.getMachineCode());
                                 return Mono.empty();
                             }
                             return saveDefaultRecord(machine);
@@ -81,15 +82,16 @@ public class ChecklistScheduler {
     }
 
     // ─── AUTO SAVE MONTHLY ────────────────────────────────────────────────────
-
-    @Scheduled(cron = "0 59 23 1 * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 55 23 1 * *", zone = "Asia/Bangkok")
     public void autoSaveMonthlyChecklistRecords() {
         LocalDate today               = LocalDate.now(ZONE);
         LocalDate firstDayOfPrevMonth = today.minusMonths(1).withDayOfMonth(1);
-        LocalDate lastDayOfPrevMonth  = today.minusMonths(1).withDayOfMonth(today.minusMonths(1).lengthOfMonth());
+        LocalDate lastDayOfPrevMonth  = today.minusMonths(1).withDayOfMonth(
+                today.minusMonths(1).lengthOfMonth());
 
         Instant startOfPrevMonth = firstDayOfPrevMonth.atStartOfDay(ZONE).toInstant();
-        Instant endOfPrevMonth   = lastDayOfPrevMonth.plusDays(1).atStartOfDay(ZONE).toInstant().minusNanos(1);
+        Instant endOfPrevMonth   = lastDayOfPrevMonth.plusDays(1).atStartOfDay(ZONE)
+                .toInstant().minusNanos(1);
 
         log.info("[CHECKLIST-AUTO] Monthly run — {} ~ {}", firstDayOfPrevMonth, lastDayOfPrevMonth);
 
@@ -104,6 +106,8 @@ public class ChecklistScheduler {
                 .flatMap(machine -> hasChecklistRecord(machine, startOfPrevMonth, endOfPrevMonth)
                         .flatMap(exists -> {
                             if (exists) {
+                                log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (recheck record exists)",
+                                        machine.getId(), machine.getMachineCode());
                                 return Mono.empty();
                             }
                             return saveDefaultRecord(machine);
@@ -116,14 +120,15 @@ public class ChecklistScheduler {
     // ─── CORE ─────────────────────────────────────────────────────────────────
 
     private Mono<Void> buildUpdateOverdue(String period) {
+        // ใช้ machine.id แทน machine_code เพราะ machine_code อาจซ้ำในฐานข้อมูล
         return template.select(
                         Query.query(Criteria.where("reset_period").is(period)),
                         Machine.class
                 )
-                .map(Machine::getMachineCode)
+                .map(Machine::getId)
                 .collectList()
-                .flatMap(machineCodes -> {
-                    if (machineCodes.isEmpty()) {
+                .flatMap(machineIds -> {
+                    if (machineIds.isEmpty()) {
                         log.info("[OVERDUE-{}] No machines found for period", period);
                         return Mono.empty();
                     }
@@ -133,7 +138,7 @@ public class ChecklistScheduler {
                             .flatMap(status -> {
                                 Query query = Query.query(
                                         Criteria.where("checklist_status").is(status)
-                                                .and("machine_code").in(machineCodes)
+                                                .and("machine_id").in(machineIds)
                                 );
                                 Update update = Update.update("checklist_status", status + "-OVERDUE");
                                 return template.update(query, update, ChecklistRecord.class);
@@ -144,13 +149,13 @@ public class ChecklistScheduler {
 
     private Mono<Void> resetMachineCheckStatus(String period) {
         return template.update(
-                        Query.query(
-                                Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
-                                        .and("reset_period").is(period)
-                        ),
-                        Update.update("check_status", "PENDING"),
-                        Machine.class
-                ).then();
+                Query.query(
+                        Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
+                                .and("reset_period").is(period)
+                ),
+                Update.update("check_status", "PENDING"),
+                Machine.class
+        ).then();
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
@@ -161,6 +166,7 @@ public class ChecklistScheduler {
                         Criteria.where("machine_code").is(machine.getMachineCode())
                                 .and("created_by").is(machine.getResponsiblePersonId())
                                 .and("recheck").is(true)
+                                .and("check_type").is("GENERAL")
                                 .and("created_at").greaterThanOrEquals(from)
                                 .and("created_at").lessThanOrEquals(to)
                 ),
@@ -170,7 +176,8 @@ public class ChecklistScheduler {
 
     private Mono<Void> saveDefaultRecord(Machine machine) {
         if (machine.getResponsiblePersonId() == null) {
-            log.warn("[CHECKLIST-AUTO] Skip machine={} — responsiblePersonId is null", machine.getMachineCode());
+            log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — responsiblePersonId is null",
+                    machine.getId(), machine.getMachineCode());
             return Mono.empty();
         }
 
@@ -178,7 +185,8 @@ public class ChecklistScheduler {
                         Query.query(Criteria.where("id").is(machine.getResponsiblePersonId())),
                         Member.class
                 )
-                .switchIfEmpty(Mono.error(new RuntimeException("Member not found: " + machine.getResponsiblePersonId())))
+                .switchIfEmpty(Mono.error(new RuntimeException(
+                        "Member not found: " + machine.getResponsiblePersonId())))
                 .flatMap(member -> {
                     String checklistStatus = machine.getSupervisorId() != null
                             ? "PENDING SUPERVISOR"
@@ -205,11 +213,19 @@ public class ChecklistScheduler {
 
                     return template.insert(record)
                             .flatMap(saved -> template.update(Machine.class)
-                                    .matching(Query.query(Criteria.where("machine_code").is(machine.getMachineCode())))
+                                    .matching(Query.query(
+                                            Criteria.where("id").is(machine.getId())
+                                    ))
                                     .apply(Update.update("check_status", checklistStatus)
                                             .set("machine_status", machine.getMachineStatus()))
                                     .then())
-                            .onErrorResume(e -> Mono.empty());
+                            .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Created auto record machine id={} code={} status={}",
+                                    machine.getId(), machine.getMachineCode(), checklistStatus))
+                            .onErrorResume(e -> {
+                                log.error("[CHECKLIST-AUTO] Failed machine id={} code={}: {}",
+                                        machine.getId(), machine.getMachineCode(), e.getMessage());
+                                return Mono.empty();
+                            });
                 });
     }
 }
