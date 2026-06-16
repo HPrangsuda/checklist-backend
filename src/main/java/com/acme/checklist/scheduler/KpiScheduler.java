@@ -2,6 +2,7 @@ package com.acme.checklist.scheduler;
 
 import com.acme.checklist.entity.*;
 import com.acme.checklist.entity.ResponsibleHistory;
+import com.acme.checklist.entity.enums.MachineStatus;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -26,12 +27,10 @@ public class KpiScheduler {
 
     private final R2dbcEntityTemplate template;
 
-    private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
     private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
 
     // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
     // check_all = (เครื่อง non-MONTHLY × จำนวน Friday ทั้งเดือน) + (เครื่อง MONTHLY × 1)
-    // fix ไว้ตั้งแต่ต้นเดือน ไม่เปลี่ยนจนกว่าจะมีการโอนเครื่อง
     @Scheduled(cron = "0 0 0 1 * ?", zone = "Asia/Bangkok")
     public void createKpiRecords() {
         log.info("createKpiRecords started");
@@ -43,16 +42,15 @@ public class KpiScheduler {
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        LocalDate kpiEnd      = lastFriday; // ใช้ทั้งเดือนเสมอ
 
-        log.info("createKpiRecords year={} month={} kpiStart={} kpiEnd={}", year, month, kpiStart, kpiEnd);
+        log.info("createKpiRecords year={} month={} kpiStart={} kpiEnd={}", year, month, kpiStart, lastFriday);
 
-        fetchHistory(kpiStart, kpiEnd)
+        fetchHistory(kpiStart, lastFriday)
                 .doOnNext(h -> log.info("History found: machineCode={} responsiblePersonId={}", h.getMachineCode(), h.getResponsiblePersonId()))
                 .flatMap(h -> findActiveMachine(h.getMachineCode())
                         .map(machine -> {
                             LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
-                            LocalDate ce = clampEnd(h.getEffectiveTo(), kpiEnd);
+                            LocalDate ce = clampEnd(h.getEffectiveTo(), lastFriday);
                             long contribution = "MONTHLY".equals(machine.getResetPeriod())
                                     ? 1L
                                     : countFridaysInRange(cs, ce);
@@ -98,8 +96,6 @@ public class KpiScheduler {
     }
 
     // ─── 2. Recalculate checked รายวัน (ไม่แตะ check_all) ─────────────────────
-    // check_all ถูก fix ตั้งแต่ต้นเดือน อัปเดตเฉพาะเมื่อมีการเปลี่ยนผู้รับผิดชอบ (recalculateCheckAll)
-    // method นี้อัปเดตแค่ checked (จำนวนที่ตรวจสอบจริงสะสมถึงวันนี้)
     @Scheduled(cron = "0 5 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
         LocalDate today = LocalDate.now(BKK);
@@ -110,7 +106,6 @@ public class KpiScheduler {
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        // checked นับตั้งแต่ kpiStart ถึงวันนี้ (หรือ lastFriday ถ้าเลยแล้ว)
         LocalDate checkedEnd  = today.isAfter(lastFriday) ? lastFriday : today;
 
         log.info("recalculateCurrentMonthKpi year={} month={} kpiStart={} checkedEnd={}", year, month, kpiStart, checkedEnd);
@@ -122,11 +117,6 @@ public class KpiScheduler {
                 .flatMapSequential(kpi -> {
                     Long memberId = kpi.getMemberId();
 
-                    // checked = นับ recheck=true ในช่วง kpiStart→checkedEnd
-                    // $1 = memberId (rh.responsible_person_id)
-                    // $2 = memberId (cr.created_by)
-                    // $3 = kpiStart (instant)
-                    // $4 = checkedEnd 23:59:59 (instant)
                     Mono<Long> checkedMono = template.getDatabaseClient()
                             .sql("""
                                 SELECT COUNT(*) FROM checklist_record cr
@@ -139,7 +129,7 @@ public class KpiScheduler {
                                 WHERE cr.created_by = $2
                                   AND cr.recheck = true
                                   AND cr.check_type = 'GENERAL'
-                                  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')
+                                  AND m.machine_status IN (%s)
                                   AND cr.created_at >= $3
                                   AND cr.created_at <= $4
                                   AND (
@@ -148,7 +138,7 @@ public class KpiScheduler {
                                       OR cr.reason_not_checked IS NULL
                                       OR UPPER(cr.reason_not_checked) NOT IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
                                   )
-                                """)
+                                """.formatted(MachineStatus.sqlInClause()))
                             .bind(0, memberId)
                             .bind(1, memberId)
                             .bind(2, kpiStart.atStartOfDay(BKK).toInstant())
@@ -158,7 +148,6 @@ public class KpiScheduler {
                             .defaultIfEmpty(0L)
                             .doOnSuccess(c -> log.info("checked memberId={} → {}", memberId, c));
 
-                    // อัปเดตแค่ checked ไม่แตะ check_all
                     return checkedMono
                             .flatMap(checkedCount -> {
                                 kpi.setChecked(checkedCount);
@@ -178,8 +167,6 @@ public class KpiScheduler {
     }
 
     // ─── 3. Recalculate check_all เมื่อมีการเปลี่ยนผู้รับผิดชอบ ────────────────
-    // เรียกจาก Service ที่ insert/update responsible_history
-    // ส่ง memberId ทั้ง old owner และ new owner ที่ได้รับผลกระทบ
     public Mono<Void> recalculateCheckAll(Long memberId) {
         LocalDate today = LocalDate.now(BKK);
         String year  = String.valueOf(today.getYear());
@@ -191,15 +178,14 @@ public class KpiScheduler {
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        LocalDate kpiEnd      = lastFriday; // check_all ใช้ทั้งเดือนเสมอ
 
-        log.info("recalculateCheckAll memberId={} year={} month={} kpiStart={} kpiEnd={}", memberId, year, month, kpiStart, kpiEnd);
+        log.info("recalculateCheckAll memberId={} year={} month={} kpiStart={} kpiEnd={}", memberId, year, month, kpiStart, lastFriday);
 
         Mono<Long> checkAllMono = fetchHistoryForMember(memberId, firstDay, lastDay)
                 .flatMap(h -> findActiveMachine(h.getMachineCode())
                         .map(machine -> {
                             LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
-                            LocalDate ce = clampEnd(h.getEffectiveTo(), kpiEnd);
+                            LocalDate ce = clampEnd(h.getEffectiveTo(), lastFriday);
                             long contribution = "MONTHLY".equals(machine.getResetPeriod())
                                     ? 1L
                                     : countFridaysInRange(cs, ce);
@@ -234,7 +220,6 @@ public class KpiScheduler {
                                          String year, String month,
                                          long checkAll,
                                          Long managerId, Long supervisorId) {
-        // $1=memberId $2=employeeName $3=years $4=months $5=checkAll $6=checked $7=managerId $8=supervisorId
         DatabaseClient.GenericExecuteSpec spec = template.getDatabaseClient()
                 .sql("""
                     INSERT INTO kpi (member_id, employee_name, years, months, check_all, checked, manager_id, supervisor_id)
@@ -274,16 +259,14 @@ public class KpiScheduler {
 
     // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-    // ดึง Machine active เพื่อตรวจ resetPeriod — คืน empty ถ้า status ไม่ active
     private Mono<Machine> findActiveMachine(String machineCode) {
         return template.select(
                         Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").in(ACTIVE_STATUSES)),
+                                .and("machine_status").in(MachineStatus.activeDbValues())),
                         Machine.class)
                 .next();
     }
 
-    // ดึง responsible_history ทุก member ในช่วง kpiStart→kpiEnd
     private Flux<ResponsibleHistory> fetchHistory(LocalDate kpiStart, LocalDate kpiEnd) {
         return template.getDatabaseClient()
                 .sql("""
@@ -303,7 +286,6 @@ public class KpiScheduler {
                 .all();
     }
 
-    // ดึง responsible_history เฉพาะ member คนเดียว ในช่วงทั้งเดือน
     private Flux<ResponsibleHistory> fetchHistoryForMember(Long memberId, LocalDate firstDay, LocalDate lastDay) {
         return template.getDatabaseClient()
                 .sql("""
@@ -325,7 +307,7 @@ public class KpiScheduler {
                 .all();
     }
 
-    // นับจำนวนวันศุกร์ในช่วง from→to (inclusive)
+    /** นับจำนวนวันศุกร์ในช่วง from→to (inclusive) */
     private long countFridaysInRange(LocalDate from, LocalDate to) {
         if (from.isAfter(to)) return 0;
         long count = 0;

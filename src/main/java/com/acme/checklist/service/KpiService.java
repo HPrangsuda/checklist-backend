@@ -5,6 +5,7 @@ import com.acme.checklist.entity.Kpi;
 import com.acme.checklist.entity.Machine;
 import com.acme.checklist.entity.Member;
 import com.acme.checklist.entity.ResponsibleHistory;
+import com.acme.checklist.entity.enums.MachineStatus;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
@@ -30,7 +31,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
-import java.util.List;
+import java.util.Objects;
 
 @Slf4j
 @Service
@@ -39,8 +40,6 @@ public class KpiService {
 
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
-
-    private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
@@ -59,37 +58,38 @@ public class KpiService {
     }
 
     // ─── RECALCULATE KPI FOR PERSON ───────────────────────────────────────────
-    // ใช้แทน updateOrCreateKpi() — คำนวณจาก responsible_history จริง
-    // เรียกจาก ChecklistService และ MachineService
-
     public Mono<Void> recalculateKpiForPerson(Long memberId) {
         if (memberId == null) return Mono.empty();
 
-        LocalDate today      = LocalDate.now();
-        YearMonth ym         = YearMonth.from(today);
-        String year          = String.valueOf(today.getYear());
-        String month         = String.format("%02d", today.getMonthValue());
-        LocalDate firstDay   = ym.atDay(1);
-        LocalDate lastDay    = ym.atEndOfMonth();
-        LocalDate lastFriday = getLastFridayOfMonth(ym);
+        LocalDate today       = LocalDate.now();
+        YearMonth ym          = YearMonth.from(today);
+        String year           = String.valueOf(today.getYear());
+        String month          = String.format("%02d", today.getMonthValue());
+        LocalDate firstDay    = ym.atDay(1);
+        LocalDate lastDay     = ym.atEndOfMonth();
+        LocalDate firstFriday = getFirstFridayOfMonth(ym);
+        LocalDate lastFriday  = getLastFridayOfMonth(ym);
+        LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
 
-        // ดึง history ของ member ที่ active ในเดือนนี้
         Criteria historyCriteria = Criteria
                 .where("responsible_person_id").is(memberId)
                 .and("effective_from").lessThanOrEquals(lastDay)
                 .and(Criteria.where("effective_to").isNull()
                         .or(Criteria.where("effective_to").greaterThanOrEquals(firstDay)));
 
-        // นับวันศุกร์จาก history จริง (คำนึง partial month + machine active)
         Mono<Long> checkAllMono = template.select(
                         Query.query(historyCriteria), ResponsibleHistory.class)
-                .filterWhen(h -> isMachineActive(h.getMachineCode()))
-                .collectList()
-                .map(histories -> histories.stream()
-                        .mapToLong(h -> countFridaysInRange(
-                                clampStart(h.getEffectiveFrom(), firstDay),
-                                clampEnd(h.getEffectiveTo(), lastFriday)))
-                        .sum());
+                .flatMap(h -> findActiveMachine(h.getMachineCode())
+                        .map(machine -> {
+                            LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
+                            LocalDate ce = clampEnd(h.getEffectiveTo(), lastFriday);
+                            // แยก MONTHLY = 1L เหมือน KpiScheduler
+                            return "MONTHLY".equals(machine.getResetPeriod())
+                                    ? 1L
+                                    : countFridaysInRange(cs, ce);
+                        })
+                        .defaultIfEmpty(0L))
+                .reduce(0L, Long::sum);
 
         Mono<Member> memberMono = template.selectOne(
                 Query.query(Criteria.where("id").is(memberId)), Member.class);
@@ -139,7 +139,7 @@ public class KpiService {
             String year, String month, String keyword, int index, int size) {
 
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -191,10 +191,9 @@ public class KpiService {
                     LocalDate firstFriday = getFirstFridayOfMonth(ym);
                     LocalDate lastFriday  = getLastFridayOfMonth(ym);
                     LocalDate start       = firstFriday.with(DayOfWeek.MONDAY);
-                    LocalDate end         = lastFriday;
 
                     Instant startInstant = start.atStartOfDay(ZoneOffset.UTC).toInstant();
-                    Instant endInstant   = end.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
+                    Instant endInstant   = lastFriday.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
 
                     Criteria criteria = Criteria
                             .where("created_by").is(kpi.getMemberId())
@@ -251,14 +250,12 @@ public class KpiService {
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-    private Mono<Boolean> isMachineActive(String machineCode) {
+    private Mono<Machine> findActiveMachine(String machineCode) {
         return template.select(
                         Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").in(ACTIVE_STATUSES)),
+                                .and("machine_status").in(MachineStatus.activeDbValues())),
                         Machine.class)
-                .next()
-                .map(m -> !"MONTHLY".equals(m.getResetPeriod()))
-                .defaultIfEmpty(false);
+                .next();
     }
 
     private long countFridaysInRange(LocalDate from, LocalDate to) {
