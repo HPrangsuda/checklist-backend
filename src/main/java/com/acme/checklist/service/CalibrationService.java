@@ -12,14 +12,14 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
-import org.springframework.data.relational.core.query.Update;
-import org.springframework.data.relational.core.sql.SqlIdentifier;
+import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.LocalDate;
 import java.util.*;
 
 @Slf4j
@@ -34,10 +34,15 @@ public class CalibrationService {
 
     public Mono<ApiResponse<Void>> update(CalibrationDTO dto) {
         return validateData(dto)
-                .flatMap(v -> commonService.update(dto.getId(), buildUpdateFromDTO(v), CalibrationRecord.class)
-                        .then(Mono.just(ApiResponse.success("MS003"))))
+                .flatMap(v -> {
+                    DatabaseClient.GenericExecuteSpec spec = buildUpdateSpec(v);
+                    if (spec == null) {
+                        return Mono.just(ApiResponse.<Void>success("MS003"));
+                    }
+                    return spec.then()
+                            .then(Mono.just(ApiResponse.<Void>success("MS003")));
+                })
                 .onErrorResume(e -> {
-                    log.error("Failed to update the calibration: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS004", e.getMessage()));
                 });
     }
@@ -87,7 +92,7 @@ public class CalibrationService {
                                 Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
                     }
 
-                    Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
+                    Query query = Query.query(criteria).with(commonService.pageable(index, size, "id"));
                     return commonService.executePagedQuery(index, size, query, criteria,
                             CalibrationRecord.class, this::convertCalibrationListDTOs);
                 });
@@ -97,18 +102,9 @@ public class CalibrationService {
 
     public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummaryWithRole() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    String role       = principal.role();
-                    String employeeId = principal.employeeId();
-                    Long   memberId   = principal.memberId();
-
-                    String roleFilter = switch (role) {
-                        case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND m.manager_id = " + memberId;
-                        case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-                        default           -> "AND m.responsible_person_id = '" + employeeId + "'";
-                    };
+                    String roleFilter = getString(principal);
 
                     String sql = """
                         SELECT
@@ -149,6 +145,19 @@ public class CalibrationService {
                                 return Flux.empty();
                             });
                 });
+    }
+
+    private static String getString(MemberPrincipal principal) {
+        String role       = principal.role();
+        String employeeId = principal.employeeId();
+        Long   memberId   = principal.memberId();
+
+        return switch (role) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND m.manager_id = " + memberId;
+            case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+            default           -> "AND m.responsible_person_id = '" + employeeId + "'";
+        };
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
@@ -195,11 +204,10 @@ public class CalibrationService {
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
 
     public Mono<CalibrationDTO> validateData(CalibrationDTO dto) {
-        if (dto.getDueDate() == null) {
-            return Mono.error(new ThrowException("MS008", "Calibration due date is required"));
-        }
-        return template.select(Query.query(Criteria.where("id").is(dto.getId())), CalibrationRecord.class)
-                .collectList()
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(dto.getId())),
+                        CalibrationRecord.class)
+                .switchIfEmpty(Mono.error(new ThrowException("MS018", "Calibration not found")))
                 .flatMap(existing -> Mono.just(dto));
     }
 
@@ -212,29 +220,65 @@ public class CalibrationService {
         return Criteria.empty();
     }
 
-    private Update buildUpdateFromDTO(CalibrationDTO dto) {
-        Map<SqlIdentifier, Object> p = new HashMap<>();
-        addIfNotNull(p, "dueDate",              dto.getDueDate());
-        addIfNotNull(p, "startDate",            dto.getStartDate());
-        addIfNotNull(p, "certificateDate",      dto.getCertificateDate());
-        addIfNotNull(p, "results",              dto.getResults());
-        addIfNotNull(p, "criteria",             dto.getCriteria());
-        addIfNotNull(p, "measuringRange",       dto.getMeasuringRange());
-        addIfNotNull(p, "accuracy",             dto.getAccuracy());
-        addIfNotNull(p, "calibrationRange",     dto.getCalibrationRange());
-        addIfNotNull(p, "calibrationStatus",    dto.getCalibrationStatus());
-        addIfNotNull(p, "attachment",           dto.getAttachment());
-        addIfNotNull(p, "note",                 dto.getNote());
-        addIfNotNull(p, "permissibleCapacity",  dto.getPermissibleCapacity());
-        addIfNotNull(p, "comment",              dto.getComment());
-        addIfNotNull(p, "resolution",           dto.getResolution());
-        addIfNotNull(p, "maxUncertainty",       dto.getMaxUncertainty());
-        addIfNotNull(p, "mpe",                  dto.getMpe());
-        addIfNotNull(p, "checkMpe",             dto.getCheckMpe());
-        addIfNotNull(p, "checkResolution",      dto.getCheckResolution());
-        addIfNotNull(p, "checkResult",          dto.getCheckResult());
-        addIfNotNull(p, "reasonNotPass",        dto.getReasonNotPass());
-        return Update.from(p);
+    private DatabaseClient.GenericExecuteSpec buildUpdateSpec(CalibrationDTO dto) {
+        List<String> sets   = new ArrayList<>();
+        List<Object> values = new ArrayList<>();
+
+        // ✅ แก้ไข: bind LocalDate โดยตรง ไม่ต้องแปลงเป็น String และไม่ต้อง ::date cast
+        // R2DBC driver จัดการ LocalDate → SQL date type ให้อัตโนมัติ
+        addDateParam(sets, values, "due_date",         dto.getDueDate());
+        addDateParam(sets, values, "start_date",       dto.getStartDate());
+        addDateParam(sets, values, "certificate_date", dto.getCertificateDate());
+
+        // String fields ปกติ
+        addParam(sets, values, "results",              dto.getResults());
+        addParam(sets, values, "criteria",             dto.getCriteria());
+        addParam(sets, values, "measuring_range",      dto.getMeasuringRange());
+        addParam(sets, values, "accuracy",             dto.getAccuracy());
+        addParam(sets, values, "calibration_range",    dto.getCalibrationRange());
+        addParam(sets, values, "calibration_status",   dto.getCalibrationStatus());
+        addParam(sets, values, "attachment",           dto.getAttachment());
+        addParam(sets, values, "note",                 dto.getNote());
+        addParam(sets, values, "permissible_capacity", dto.getPermissibleCapacity());
+        addParam(sets, values, "comment",              dto.getComment());
+        addParam(sets, values, "resolution",           dto.getResolution());
+        addParam(sets, values, "max_uncertainty",      dto.getMaxUncertainty());
+        addParam(sets, values, "mpe",                  dto.getMpe());
+        addParam(sets, values, "check_mpe",            dto.getCheckMpe());
+        addParam(sets, values, "check_resolution",     dto.getCheckResolution());
+        addParam(sets, values, "check_result",         dto.getCheckResult());
+        addParam(sets, values, "reason_not_pass",      dto.getReasonNotPass());
+
+        if (sets.isEmpty()) return null;
+
+        values.add(dto.getId());
+        String sql = "UPDATE calibration_record SET "
+                + String.join(", ", sets)
+                + " WHERE id = $" + values.size();
+
+        log.info("=== UPDATE SQL ===\n{}", sql);
+
+        DatabaseClient.GenericExecuteSpec spec = template.getDatabaseClient().sql(sql);
+        for (int i = 0; i < values.size(); i++) {
+            spec = spec.bind(i, values.get(i));
+        }
+        return spec;
+    }
+
+    // ✅ แก้ไข: bind LocalDate โดยตรง ไม่ต้องแปลงเป็น String และไม่ต้องใช้ ::date cast
+    // ::date syntax ทำให้ R2DBC parse SQL grammar error เพราะ driver handle type mapping เอง
+    private void addDateParam(List<String> sets, List<Object> values, String column, LocalDate value) {
+        if (value != null) {
+            values.add(value);                          // ✅ LocalDate โดยตรง
+            sets.add(column + " = $" + values.size()); // ✅ ไม่มี ::date
+        }
+    }
+
+    private void addParam(List<String> sets, List<Object> values, String column, Object value) {
+        if (value != null) {
+            values.add(value);
+            sets.add(column + " = $" + values.size());
+        }
     }
 
     private Flux<CalibrationListDTO> convertCalibrationListDTOs(List<CalibrationRecord> records) {
@@ -262,13 +306,10 @@ public class CalibrationService {
 
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object v = row.get(columnName);
-        if (v == null) return 0L;
-        if (v instanceof Long l) return l;
-        if (v instanceof Number n) return n.longValue();
-        return 0L;
-    }
-
-    private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
-        if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
+        return switch (v) {
+            case Long l -> l;
+            case Number n -> n.longValue();
+            case null, default -> 0L;
+        };
     }
 }

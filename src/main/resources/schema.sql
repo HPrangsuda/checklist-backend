@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS calibration_record (
     calibration_status VARCHAR(100),
     status_follow VARCHAR(100),
     pr_po_date DATE,
-    attachment VARCHAR(255),
+    attachment TEXT,
     note TEXT,
     permissible_capacity VARCHAR(255),
     comment TEXT,
