@@ -99,7 +99,6 @@ public class RegisterService {
                             .flatMap(openIdMap -> {
                                 List<Mono<Void>> sends = rawMobiles.stream()
                                         .map(mobile -> {
-                                            // ลอง +66 format ด้วย
                                             String normalized = mobile.startsWith("+66")
                                                     ? "0" + mobile.substring(3) : mobile;
                                             String openId = openIdMap.getOrDefault(mobile,
@@ -113,7 +112,7 @@ public class RegisterService {
                                         })
                                         .toList();
 
-                                return Mono.when(sends); // ส่งพร้อมกันทุก member
+                                return Mono.when(sends);
                             });
                 })
                 .onErrorResume(e -> {
@@ -194,13 +193,13 @@ public class RegisterService {
                         case "MANAGER" -> {
                             Criteria roleCriteria = Criteria
                                     .where("created_by").is(memberId)
-                                    .or("manager_id").is(employeeId);
+                                    .or("manager_id").is(Objects.requireNonNull(parseLongOrNull(employeeId)));
                             yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
                         }
                         case "SUPERVISOR" -> {
                             Criteria roleCriteria = Criteria
                                     .where("created_by").is(memberId)
-                                    .or("supervisor_id").is(employeeId);
+                                    .or("supervisor_id").is(Objects.requireNonNull(parseLongOrNull(employeeId)));
                             yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
                         }
                         default -> {
@@ -256,6 +255,7 @@ public class RegisterService {
                             .defaultIfEmpty(registerRequest.getDepartment() != null
                                     ? registerRequest.getDepartment() : "-");
 
+                    // ✅ ส่ง Long โดยตรง ไม่ต้อง String.valueOf แล้ว
                     Mono<String> responsibleMono = resolveMemberName(registerRequest.getResponsibleId());
                     Mono<String>  supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
                     Mono<String>    managerMono  = resolveMemberName(registerRequest.getManagerId());
@@ -293,20 +293,13 @@ public class RegisterService {
                 });
     }
 
-    private Mono<String> resolveMemberName(String memberId) {
-        if (!StringUtils.hasText(memberId)) return Mono.just("-");
-        try {
-            Long id = Long.parseLong(memberId);
-            return template.selectOne(
-                            Query.query(Criteria.where("id").is(id)), Member.class)
-                    .map(m -> m.getFirstName() + " " + m.getLastName())
-                    .defaultIfEmpty(memberId);
-        } catch (NumberFormatException e) {
-            return template.selectOne(
-                            Query.query(Criteria.where("employee_id").is(memberId)), Member.class)
-                    .map(m -> m.getFirstName() + " " + m.getLastName())
-                    .defaultIfEmpty(memberId);
-        }
+    // ✅ รับ Long โดยตรง ไม่ต้อง parse String แล้ว
+    private Mono<String> resolveMemberName(Long memberId) {
+        if (memberId == null) return Mono.just("-");
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(memberId)), Member.class)
+                .map(m -> m.getFirstName() + " " + m.getLastName())
+                .defaultIfEmpty(String.valueOf(memberId));
     }
 
     private Flux<RegisterListDTO> convertRegisterListDTOs(List<RegisterRequest> registerRequests) {
@@ -336,21 +329,18 @@ public class RegisterService {
                 calibrationJson = objectMapper.writeValueAsString(dto.getCalibration());
             }
 
-            // ── attachment: รูปภาพเท่านั้น ────────────────────────────────────
             String attachmentJson = null;
             if (dto.getAttachments() != null && !dto.getAttachments().isEmpty()) {
                 attachmentJson = objectMapper.writeValueAsString(dto.getAttachments());
                 log.info("✅ Attachments JSON: {}", attachmentJson);
             }
 
-            // ── workInstruction: เอกสาร instruction แยก field ────────────────
             String workInstructionJson = null;
             if (dto.getWorkInstructions() != null && !dto.getWorkInstructions().isEmpty()) {
                 workInstructionJson = objectMapper.writeValueAsString(dto.getWorkInstructions());
                 log.info("✅ WorkInstruction JSON: {}", workInstructionJson);
             }
 
-            // ── warrantyFiles: เอกสาร warranty แยก field ─────────────────────
             String warrantyFilesJson = null;
             if ("YES".equals(dto.getHasWarranty())
                     && dto.getWarrantyFiles() != null
@@ -378,7 +368,6 @@ public class RegisterService {
                     .workInstruction(workInstructionJson)
                     .maintenance(maintenanceJson)
                     .calibration(calibrationJson)
-                    // ── warranty ──────────────────────────────────────────────
                     .hasWarranty(dto.getHasWarranty())
                     .warrantyNote("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null)
                     .warrantyExpireDate("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyExpireDate() : null)
@@ -392,18 +381,19 @@ public class RegisterService {
 
     private Update buildUpdateFromDTO(RegisterDTO dto) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
-        addIfNotNull(params, "department",    dto.getDepartment());
-        addIfNotNull(params, "machine_name",  dto.getMachineName());
-        addIfNotNull(params, "brand",         dto.getBrand());
-        addIfNotNull(params, "model",         dto.getModel());
-        addIfNotNull(params, "note",          dto.getNote());
-        addIfNotNull(params, "price",         dto.getPrice());
-        addIfNotNull(params, "quantity",      dto.getQuantity());
-        addIfNotNull(params, "watt",          dto.getWatt());
-        addIfNotNull(params, "horse_power",   dto.getHorsePower());
-        addIfNotNull(params, "manager_id",    dto.getManagerId());
+        addIfNotNull(params, "department",     dto.getDepartment());
+        addIfNotNull(params, "machine_name",   dto.getMachineName());
+        addIfNotNull(params, "brand",          dto.getBrand());
+        addIfNotNull(params, "model",          dto.getModel());
+        addIfNotNull(params, "note",           dto.getNote());
+        addIfNotNull(params, "price",          dto.getPrice());
+        addIfNotNull(params, "quantity",       dto.getQuantity());
+        addIfNotNull(params, "watt",           dto.getWatt());
+        addIfNotNull(params, "horse_power",    dto.getHorsePower());
+        addIfNotNull(params, "responsible_id", dto.getResponsibleId());
+        addIfNotNull(params, "supervisor_id",  dto.getSupervisorId());
+        addIfNotNull(params, "manager_id",     dto.getManagerId());
 
-        // ── attachment (รูปภาพ) ───────────────────────────────────────────────
         if (dto.getAttachments() != null) {
             try {
                 addIfNotNull(params, "attachment",
@@ -413,7 +403,6 @@ public class RegisterService {
             }
         }
 
-        // ── workInstruction ───────────────────────────────────────────────────
         if (dto.getWorkInstructions() != null) {
             try {
                 params.put(SqlIdentifier.quoted("work_instruction"),
@@ -425,7 +414,6 @@ public class RegisterService {
             }
         }
 
-        // ── warranty ──────────────────────────────────────────────────────────
         addIfNotNull(params, "has_warranty", dto.getHasWarranty());
         params.put(SqlIdentifier.quoted("warranty_note"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
@@ -448,5 +436,15 @@ public class RegisterService {
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
         if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
+    }
+
+    private Long parseLongOrNull(String value) {
+        if (!StringUtils.hasText(value)) return null;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            log.warn("Cannot parse '{}' as Long, returning null", value);
+            return null;
+        }
     }
 }

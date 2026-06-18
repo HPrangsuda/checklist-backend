@@ -46,13 +46,13 @@ public class RegisterRequest extends DataAudit {
     private String department;
 
     @Column("responsible_id")
-    private String responsibleId;
+    private Long responsibleId;
 
     @Column("supervisor_id")
-    private String supervisorId;
+    private Long supervisorId;
 
     @Column("manager_id")
-    private String managerId;
+    private Long managerId;
 
     @Column("note")
     private String note;

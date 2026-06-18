@@ -25,17 +25,17 @@ public class RegisterResponseDTO {
     private Integer watt;
     private Integer horsePower;
     private String department;
-    private String responsibleId;
-    private String supervisorId;
-    private String managerId;
+    private Long responsibleId;
+    private Long supervisorId;
+    private Long managerId;
     private String departmentName;
     private String responsibleName;
     private String supervisorName;
     private String managerName;
 
     private String note;
-    private String attachment;        // รูปภาพ (JSON)
-    private String workInstruction;   // ✅ work instruction (JSON)
+    private String attachment;
+    private String workInstruction;
     private Object maintenance;
     private Object calibration;
 
@@ -43,7 +43,7 @@ public class RegisterResponseDTO {
     private String    hasWarranty;
     private String    warrantyNote;
     private LocalDate warrantyExpireDate;
-    private String    warrantyFiles;  // ✅ warranty files (JSON)
+    private String    warrantyFiles;
 
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;

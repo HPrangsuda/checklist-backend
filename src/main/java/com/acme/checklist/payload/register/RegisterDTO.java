@@ -25,9 +25,9 @@ public class RegisterDTO extends DataAudit {
     private Integer watt;
     private Integer horsePower;
     private String department;
-    private String responsibleId;
-    private String supervisorId;
-    private String managerId;
+    private Long responsibleId;
+    private Long supervisorId;
+    private Long managerId;
     private String note;
     private List<FileUploadDTO> attachments;
     private List<FileUploadDTO> workInstructions;

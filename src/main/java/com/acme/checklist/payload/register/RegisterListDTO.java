@@ -24,9 +24,9 @@ public class RegisterListDTO {
     private Integer watt;
     private Integer horsePower;
     private String department;
-    private String responsibleId;
-    private String supervisorId;
-    private String managerId;
+    private Long responsibleId;
+    private Long supervisorId;
+    private Long managerId;
     private String note;
     private String attachment;
     private String maintenance;
