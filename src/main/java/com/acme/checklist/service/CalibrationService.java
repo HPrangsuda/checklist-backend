@@ -145,7 +145,7 @@ public class CalibrationService {
                                     .id(row.get("id", Long.class))
                                     .machineCode(row.get("machine_code", String.class))
                                     .machineName(row.get("machine_name", String.class))
-                                    .years(row.get("years", Integer.class))
+                                    .years(row.get("years", String.class))
                                     .dueDate(row.get("due_date", LocalDate.class))
                                     .startDate(row.get("start_date", LocalDate.class))
                                     .certificateDate(row.get("certificate_date", LocalDate.class))
@@ -349,8 +349,6 @@ public class CalibrationService {
         String sql = "UPDATE calibration_record SET "
                 + String.join(", ", sets)
                 + " WHERE id = $" + values.size();
-
-        log.info("=== UPDATE SQL ===\n{}", sql);
 
         DatabaseClient.GenericExecuteSpec spec = template.getDatabaseClient().sql(sql);
         for (int i = 0; i < values.size(); i++) {

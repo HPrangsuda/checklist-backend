@@ -16,7 +16,7 @@ public class CalibrationResponseDTO {
     private Long      id;
     private String    machineCode;
     private String    machineName;
-    private Integer   years;
+    private String   years;
     private LocalDate dueDate;
     private LocalDate startDate;
     private LocalDate certificateDate;
@@ -47,7 +47,7 @@ public class CalibrationResponseDTO {
                 .id(r.getId())
                 .machineCode(r.getMachineCode())
                 .machineName(r.getMachineName())
-                .years(Integer.valueOf(r.getYears()))
+                .years(r.getYears())
                 .dueDate(r.getDueDate())
                 .startDate(r.getStartDate())
                 .certificateDate(r.getCertificateDate())
