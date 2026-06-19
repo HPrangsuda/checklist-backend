@@ -4,12 +4,6 @@ import com.acme.checklist.entity.Machine;
 import lombok.Builder;
 import lombok.Data;
 
-/**
- * DTO สำหรับ list/table — ต้องมีทั้ง department (code) และ departmentName (name)
- *
- * department     → เก็บ department_code (เช่น "AD", "ST") ใช้ส่งไป filter
- * departmentName → เก็บชื่อแผนก (เช่น "Admin", "Store") ใช้แสดงใน table และ badge
- */
 @Data
 @Builder
 public class MachineListDTO {
@@ -22,6 +16,7 @@ public class MachineListDTO {
     private String machineStatus;
     private String checkStatus;
     private String responsiblePersonName;
+    private String qrCode;
 
     public static MachineListDTO from(Machine machine, String deptName) {
         return MachineListDTO.builder()
@@ -33,6 +28,7 @@ public class MachineListDTO {
                 .machineStatus(machine.getMachineStatus())
                 .checkStatus(machine.getCheckStatus())
                 .responsiblePersonName(machine.getResponsiblePersonName())
+                .qrCode(machine.getQrCode())
                 .build();
     }
 }
