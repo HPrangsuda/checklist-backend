@@ -64,7 +64,7 @@ public class ChecklistScheduler {
      * Window: จันทร์ 00:00 — ศุกร์ 23:59:59.999999999
      * เงื่อนไข: machine check_status = PENDING (ยังไม่ได้เช็คสัปดาห์นี้)
      */
-    @Scheduled(cron = "0 15 3 * * SAT", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 55 3 * * SAT", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
@@ -84,16 +84,25 @@ public class ChecklistScheduler {
                         ),
                         Machine.class
                 )
-                .flatMap(machine -> hasChecklistRecord(machine, startOfWeek, endOfWeek)
-                        .flatMap(exists -> {
-                            if (exists) {
-                                log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (record exists in this week)",
-                                        machine.getId(), machine.getMachineCode());
-                                return Mono.empty();
-                            }
-                            return saveDefaultRecord(machine);
-                        })
-                )
+                // FIX: ใช้ concatMap แทน flatMap เพื่อป้องกัน race condition
+                // flatMap รัน concurrent หลาย thread พร้อมกัน → hasChecklistRecord อาจ return false
+                // ก่อนที่ thread อื่นจะ insert เสร็จ → duplicate key
+                .concatMap(machine -> {
+                    if (machine.getResponsiblePersonId() == null) {
+                        log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — responsiblePersonId is null",
+                                machine.getId(), machine.getMachineCode());
+                        return Mono.empty();
+                    }
+                    return hasChecklistRecord(machine, startOfWeek, endOfWeek)
+                            .flatMap(exists -> {
+                                if (exists) {
+                                    log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (record exists in this week)",
+                                            machine.getId(), machine.getMachineCode());
+                                    return Mono.<Void>empty();
+                                }
+                                return saveDefaultRecord(machine);
+                            });
+                })
                 .then()
                 .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Weekly auto-save completed"))
                 .doOnError(e -> log.error("[CHECKLIST-AUTO] Weekly auto-save failed: {}", e.getMessage()))
@@ -133,16 +142,23 @@ public class ChecklistScheduler {
                         ),
                         Machine.class
                 )
-                .flatMap(machine -> hasChecklistRecord(machine, startOfPrevMonth, endOfPrevMonth)
-                        .flatMap(exists -> {
-                            if (exists) {
-                                log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (record exists in prev month)",
-                                        machine.getId(), machine.getMachineCode());
-                                return Mono.empty();
-                            }
-                            return saveDefaultRecord(machine);
-                        })
-                )
+                // FIX: ใช้ concatMap แทน flatMap เพื่อป้องกัน race condition
+                .concatMap(machine -> {
+                    if (machine.getResponsiblePersonId() == null) {
+                        log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — responsiblePersonId is null",
+                                machine.getId(), machine.getMachineCode());
+                        return Mono.empty();
+                    }
+                    return hasChecklistRecord(machine, startOfPrevMonth, endOfPrevMonth)
+                            .flatMap(exists -> {
+                                if (exists) {
+                                    log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (record exists in prev month)",
+                                            machine.getId(), machine.getMachineCode());
+                                    return Mono.<Void>empty();
+                                }
+                                return saveDefaultRecord(machine);
+                            });
+                })
                 .then()
                 .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Monthly auto-save completed"))
                 .doOnError(e -> log.error("[CHECKLIST-AUTO] Monthly auto-save failed: {}", e.getMessage()))
@@ -226,8 +242,11 @@ public class ChecklistScheduler {
                         Query.query(Criteria.where("id").is(machine.getResponsiblePersonId())),
                         Member.class
                 )
-                .switchIfEmpty(Mono.error(new RuntimeException(
-                        "Member not found: " + machine.getResponsiblePersonId())))
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — member id={} not found in DB",
+                            machine.getId(), machine.getMachineCode(), machine.getResponsiblePersonId());
+                    return Mono.empty();
+                }))
                 .flatMap(member -> {
                     String checklistStatus = machine.getSupervisorId() != null
                             ? "PENDING SUPERVISOR"
