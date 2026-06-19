@@ -726,11 +726,6 @@ public class MachineService {
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-    /**
-     * Build department display label:
-     * - มี division → "department - division"
-     * - ไม่มี division → "department"
-     */
     private String buildDeptLabel(String deptName, String division) {
         if (deptName == null) return "";
         if (StringUtils.hasText(division)) {
@@ -765,7 +760,6 @@ public class MachineService {
         return Criteria.empty();
     }
 
-    // ✅ ใช้ buildDeptLabel เพื่อ format "dept - division" หรือ "dept"
     private Flux<MachineListDTO> convertMachineListDTOs(List<Machine> machines) {
         List<String> codes = machines.stream()
                 .map(Machine::getDepartment)
@@ -803,12 +797,16 @@ public class MachineService {
             Graphics2D g = img.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            g.setColor(Color.WHITE); g.fillRect(0, 0, qrSize, totalHeight);
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, qrSize, totalHeight);
             g.setColor(Color.BLACK);
             for (int x = 0; x < qrSize; x++)
                 for (int y = 0; y < qrSize; y++)
                     if (bitMatrix.get(x, y)) g.fillRect(x, y, 1, 1);
-            g.setFont(new Font("Arial", Font.BOLD, 12));
+
+            Font font = new Font(Font.SANS_SERIF, Font.BOLD, 12);
+            g.setFont(font);
+
             FontMetrics fm = g.getFontMetrics();
             g.drawString(machineCode, (qrSize - fm.stringWidth(machineCode)) / 2,
                     qrSize + (textAreaHeight / 2) + (fm.getAscent() / 2));
