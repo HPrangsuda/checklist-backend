@@ -25,7 +25,7 @@ public class CalibrationRecord extends DataAudit {
     private String machineName;
 
     @Column("years")
-    private Integer years;
+    private String years;
 
     @Column("due_date")
     private LocalDate dueDate;
