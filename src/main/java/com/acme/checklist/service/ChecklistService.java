@@ -73,20 +73,21 @@ public class ChecklistService {
     private Mono<ApiResponse<Void>> processSave(ChecklistDTO dto) {
         dto.setCheckType("GENERAL");
         return template.selectOne(
-                        Query.query(Criteria.where("id").is(dto.getMachineId())),  // ← แก้
+                        Query.query(Criteria.where("id").is(dto.getMachineId())),
                         Machine.class)
                 .switchIfEmpty(Mono.error(new RuntimeException("Machine not found: " + dto.getMachineId())))
                 .flatMap(machine -> ReactiveSecurityContextHolder.getContext()
                         .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                         .flatMap(principal -> {
                             LocalDate today = LocalDate.now(ZONE);
-                            boolean isWeekend = today.getDayOfWeek() == DayOfWeek.SATURDAY
+                            boolean isWeekend    = today.getDayOfWeek() == DayOfWeek.SATURDAY
                                     || today.getDayOfWeek() == DayOfWeek.SUNDAY;
                             boolean isResponsible = Objects.equals(principal.memberId(), machine.getResponsiblePersonId());
-                            boolean isPending = "PENDING".equals(machine.getCheckStatus());
+                            boolean isPending     = "PENDING".equals(machine.getCheckStatus());
 
                             log.info("isWeekend: {}, isResponsible: {}, isPending: {}", isWeekend, isResponsible, isPending);
-                            log.info("principal.memberId: {}, machine.getResponsiblePersonId: {}", principal.memberId(), machine.getResponsiblePersonId());
+                            log.info("principal.memberId: {}, machine.getResponsiblePersonId: {}",
+                                    principal.memberId(), machine.getResponsiblePersonId());
                             log.info("machine.getCheckStatus: {}", machine.getCheckStatus());
 
                             ChecklistRecord record = buildFromDTO(dto);
@@ -107,7 +108,7 @@ public class ChecklistService {
                                         .then();
 
                                 Mono<Void> updateMachine = template.update(Machine.class)
-                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))  // ← แก้
+                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))
                                         .apply(Update.update("check_status", record.getChecklistStatus())
                                                 .set("machine_status", dto.getMachineStatus()))
                                         .then();
@@ -122,7 +123,7 @@ public class ChecklistService {
                                 record.setRecheck(false);
 
                                 Mono<Void> updateMachine = template.update(Machine.class)
-                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))  // ← แก้
+                                        .matching(Query.query(Criteria.where("id").is(machine.getId())))
                                         .apply(Update.update("machine_status", dto.getMachineStatus())
                                                 .set("check_status", record.getChecklistStatus()))
                                         .then();
@@ -188,7 +189,7 @@ public class ChecklistService {
                             ids, ChecklistRecord.class,
                             "MS005", "MS006", "MS007",
                             ChecklistRecord::getMachineCode,
-                            names -> postDeleteTask(names, memberId, departmentId));
+                            names -> postDeleteTask(memberId, departmentId));
                 });
     }
 
@@ -232,7 +233,7 @@ public class ChecklistService {
                             ? template.selectOne(
                                     Query.query(Criteria.where("id").is(record.getSupervisor())),
                                     Member.class)
-                            .map(m -> toMemberDTO(m))
+                            .map(this::toMemberDTO)
                             .defaultIfEmpty(new MemberDTO())
                             : Mono.just(new MemberDTO());
 
@@ -240,19 +241,21 @@ public class ChecklistService {
                             ? template.selectOne(
                                     Query.query(Criteria.where("id").is(record.getManager())),
                                     Member.class)
-                            .map(m -> toMemberDTO(m))
+                            .map(this::toMemberDTO)
                             .defaultIfEmpty(new MemberDTO())
                             : Mono.just(new MemberDTO());
 
                     return Mono.zip(auditMembersMono, supervisorMono, managerMono)
                             .map(tuple -> {
                                 Map<Long, Member> auditMap  = tuple.getT1();
-                                MemberDTO supervisor = tuple.getT2();
-                                MemberDTO        manager    = tuple.getT3();
+                                MemberDTO         supervisor = tuple.getT2();
+                                MemberDTO         manager    = tuple.getT3();
 
-                                AuditMemberDTO createdByDTO = record.getCreatedBy() != null && auditMap.get(record.getCreatedBy()) != null
+                                AuditMemberDTO createdByDTO = record.getCreatedBy() != null
+                                        && auditMap.get(record.getCreatedBy()) != null
                                         ? AuditMemberDTO.from(auditMap.get(record.getCreatedBy())) : null;
-                                AuditMemberDTO updatedByDTO = record.getUpdatedBy() != null && auditMap.get(record.getUpdatedBy()) != null
+                                AuditMemberDTO updatedByDTO = record.getUpdatedBy() != null
+                                        && auditMap.get(record.getUpdatedBy()) != null
                                         ? AuditMemberDTO.from(auditMap.get(record.getUpdatedBy())) : null;
 
                                 MemberDTO supervisorDTO = (supervisor.getId() != null) ? supervisor : null;
@@ -285,50 +288,58 @@ public class ChecklistService {
 
     public Mono<PagedResponse<ChecklistListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
                     log.info("getWithRole — role: {}, memberId: {}", role, memberId);
 
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria)
-                                    .with(commonService.pageable(index, size, "created_at"));
-                            yield commonService.executePagedQuery(
-                                    index, size, query, criteria,
-                                    ChecklistRecord.class, this::convertChecklistListDTOs);
-                        }
-                        default -> {
-                            yield template.select(
-                                            Query.query(Criteria.where("responsible_person_id").is(memberId)),
-                                            Machine.class)
-                                    .map(Machine::getMachineCode)
-                                    .collectList()
-                                    .flatMap(machineCodes -> {
-                                        log.info("machineCodes: {}", machineCodes);
+                    if ("ADMIN".equals(role)) {
+                        Criteria criteria = buildKeywordCriteria(keyword);
+                        Query query = Query.query(criteria)
+                                .with(commonService.pageable(index, size, "created_at"));
+                        return commonService.executePagedQuery(
+                                index, size, query, criteria,
+                                ChecklistRecord.class, this::convertChecklistListDTOs);
+                    }
 
-                                        Criteria criteria = Criteria
-                                                .where("created_by").is(memberId)
-                                                .or("machine_code").in(machineCodes)
-                                                .or("supervisor").is(memberId)
-                                                .or("manager").is(memberId);
+                    // MEMBER / SUPERVISOR / MANAGER:
+                    // ดึง machine codes ที่ memberId รับผิดชอบ แล้วสร้าง criteria ถูกต้อง
+                    return template.select(
+                                    Query.query(Criteria.where("responsible_person_id").is(memberId)),
+                                    Machine.class)
+                            .map(Machine::getMachineCode)
+                            .collectList()
+                            .flatMap(machineCodes -> {
+                                log.info("getWithRole machineCodes: {}", machineCodes);
 
-                                        if (StringUtils.hasText(keyword)) {
-                                            criteria = criteria.and(
-                                                    Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
-                                                            .or("machine_code").like("%" + keyword + "%").ignoreCase(true));
-                                        }
+                                // FIX: wrap OR conditions ใน Criteria.from() เพื่อให้ grouping ถูกต้อง
+                                // แทนที่จะ chain .or() แบบ flat ซึ่งอาจทำให้ SQL ออกมาผิด precedence
+                                Criteria baseCriteria = Criteria.from(
+                                        Criteria.where("created_by").is(memberId),
+                                        machineCodes.isEmpty()
+                                                ? Criteria.where("supervisor").is(memberId)
+                                                : Criteria.where("machine_code").in(machineCodes),
+                                        Criteria.where("supervisor").is(memberId),
+                                        Criteria.where("manager").is(memberId)
+                                );
 
-                                        Query query = Query.query(criteria)
-                                                .with(commonService.pageable(index, size, "created_at"));
-                                        return commonService.executePagedQuery(
-                                                index, size, query, criteria,
-                                                ChecklistRecord.class, this::convertChecklistListDTOs);
-                                    });
-                        }
-                    };
+                                Criteria criteria;
+                                if (StringUtils.hasText(keyword)) {
+                                    Criteria keywordCriteria = Criteria.where("machine_name")
+                                            .like("%" + keyword + "%").ignoreCase(true)
+                                            .or("machine_code").like("%" + keyword + "%").ignoreCase(true);
+                                    criteria = baseCriteria.and(keywordCriteria);
+                                } else {
+                                    criteria = baseCriteria;
+                                }
+
+                                Query query = Query.query(criteria)
+                                        .with(commonService.pageable(index, size, "created_at"));
+                                return commonService.executePagedQuery(
+                                        index, size, query, criteria,
+                                        ChecklistRecord.class, this::convertChecklistListDTOs);
+                            });
                 });
     }
 
@@ -347,11 +358,14 @@ public class ChecklistService {
                         return Mono.just(ListResponse.success("MS022", false, List.<ChecklistListDTO>of()));
                     }
 
-                    Criteria criteria = Criteria
-                            .where("checklist_status").is("PENDING SUPERVISOR")
-                            .and("supervisor").is(memberId)
-                            .or(Criteria.where("checklist_status").is("PENDING MANAGER")
-                                    .and("manager").is(memberId));
+                    // FIX: แยก criteria เป็น 2 กลุ่มชัดเจน และ wrap ด้วย Criteria.from()
+                    // เดิม: .or(Criteria.where(...).and(...)) อาจ grouping ผิด
+                    Criteria supervisorCriteria = Criteria.where("checklist_status").is("PENDING SUPERVISOR")
+                            .and("supervisor").is(memberId);
+                    Criteria managerCriteria = Criteria.where("checklist_status").is("PENDING MANAGER")
+                            .and("manager").is(memberId);
+
+                    Criteria criteria = Criteria.from(supervisorCriteria, managerCriteria);
 
                     log.info("getPendingApprovals — memberId: {}", memberId);
 
@@ -376,14 +390,16 @@ public class ChecklistService {
         return ReactiveSecurityContextHolder.getContext()
                 .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
-                    int targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
+                    int    targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
                     String role       = principal.role();
                     Long   memberId   = principal.memberId();
 
                     String roleFilter = switch (role) {
                         case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId + " OR m.supervisor_id = " + memberId + ")";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId + " OR m.manager_id = " + memberId + ")";
+                        case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId
+                                + " OR m.supervisor_id = " + memberId + ")";
+                        case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId
+                                + " OR m.manager_id = " + memberId + ")";
                         default           -> "";
                     };
 
@@ -536,10 +552,12 @@ public class ChecklistService {
         if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
 
-    private Mono<Void> postDeleteTask(List<String> names, Long memberId, Long departmentId) {
+    // FIX: ลบ parameter 'names' ที่ไม่ได้ใช้งาน (แก้ warning: Parameter 'names' is never used)
+    private Mono<Void> postDeleteTask(Long memberId, Long departmentId) {
         return Mono.empty();
     }
 
+    @SuppressWarnings("unused")
     private Flux<ChecklistStatsDTO> executeStatsQuery(String sql, int year, String department) {
         var spec = template.getDatabaseClient().sql(sql).bind("year", year);
         if (StringUtils.hasText(department)) spec = spec.bind("department", department);
