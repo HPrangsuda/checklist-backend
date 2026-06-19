@@ -64,7 +64,7 @@ public class ChecklistScheduler {
      * Window: จันทร์ 00:00 — ศุกร์ 23:59:59.999999999
      * เงื่อนไข: machine check_status = PENDING (ยังไม่ได้เช็คสัปดาห์นี้)
      */
-    @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 15 3 * * SAT", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
@@ -113,7 +113,7 @@ public class ChecklistScheduler {
      * ตรวจสอบว่า machine เคยมี record ในเดือนที่แล้วหรือไม่
      * ถ้าไม่มี → สร้าง auto record (created_at = now = วันที่ 1 เดือนนี้ ซึ่งถูกต้องตามเวลาจริงที่บันทึก)
      */
-    @Scheduled(cron = "0 55 2 1 * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 55 23 1 * *", zone = "Asia/Bangkok")
     public void autoSaveMonthlyChecklistRecords() {
         LocalDate today               = LocalDate.now(ZONE);
         LocalDate firstDayOfPrevMonth = today.minusMonths(1).withDayOfMonth(1);
