@@ -385,7 +385,7 @@ public class CalibrationService {
                     .totalPending(getLongValue(row, "total_pending"))
                     .build();
         } catch (Exception e) {
-            log.error("Error mapping calibration department summary row", e);
+            log.error("Error mapping calibration summary row", e);
             throw new RuntimeException("Error mapping calibration department summary data", e);
         }
     }
