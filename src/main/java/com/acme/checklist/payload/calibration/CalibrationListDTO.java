@@ -31,7 +31,7 @@ public class CalibrationListDTO {
                 .id(calibrationRecord.getId())
                 .machineCode(calibrationRecord.getMachineCode())
                 .machineName(calibrationRecord.getMachineName())
-                .years(calibrationRecord.getYears())
+                .years(Integer.valueOf(calibrationRecord.getYears()))
                 .dueDate(calibrationRecord.getDueDate())
                 .startDate(calibrationRecord.getStartDate())
                 .certificateDate(calibrationRecord.getCertificateDate())

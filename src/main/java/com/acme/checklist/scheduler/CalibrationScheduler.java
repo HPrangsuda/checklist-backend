@@ -58,7 +58,7 @@ public class CalibrationScheduler {
                     r.setNote(row.get("note", String.class));
                     LocalDate dueDate = row.get("due_date", LocalDate.class);
                     r.setDueDate(dueDate != null ? dueDate.withYear(nextYear) : null);
-                    r.setYears(nextYear);
+                    r.setYears(String.valueOf(nextYear));
                     return r;
                 })
                 .all()

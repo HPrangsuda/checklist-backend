@@ -101,7 +101,7 @@ public class MachineService {
         CalibrationRecord cal = new CalibrationRecord();
         cal.setMachineCode(machine.getMachineCode());
         cal.setMachineName(machine.getMachineName());
-        cal.setYears(dto.getDueDate().getYear());
+        cal.setYears(String.valueOf(dto.getDueDate().getYear()));
         cal.setDueDate(dto.getDueDate());
         cal.setCertificateDate(dto.getCertificateDate());
         cal.setResults(dto.getResults());
