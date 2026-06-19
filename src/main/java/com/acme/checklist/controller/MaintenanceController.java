@@ -30,11 +30,11 @@ public class MaintenanceController {
     }
 
     @GetMapping("/get/page")
-    public Mono<PagedResponse<MaintenanceListDTO>> getPage(
+    public Mono<PagedResponse<MaintenanceResponseDTO>> getPage(
             @RequestParam(required = false) String keyword,
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
-        return maintenanceService.getWithRole(keyword, index, size);
+        return maintenanceService.getPage(keyword, index, size);
     }
 
     @GetMapping("/{id}")

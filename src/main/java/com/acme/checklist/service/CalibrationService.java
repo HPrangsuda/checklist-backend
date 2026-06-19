@@ -47,54 +47,157 @@ public class CalibrationService {
                 });
     }
 
-    // ─── GET WITH ROLE ────────────────────────────────────────────────────────
+    // ─── getPage (SQL-injection safe, JOIN machine + department) ─────────────
 
-    public Mono<PagedResponse<CalibrationListDTO>> getWithRole(String keyword, int index, int size) {
+    public Mono<PagedResponse<CalibrationResponseDTO>> getPage(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role       = principal.role();
-                    String employeeId = principal.employeeId();
-                    Long   memberId   = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
+                    boolean hasKw   = StringUtils.hasText(keyword);
 
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria).with(commonService.pageable(index, size, "id"));
-                            yield commonService.executePagedQuery(index, size, query, criteria,
-                                    CalibrationRecord.class, this::convertCalibrationListDTOs);
-                        }
-                        case "MANAGER"    -> fetchByMachineRole(memberId,   "manager_id",            keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(memberId,   "supervisor_id",         keyword, index, size);
-                        default           -> fetchByMachineRole(employeeId, "responsible_person_id", keyword, index, size);
+                    String roleFragment = switch (role) {
+                        case "ADMIN"      -> "";
+                        case "MANAGER"    -> "AND m.manager_id    = :memberId";
+                        case "SUPERVISOR" -> "AND m.supervisor_id = :memberId";
+                        default           -> "AND m.responsible_person_id = :memberId";
                     };
-                });
-    }
 
-    private Mono<PagedResponse<CalibrationListDTO>> fetchByMachineRole(
-            Object roleValue, String roleColumn, String keyword, int index, int size) {
+                    String kwFragment = hasKw
+                            ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)"
+                            : "";
 
-        return template.select(
-                        Query.query(Criteria.where(roleColumn).is(roleValue)),
-                        Machine.class)
-                .map(Machine::getMachineCode)
-                .collectList()
-                .flatMap(machineCodes -> {
-                    if (machineCodes.isEmpty()) {
-                        return Mono.just(PagedResponse.<CalibrationListDTO>builder()
-                                .success(true).message("Success").data(List.of())
-                                .totalElements(0L).totalPages(0).index(index).size(size).build());
+                    String where = "WHERE 1=1 " + roleFragment + " " + kwFragment;
+
+                    String countSql = """
+                            SELECT COUNT(*)
+                            FROM calibration_record c
+                            LEFT JOIN machine m ON m.machine_code = c.machine_code
+                            """ + where;
+
+                    String dataSql = """
+                            SELECT
+                                c.id,
+                                c.machine_code,
+                                c.machine_name,
+                                c.years,
+                                c.due_date,
+                                c.start_date,
+                                c.certificate_date,
+                                c.results,
+                                c.criteria,
+                                c.measuring_range,
+                                c.accuracy,
+                                c.calibration_range,
+                                c.calibration_status,
+                                c.attachment,
+                                c.note,
+                                c.permissible_capacity,
+                                c.comment,
+                                c.resolution,
+                                c.max_uncertainty,
+                                c.mpe,
+                                c.check_mpe,
+                                c.check_resolution,
+                                c.check_result,
+                                c.reason_not_pass,
+                                m.responsible_person_name AS responsible_maintenance_name,
+                                m.department              AS machine_department_code,
+                                d.department              AS machine_department_name
+                            FROM calibration_record c
+                            LEFT JOIN machine m ON m.machine_code = c.machine_code
+                            LEFT JOIN department d ON d.department_code = m.department
+                            """ + where + """
+
+                            ORDER BY c.due_date ASC NULLS LAST
+                            LIMIT :size OFFSET :offset
+                            """;
+
+                    String kwValue = hasKw ? "%" + keyword.trim() + "%" : null;
+
+                    DatabaseClient.GenericExecuteSpec countSpec = template.getDatabaseClient().sql(countSql);
+                    DatabaseClient.GenericExecuteSpec dataSpec  = template.getDatabaseClient().sql(dataSql);
+
+                    if (!"ADMIN".equals(role)) {
+                        countSpec = countSpec.bind("memberId", memberId);
+                        dataSpec  = dataSpec.bind("memberId", memberId);
+                    }
+                    if (hasKw) {
+                        countSpec = countSpec.bind("kw", kwValue);
+                        dataSpec  = dataSpec.bind("kw", kwValue);
                     }
 
-                    Criteria criteria = Criteria.where("machine_code").in(machineCodes);
-                    if (StringUtils.hasText(keyword)) {
-                        criteria = criteria.and(
-                                Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
-                    }
+                    dataSpec = dataSpec
+                            .bind("size",   size)
+                            .bind("offset", (long) index * size);
 
-                    Query query = Query.query(criteria).with(commonService.pageable(index, size, "id"));
-                    return commonService.executePagedQuery(index, size, query, criteria,
-                            CalibrationRecord.class, this::convertCalibrationListDTOs);
+                    Mono<Long> countMono = countSpec
+                            .map((row, meta) -> {
+                                Object v = row.get(0);
+                                return v instanceof Number n ? n.longValue() : 0L;
+                            })
+                            .one()
+                            .defaultIfEmpty(0L);
+
+                    Flux<CalibrationResponseDTO> dataFlux = dataSpec
+                            .map((row, meta) -> CalibrationResponseDTO.builder()
+                                    .id(row.get("id", Long.class))
+                                    .machineCode(row.get("machine_code", String.class))
+                                    .machineName(row.get("machine_name", String.class))
+                                    .years(row.get("years", Integer.class))
+                                    .dueDate(row.get("due_date", LocalDate.class))
+                                    .startDate(row.get("start_date", LocalDate.class))
+                                    .certificateDate(row.get("certificate_date", LocalDate.class))
+                                    .results(row.get("results", String.class))
+                                    .criteria(row.get("criteria", String.class))
+                                    .measuringRange(row.get("measuring_range", String.class))
+                                    .accuracy(row.get("accuracy", String.class))
+                                    .calibrationRange(row.get("calibration_range", String.class))
+                                    .calibrationStatus(row.get("calibration_status", String.class))
+                                    .attachment(row.get("attachment", String.class))
+                                    .note(row.get("note", String.class))
+                                    .permissibleCapacity(row.get("permissible_capacity", String.class))
+                                    .comment(row.get("comment", String.class))
+                                    .resolution(row.get("resolution", String.class))
+                                    .maxUncertainty(row.get("max_uncertainty", String.class))
+                                    .mpe(row.get("mpe", String.class))
+                                    .checkMpe(row.get("check_mpe", String.class))
+                                    .checkResolution(row.get("check_resolution", String.class))
+                                    .checkResult(row.get("check_result", String.class))
+                                    .reasonNotPass(row.get("reason_not_pass", String.class))
+                                    .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
+                                    .machineDepartmentCode(row.get("machine_department_code", String.class))
+                                    .machineDepartmentName(row.get("machine_department_name", String.class))
+                                    .build())
+                            .all();
+
+                    return Mono.zip(countMono, dataFlux.collectList())
+                            .map(tuple -> {
+                                long total      = tuple.getT1();
+                                int  totalPages = (int) Math.ceil((double) total / size);
+                                return PagedResponse.<CalibrationResponseDTO>builder()
+                                        .success(true)
+                                        .message("Success")
+                                        .data(tuple.getT2())
+                                        .totalElements(total)
+                                        .totalPages(totalPages)
+                                        .index(index)
+                                        .size(size)
+                                        .build();
+                            });
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch calibration page: {}", e.getMessage(), e);
+                    return Mono.just(PagedResponse.<CalibrationResponseDTO>builder()
+                            .success(false)
+                            .message(e.getMessage())
+                            .data(List.of())
+                            .totalElements(0L)
+                            .totalPages(0)
+                            .index(index)
+                            .size(size)
+                            .build());
                 });
     }
 
@@ -213,19 +316,10 @@ public class CalibrationService {
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-    private Criteria buildKeywordCriteria(String keyword) {
-        if (StringUtils.hasText(keyword)) {
-            return Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true);
-        }
-        return Criteria.empty();
-    }
-
     private DatabaseClient.GenericExecuteSpec buildUpdateSpec(CalibrationDTO dto) {
         List<String> sets   = new ArrayList<>();
         List<Object> values = new ArrayList<>();
 
-        // ✅ แก้ไข: bind LocalDate โดยตรง ไม่ต้องแปลงเป็น String และไม่ต้อง ::date cast
-        // R2DBC driver จัดการ LocalDate → SQL date type ให้อัตโนมัติ
         addDateParam(sets, values, "due_date",         dto.getDueDate());
         addDateParam(sets, values, "start_date",       dto.getStartDate());
         addDateParam(sets, values, "certificate_date", dto.getCertificateDate());
@@ -265,12 +359,10 @@ public class CalibrationService {
         return spec;
     }
 
-    // ✅ แก้ไข: bind LocalDate โดยตรง ไม่ต้องแปลงเป็น String และไม่ต้องใช้ ::date cast
-    // ::date syntax ทำให้ R2DBC parse SQL grammar error เพราะ driver handle type mapping เอง
     private void addDateParam(List<String> sets, List<Object> values, String column, LocalDate value) {
         if (value != null) {
-            values.add(value);                          // ✅ LocalDate โดยตรง
-            sets.add(column + " = $" + values.size()); // ✅ ไม่มี ::date
+            values.add(value);
+            sets.add(column + " = $" + values.size());
         }
     }
 
@@ -279,10 +371,6 @@ public class CalibrationService {
             values.add(value);
             sets.add(column + " = $" + values.size());
         }
-    }
-
-    private Flux<CalibrationListDTO> convertCalibrationListDTOs(List<CalibrationRecord> records) {
-        return Flux.fromIterable(records).map(CalibrationListDTO::from);
     }
 
     private CalibrationDepartmentSummaryDTO mapDepartmentSummary(io.r2dbc.spi.Row row) {

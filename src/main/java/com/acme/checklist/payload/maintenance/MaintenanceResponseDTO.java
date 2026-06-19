@@ -25,29 +25,37 @@ public class MaintenanceResponseDTO {
     private String    status;
     private String    maintenanceBy;
     private Long      responsibleMaintenance;
+    private String    responsibleMaintenanceName;
     private String    note;
     private String    attachment;
-    private Long      checklistRecordId;   // ← เพิ่ม: null = ยังไม่ submit, มีค่า = submit แล้ว
+    private Long      checklistRecordId;
+    private String machineDepartmentCode;
+    private String machineDepartmentName;
 
-    public static MaintenanceResponseDTO from(MaintenanceRecord maintenanceRecord) {
-        if (maintenanceRecord == null) return null;
-
+    public static MaintenanceResponseDTO from(MaintenanceRecord r) {
+        if (r == null) return null;
         return MaintenanceResponseDTO.builder()
-                .id(maintenanceRecord.getId())
-                .machineCode(maintenanceRecord.getMachineCode())
-                .machineName(maintenanceRecord.getMachineName())
-                .years(maintenanceRecord.getYears())
-                .round(maintenanceRecord.getRound())
-                .dueDate(maintenanceRecord.getDueDate())
-                .planDate(maintenanceRecord.getPlanDate())
-                .startDate(maintenanceRecord.getStartDate())
-                .actualDate(maintenanceRecord.getActualDate())
-                .status(maintenanceRecord.getStatus())
-                .maintenanceBy(maintenanceRecord.getMaintenanceBy())
-                .responsibleMaintenance(maintenanceRecord.getResponsibleMaintenance())
-                .note(maintenanceRecord.getNote())
-                .attachment(maintenanceRecord.getAttachment())
-                .checklistRecordId(maintenanceRecord.getChecklistRecordId())
+                .id(r.getId())
+                .machineCode(r.getMachineCode())
+                .machineName(r.getMachineName())
+                .years(r.getYears())
+                .round(r.getRound())
+                .dueDate(r.getDueDate())
+                .planDate(r.getPlanDate())
+                .startDate(r.getStartDate())
+                .actualDate(r.getActualDate())
+                .status(r.getStatus())
+                .maintenanceBy(r.getMaintenanceBy())
+                .responsibleMaintenance(r.getResponsibleMaintenance())
+                .note(r.getNote())
+                .attachment(r.getAttachment())
+                .checklistRecordId(r.getChecklistRecordId())
                 .build();
+    }
+
+    public static MaintenanceResponseDTO from(MaintenanceRecord r, String responsibleName) {
+        MaintenanceResponseDTO dto = from(r);
+        if (dto != null) dto.setResponsibleMaintenanceName(responsibleName);
+        return dto;
     }
 }

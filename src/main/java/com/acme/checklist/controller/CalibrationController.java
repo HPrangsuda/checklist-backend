@@ -25,12 +25,13 @@ public class CalibrationController {
         return calibrationService.update(dto);
     }
 
+    // ★ เปลี่ยนจาก getWithRole() → getPage() เพื่อให้ return responsibleMaintenanceName + department
     @GetMapping("/get/page")
-    public Mono<PagedResponse<CalibrationListDTO>> getPage(
+    public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
             @RequestParam(required = false) String keyword,
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
-        return calibrationService.getWithRole(keyword, index, size);
+        return calibrationService.getPage(keyword, index, size);
     }
 
     @GetMapping("/{id}")

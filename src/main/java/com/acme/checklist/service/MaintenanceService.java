@@ -19,6 +19,7 @@ import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
 import org.springframework.data.relational.core.sql.SqlIdentifier;
 import org.springframework.http.codec.multipart.FilePart;
+import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -26,6 +27,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.LocalDate;
 import java.util.*;
 
 @Slf4j
@@ -68,108 +70,139 @@ public class MaintenanceService {
                 });
     }
 
-    // ─── GET WITH ROLE ────────────────────────────────────────────────────────
-
-    public Mono<PagedResponse<MaintenanceListDTO>> getWithRole(String keyword, int index, int size) {
+    public Mono<PagedResponse<MaintenanceResponseDTO>> getPage(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role       = principal.role();
-                    Long   memberId   = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
+                    boolean hasKw   = StringUtils.hasText(keyword);
 
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria)
-                                    .with(PageRequest.of(index, size, Sort.by("due_date").ascending()));
-                            yield commonService.executePagedQuery(
-                                    index, size, query, criteria,
-                                    MaintenanceRecord.class, this::convertMaintenanceListDTOs);
-                        }
-                        case "MANAGER"    -> fetchByMachineRole(memberId, "manager_id",    keyword, index, size);
-                        case "SUPERVISOR" -> fetchByMachineRole(memberId, "supervisor_id", keyword, index, size);
-
-                        // ผู้รับผิดชอบ: เห็น record ที่ machine.responsible_person_id = memberId (BIGINT)
-                        //               หรือ maintenance_record.responsible_maintenance = memberId (BIGINT)
-                        default -> fetchByResponsible(memberId, keyword, index, size);
+                    String roleFragment = switch (role) {
+                        case "ADMIN"      -> "";
+                        case "MANAGER"    -> "AND m.manager_id    = :memberId";
+                        case "SUPERVISOR" -> "AND m.supervisor_id = :memberId";
+                        default           -> "AND (m.responsible_person_id = :memberId " +
+                                " OR mr.responsible_maintenance = :memberId)";
                     };
-                });
-    }
 
-    /**
-     * MANAGER / SUPERVISOR — filter ผ่านตาราง machine ด้วย roleColumn
-     */
-    private Mono<PagedResponse<MaintenanceListDTO>> fetchByMachineRole(
-            Long memberId, String roleColumn, String keyword, int index, int size) {
+                    String kwFragment = hasKw
+                            ? "AND (mr.machine_code ILIKE :kw OR mr.machine_name ILIKE :kw)"
+                            : "";
 
-        return template.select(
-                        Query.query(Criteria.where(roleColumn).is(memberId)),
-                        Machine.class)
-                .map(Machine::getMachineCode)
-                .collectList()
-                .flatMap(machineCodes -> {
-                    if (machineCodes.isEmpty()) {
-                        return Mono.just(PagedResponse.<MaintenanceListDTO>builder()
-                                .success(true)
-                                .message("Success")
-                                .data(List.of())
-                                .totalElements(0L)
-                                .totalPages(0)
-                                .index(index)
-                                .size(size)
-                                .build());
+                    String where = "WHERE 1=1 " + roleFragment + " " + kwFragment;
+
+                    String countSql = """
+                            SELECT COUNT(*)
+                            FROM maintenance_record mr
+                            LEFT JOIN machine m ON m.machine_code = mr.machine_code
+                            """ + where;
+
+                    // ★ เพิ่ม JOIN department + ดึง d.department AS department_name
+                    String dataSql = """
+                            SELECT
+                                mr.id,
+                                mr.machine_code,
+                                mr.machine_name,
+                                mr.years,
+                                mr.round,
+                                mr.due_date,
+                                mr.plan_date,
+                                mr.start_date,
+                                mr.actual_date,
+                                mr.status,
+                                mr.maintenance_by,
+                                mr.responsible_maintenance,
+                                mr.note,
+                                mr.attachment,
+                                mr.checklist_record_id,
+                                m.responsible_person_name AS responsible_maintenance_name,
+                                m.department              AS machine_department_code,
+                                d.department              AS machine_department_name
+                            FROM maintenance_record mr
+                            LEFT JOIN machine m ON m.machine_code = mr.machine_code
+                            LEFT JOIN department d ON d.department_code = m.department
+                            """ + where + """
+
+                            ORDER BY mr.due_date ASC NULLS LAST
+                            LIMIT :size OFFSET :offset
+                            """;
+
+                    String kwValue = hasKw ? "%" + keyword.trim() + "%" : null;
+
+                    DatabaseClient.GenericExecuteSpec countSpec = template.getDatabaseClient().sql(countSql);
+                    DatabaseClient.GenericExecuteSpec dataSpec  = template.getDatabaseClient().sql(dataSql);
+
+                    if (!"ADMIN".equals(role)) {
+                        countSpec = countSpec.bind("memberId", memberId);
+                        dataSpec  = dataSpec.bind("memberId", memberId);
+                    }
+                    if (hasKw) {
+                        countSpec = countSpec.bind("kw", kwValue);
+                        dataSpec  = dataSpec.bind("kw", kwValue);
                     }
 
-                    Criteria criteria = Criteria.where("machine_code").in(machineCodes);
-                    if (StringUtils.hasText(keyword)) {
-                        criteria = criteria.and(
-                                Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
-                    }
+                    dataSpec = dataSpec
+                            .bind("size",   size)
+                            .bind("offset", (long) index * size);
 
-                    Query query = Query.query(criteria)
-                            .with(PageRequest.of(index, size, Sort.by("due_date").ascending()));
+                    Mono<Long> countMono = countSpec
+                            .map((row, meta) -> {
+                                Object v = row.get(0);
+                                return v instanceof Number n ? n.longValue() : 0L;
+                            })
+                            .one()
+                            .defaultIfEmpty(0L);
 
-                    return commonService.executePagedQuery(
-                            index, size, query, criteria,
-                            MaintenanceRecord.class, this::convertMaintenanceListDTOs);
-                });
-    }
+                    Flux<MaintenanceResponseDTO> dataFlux = dataSpec
+                            .map((row, meta) -> MaintenanceResponseDTO.builder()
+                                    .id(row.get("id", Long.class))
+                                    .machineCode(row.get("machine_code", String.class))
+                                    .machineName(row.get("machine_name", String.class))
+                                    .years(row.get("years", String.class))
+                                    .round(row.get("round", Integer.class))
+                                    .dueDate(row.get("due_date", LocalDate.class))
+                                    .planDate(row.get("plan_date", LocalDate.class))
+                                    .startDate(row.get("start_date", LocalDate.class))
+                                    .actualDate(row.get("actual_date", LocalDate.class))
+                                    .status(row.get("status", String.class))
+                                    .maintenanceBy(row.get("maintenance_by", String.class))
+                                    .responsibleMaintenance(row.get("responsible_maintenance", Long.class))
+                                    .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
+                                    .machineDepartmentCode(row.get("machine_department_code", String.class)) // ★
+                                    .machineDepartmentName(row.get("machine_department_name", String.class)) // ★
+                                    .note(row.get("note", String.class))
+                                    .attachment(row.get("attachment", String.class))
+                                    .checklistRecordId(row.get("checklist_record_id", Long.class))
+                                    .build())
+                            .all();
 
-    /**
-     * ผู้รับผิดชอบ — เห็น record ที่:
-     *   (1) machine.responsible_person_id = memberId   (BIGINT)
-     *   (2) maintenance_record.responsible_maintenance = memberId  (BIGINT)
-     */
-    private Mono<PagedResponse<MaintenanceListDTO>> fetchByResponsible(
-            Long memberId, String keyword, int index, int size) {
-
-        return template.select(
-                        Query.query(Criteria.where("responsible_person_id").is(memberId)),
-                        Machine.class)
-                .map(Machine::getMachineCode)
-                .collectList()
-                .flatMap(machineCodes -> {
-
-                    // OR: machine ที่รับผิดชอบ (BIGINT)  หรือ  record ที่ถูก assign โดยตรง (BIGINT)
-                    Criteria criteria;
-                    if (machineCodes.isEmpty()) {
-                        criteria = Criteria.where("responsible_maintenance").is(memberId);
-                    } else {
-                        criteria = Criteria.where("machine_code").in(machineCodes)
-                                .or(Criteria.where("responsible_maintenance").is(memberId));
-                    }
-
-                    if (StringUtils.hasText(keyword)) {
-                        criteria = criteria.and(
-                                Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true));
-                    }
-
-                    Query query = Query.query(criteria)
-                            .with(PageRequest.of(index, size, Sort.by("due_date").ascending()));
-
-                    return commonService.executePagedQuery(
-                            index, size, query, criteria,
-                            MaintenanceRecord.class, this::convertMaintenanceListDTOs);
+                    return Mono.zip(countMono, dataFlux.collectList())
+                            .map(tuple -> {
+                                long total      = tuple.getT1();
+                                int  totalPages = (int) Math.ceil((double) total / size);
+                                return PagedResponse.<MaintenanceResponseDTO>builder()
+                                        .success(true)
+                                        .message("Success")
+                                        .data(tuple.getT2())
+                                        .totalElements(total)
+                                        .totalPages(totalPages)
+                                        .index(index)
+                                        .size(size)
+                                        .build();
+                            });
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch maintenance page: {}", e.getMessage(), e);
+                    return Mono.just(PagedResponse.<MaintenanceResponseDTO>builder()
+                            .success(false)
+                            .message(e.getMessage())
+                            .data(List.of())
+                            .totalElements(0L)
+                            .totalPages(0)
+                            .index(index)
+                            .size(size)
+                            .build());
                 });
     }
 
@@ -300,13 +333,6 @@ public class MaintenanceService {
     }
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
-
-    private Criteria buildKeywordCriteria(String keyword) {
-        if (StringUtils.hasText(keyword)) {
-            return Criteria.where("machine_code").like("%" + keyword + "%").ignoreCase(true);
-        }
-        return Criteria.empty();
-    }
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
