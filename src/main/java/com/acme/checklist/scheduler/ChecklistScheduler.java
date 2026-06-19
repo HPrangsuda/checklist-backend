@@ -64,7 +64,7 @@ public class ChecklistScheduler {
      * Window: จันทร์ 00:00 — ศุกร์ 23:59:59.999999999
      * เงื่อนไข: machine check_status = PENDING (ยังไม่ได้เช็คสัปดาห์นี้)
      */
-    @Scheduled(cron = "0 55 3 * * SAT", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 55 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);

@@ -288,7 +288,7 @@ public class ChecklistService {
 
     public Mono<PagedResponse<ChecklistListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -313,16 +313,15 @@ public class ChecklistService {
                             .flatMap(machineCodes -> {
                                 log.info("getWithRole machineCodes: {}", machineCodes);
 
-                                // FIX: wrap OR conditions ใน Criteria.from() เพื่อให้ grouping ถูกต้อง
-                                // แทนที่จะ chain .or() แบบ flat ซึ่งอาจทำให้ SQL ออกมาผิด precedence
-                                Criteria baseCriteria = Criteria.from(
-                                        Criteria.where("created_by").is(memberId),
-                                        machineCodes.isEmpty()
-                                                ? Criteria.where("supervisor").is(memberId)
-                                                : Criteria.where("machine_code").in(machineCodes),
-                                        Criteria.where("supervisor").is(memberId),
-                                        Criteria.where("manager").is(memberId)
-                                );
+                                // OR chain: created_by = me OR machine_code IN (...) OR supervisor = me OR manager = me
+                                // Criteria.from() ใช้ AND — ต้องใช้ .or() chain แทน
+                                Criteria baseCriteria = Criteria.where("created_by").is(memberId)
+                                        .or("supervisor").is(memberId)
+                                        .or("manager").is(memberId);
+
+                                if (!machineCodes.isEmpty()) {
+                                    baseCriteria = baseCriteria.or("machine_code").in(machineCodes);
+                                }
 
                                 Criteria criteria;
                                 if (StringUtils.hasText(keyword)) {
@@ -358,14 +357,11 @@ public class ChecklistService {
                         return Mono.just(ListResponse.success("MS022", false, List.<ChecklistListDTO>of()));
                     }
 
-                    // FIX: แยก criteria เป็น 2 กลุ่มชัดเจน และ wrap ด้วย Criteria.from()
-                    // เดิม: .or(Criteria.where(...).and(...)) อาจ grouping ผิด
-                    Criteria supervisorCriteria = Criteria.where("checklist_status").is("PENDING SUPERVISOR")
-                            .and("supervisor").is(memberId);
-                    Criteria managerCriteria = Criteria.where("checklist_status").is("PENDING MANAGER")
-                            .and("manager").is(memberId);
-
-                    Criteria criteria = Criteria.from(supervisorCriteria, managerCriteria);
+                    // (checklist_status = 'PENDING SUPERVISOR' AND supervisor = me)
+                    // OR (checklist_status = 'PENDING MANAGER'   AND manager   = me)
+                    Criteria criteria = Criteria
+                            .where("checklist_status").is("PENDING SUPERVISOR").and("supervisor").is(memberId)
+                            .or(Criteria.where("checklist_status").is("PENDING MANAGER").and("manager").is(memberId));
 
                     log.info("getPendingApprovals — memberId: {}", memberId);
 
