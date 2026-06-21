@@ -2,6 +2,7 @@ package com.acme.checklist.scheduler;
 
 import com.acme.checklist.entity.ChecklistRecord;
 import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.enums.MachineStatus;
 import com.acme.checklist.entity.Member;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,7 +33,7 @@ public class ChecklistScheduler {
      * ต้องรันก่อน autoSaveWeeklyChecklistRecords (Friday 23:59)
      * ลำดับ: Monday 00:01 reset → Friday 23:59 auto-save สัปดาห์ถัดไป ✅
      */
-    @Scheduled(cron = "0 1 0 * * MON", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 40 0 * * MON", zone = "Asia/Bangkok")
     public void updateOverdueChecklistsWeek() {
         buildUpdateOverdue("WEEKLY")
                 .then(resetMachineCheckStatus("WEEKLY"))
@@ -64,7 +65,7 @@ public class ChecklistScheduler {
      * Window: จันทร์ 00:00 — ศุกร์ 23:59:59.999999999
      * เงื่อนไข: machine check_status = PENDING (ยังไม่ได้เช็คสัปดาห์นี้)
      */
-    @Scheduled(cron = "0 55 23 * * FRI", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
@@ -78,7 +79,7 @@ public class ChecklistScheduler {
 
         template.select(
                         Query.query(
-                                Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
+                                Criteria.where("machine_status").in(MachineStatus.activeDbValues())
                                         .and("reset_period").is("WEEKLY")
                                         .and("check_status").is("PENDING")
                         ),
@@ -136,7 +137,7 @@ public class ChecklistScheduler {
 
         template.select(
                         Query.query(
-                                Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
+                                Criteria.where("machine_status").in(MachineStatus.activeDbValues())
                                         .and("reset_period").is("MONTHLY")
                                         .and("check_status").is("PENDING")
                         ),
@@ -168,28 +169,36 @@ public class ChecklistScheduler {
     // ─── CORE ─────────────────────────────────────────────────────────────────
 
     private Mono<Void> buildUpdateOverdue(String period) {
+        // mark overdue ทุก checklist_record ที่ยัง PENDING SUPERVISOR/MANAGER
+        // โดย join ผ่าน machine_code เพื่อกรองเฉพาะ reset_period ที่ถูกต้อง
+        // ไม่ต้องการ machine.id เพราะไม่ได้ update machine table ที่นี่
+        List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
+
         return template.select(
                         Query.query(Criteria.where("reset_period").is(period)),
                         Machine.class
                 )
-                .map(Machine::getId)
+                .map(Machine::getMachineCode)
                 .collectList()
-                .flatMap(machineIds -> {
-                    if (machineIds.isEmpty()) {
+                .flatMap(machineCodes -> {
+                    if (machineCodes.isEmpty()) {
                         log.info("[OVERDUE-{}] No machines found for period", period);
                         return Mono.empty();
                     }
 
-                    List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
+                    log.info("[OVERDUE-{}] Marking overdue for {} machine codes", period, machineCodes.size());
+
                     return Flux.fromIterable(statuses)
-                            .flatMap(status -> {
-                                Query query = Query.query(
-                                        Criteria.where("checklist_status").is(status)
-                                                .and("machine_id").in(machineIds)
-                                );
-                                Update update = Update.update("checklist_status", status + "-OVERDUE");
-                                return template.update(query, update, ChecklistRecord.class);
-                            })
+                            .flatMap(status -> template.update(
+                                    Query.query(
+                                            Criteria.where("checklist_status").is(status)
+                                                    .and("machine_code").in(machineCodes)
+                                                    .and("recheck").is(true)
+                                    ),
+                                    Update.update("checklist_status", status + "-OVERDUE"),
+                                    ChecklistRecord.class
+                            ).doOnNext(count -> log.info("[OVERDUE-{}] {} → {}-OVERDUE: {} records updated",
+                                    period, status, status, count)))
                             .then();
                 });
     }
@@ -197,7 +206,7 @@ public class ChecklistScheduler {
     private Mono<Void> resetMachineCheckStatus(String period) {
         return template.update(
                 Query.query(
-                        Criteria.where("machine_status").in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE")
+                        Criteria.where("machine_status").in(MachineStatus.activeDbValues())
                                 .and("reset_period").is(period)
                 ),
                 Update.update("check_status", "PENDING"),
@@ -271,21 +280,32 @@ public class ChecklistScheduler {
                             .build();
                     record.setCreatedBy(machine.getResponsiblePersonId());
 
-                    return template.insert(record)
-                            .flatMap(saved -> template.update(Machine.class)
-                                    .matching(Query.query(
-                                            Criteria.where("id").is(machine.getId())
-                                    ))
-                                    .apply(Update.update("check_status", checklistStatus)
-                                            .set("machine_status", machine.getMachineStatus()))
-                                    .then())
-                            .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Created auto record machine id={} code={} status={}",
+                    // UPDATE machine check_status ก่อน INSERT
+                    // เพื่อให้ machine ออกจาก PENDING แม้ว่า insert จะล้มเหลว (เช่น duplicate)
+                    // ป้องกัน scheduler รอบถัดไปดึง machine นี้มาซ้ำอีก
+                    Mono<Void> updateMachine = template.update(Machine.class)
+                            .matching(Query.query(Criteria.where("id").is(machine.getId())))
+                            .apply(Update.update("check_status", checklistStatus)
+                                    .set("machine_status", machine.getMachineStatus()))
+                            .then();
+
+                    return updateMachine
+                            .then(template.insert(record))
+                            .doOnSuccess(saved -> log.info("[CHECKLIST-AUTO] Created auto record machine id={} code={} status={}",
                                     machine.getId(), machine.getMachineCode(), checklistStatus))
                             .onErrorResume(e -> {
-                                log.error("[CHECKLIST-AUTO] Failed machine id={} code={}: {}",
-                                        machine.getId(), machine.getMachineCode(), e.getMessage());
+                                // duplicate key = record มีอยู่แล้ว (จากรอบก่อน) → log warn แล้วข้ามไป
+                                // machine.check_status ถูก update แล้วข้างบน จะไม่ถูกดึงซ้ำอีก
+                                if (e.getMessage() != null && e.getMessage().contains("duplicate key")) {
+                                    log.warn("[CHECKLIST-AUTO] Skip duplicate machine id={} code={} (record already exists)",
+                                            machine.getId(), machine.getMachineCode());
+                                } else {
+                                    log.error("[CHECKLIST-AUTO] Failed machine id={} code={}: {}",
+                                            machine.getId(), machine.getMachineCode(), e.getMessage());
+                                }
                                 return Mono.empty();
-                            });
+                            })
+                            .then();
                 });
     }
 }
