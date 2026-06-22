@@ -67,13 +67,18 @@ public class MachineService {
                             Machine machine = buildFromDTO(resolvedDTO);
                             return commonService.save(machine, Machine.class)
                                     .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO))
-                                    .then(Mono.just(ApiResponse.success("MS001")));
+                                    .then(Mono.just(ApiResponse.<Void>success("MS001")));
                         }))
+                // ── FIX: แยก ThrowException (business error) ออกจาก runtime error ──────
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business validation failed during machine create: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
+                })
                 .onErrorResume(e -> {
-                    log.error("Failed to create the machine", e);
+                    log.error("Unexpected error during machine create", e);
                     String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                     if (e instanceof NullPointerException) msg = "ข้อมูลบางส่วนเป็น null กรุณาตรวจสอบข้อมูล";
-                    return Mono.just(ApiResponse.error("MS002", msg));
+                    return Mono.just(ApiResponse.<Void>error("MS002", msg));
                 });
     }
 
@@ -141,6 +146,7 @@ public class MachineService {
                 .flatMap(v -> template.selectOne(
                                 Query.query(Criteria.where("id").is(v.getId())),
                                 Machine.class)
+                        .switchIfEmpty(Mono.error(new ThrowException("MS004", "Machine not found with id: " + v.getId())))
                         .flatMap(existing -> {
                             Long oldPersonId = existing.getResponsiblePersonId();
                             Long newPersonId = v.getResponsiblePersonId();
@@ -177,9 +183,13 @@ public class MachineService {
                                     .then(kpiService.recalculateKpiForPerson(newPersonId))
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business validation failed during machine update: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
+                })
                 .onErrorResume(e -> {
                     log.error("Failed to update the machine: {}", e.getMessage(), e);
-                    return Mono.just(ApiResponse.error("MS004", e.getMessage()));
+                    return Mono.just(ApiResponse.<Void>error("MS004", e.getMessage()));
                 });
     }
 
@@ -233,9 +243,13 @@ public class MachineService {
                                     oldPersonId, newPersonId, machineCode))
                             .then(Mono.just(ApiResponse.<Void>success("MS031")));
                 })
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business error changing responsible person: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
+                })
                 .onErrorResume(e -> {
                     log.error("Failed to change responsible person: {}", e.getMessage());
-                    return Mono.just(ApiResponse.error("MS032", e.getMessage()));
+                    return Mono.just(ApiResponse.<Void>error("MS032", e.getMessage()));
                 });
     }
 
@@ -247,7 +261,7 @@ public class MachineService {
             String machineStatus, String responsiblePersonName) {
 
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -287,12 +301,10 @@ public class MachineService {
     }
 
     // ─── FILTER OPTIONS ───────────────────────────────────────────────────────
-    // ดึง distinct values ทั้งหมดตาม role สำหรับ dropdown filter
-    // department label = "department - division" ถ้า division มีค่า ไม่งั้นแค่ "department"
 
     public Mono<ApiResponse<FilterOptionsDTO>> getFilterOptions() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -306,7 +318,6 @@ public class MachineService {
                         default           -> "AND m.responsible_person_id = " + memberId;
                     };
 
-                    // ✅ SELECT d.division ด้วย เพื่อ build label "dept - division"
                     String sql = """
                             SELECT DISTINCT
                                 m.department,
@@ -335,22 +346,20 @@ public class MachineService {
                             .all()
                             .collectList()
                             .map(rows -> {
-                                // LinkedHashMap รักษาลำดับ insert แรก (putIfAbsent)
-                                Map<String, String> deptMap         = new LinkedHashMap<>();
-                                Set<String>         machineStatuses = new LinkedHashSet<>();
-                                Set<String>         checkStatuses   = new LinkedHashSet<>();
+                                Map<String, String> deptMap            = new LinkedHashMap<>();
+                                Set<String>         machineStatuses    = new LinkedHashSet<>();
+                                Set<String>         checkStatuses      = new LinkedHashSet<>();
                                 Set<String>         responsiblePersons = new LinkedHashSet<>();
 
                                 for (Object[] row : rows) {
-                                    String deptCode  = (String) row[0];
-                                    String deptName  = (String) row[1];
-                                    String division  = (String) row[2];
-                                    String mStatus   = (String) row[3];
-                                    String cStatus   = (String) row[4];
-                                    String person    = (String) row[5];
+                                    String deptCode = (String) row[0];
+                                    String deptName = (String) row[1];
+                                    String division = (String) row[2];
+                                    String mStatus  = (String) row[3];
+                                    String cStatus  = (String) row[4];
+                                    String person   = (String) row[5];
 
                                     if (deptCode != null && deptName != null) {
-                                        // ✅ "department - division" ถ้า division มีค่า
                                         String label = buildDeptLabel(deptName, division);
                                         deptMap.putIfAbsent(deptCode, label);
                                     }
@@ -359,7 +368,6 @@ public class MachineService {
                                     if (StringUtils.hasText(person))  responsiblePersons.add(person);
                                 }
 
-                                // แปลง deptMap → List<Map<code, name>>
                                 List<Map<String, String>> departments = deptMap.entrySet().stream()
                                         .map(e -> Map.of("code", e.getKey(), "name", e.getValue()))
                                         .toList();
@@ -417,7 +425,7 @@ public class MachineService {
 
     public Flux<MachineSummaryDTO> getDepartmentSummaryWithRole() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -502,6 +510,7 @@ public class MachineService {
 
     public Mono<ApiResponse<MachineResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), Machine.class)
+                .switchIfEmpty(Mono.error(new ThrowException("MS018", "Machine not found with id: " + id)))
                 .flatMap(machine -> {
                     String machineCode  = machine.getMachineCode();
                     String machineGroup = machine.getMachineGroupId();
@@ -537,12 +546,15 @@ public class MachineService {
                             .defaultIfEmpty(machineGroup != null ? machineGroup : "");
 
                     Mono<String> typeNameMono = Mono.justOrEmpty(machineType)
-                            .flatMap(tid -> template.getDatabaseClient()
-                                    .sql("SELECT machine_type_name FROM machine_type WHERE machine_group_id = $1 AND machine_type_id = $2 LIMIT 1")
-                                    .bind("$1", machineGroup)
-                                    .bind("$2", tid)
-                                    .map((row, meta) -> row.get("machine_type_name", String.class))
-                                    .first())
+                            .flatMap(tid -> {
+                                assert machineGroup != null;
+                                return template.getDatabaseClient()
+                                        .sql("SELECT machine_type_name FROM machine_type WHERE machine_group_id = $1 AND machine_type_id = $2 LIMIT 1")
+                                        .bind("$1", machineGroup)
+                                        .bind("$2", tid)
+                                        .map((row, meta) -> row.get("machine_type_name", String.class))
+                                        .first();
+                            })
                             .defaultIfEmpty(machineType != null ? machineType : "");
 
                     Mono<String> deptNameMono = Mono.justOrEmpty(deptCode)
@@ -570,6 +582,8 @@ public class MachineService {
                                         return ApiResponse.success("MS017", dto);
                                     }));
                 })
+                .onErrorResume(ThrowException.class, e ->
+                        Mono.just(ApiResponse.error(e.getCode(), e.getMessage())))
                 .onErrorResume(e -> {
                     log.error("Failed to fetch machine {}: {}", id, e.getMessage(), e);
                     return Mono.just(ApiResponse.error("MS019", e.getMessage() != null ? e.getMessage() : "Unknown error"));
@@ -829,9 +843,10 @@ public class MachineService {
 
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object v = row.get(columnName);
-        if (v == null) return 0L;
-        if (v instanceof Long l) return l;
-        if (v instanceof Number n) return n.longValue();
-        return 0L;
+        return switch (v) {
+            case Long l -> l;
+            case Number n -> n.longValue();
+            case null, default -> 0L;
+        };
     }
 }
