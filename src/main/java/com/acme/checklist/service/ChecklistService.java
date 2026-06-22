@@ -38,11 +38,13 @@ import java.util.*;
 @Service
 @RequiredArgsConstructor
 public class ChecklistService {
+
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
     private final ObjectMapper objectMapper;
     private final FileStorageService fileStorageService;
     private final KpiService kpiService;
+
     private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
@@ -72,6 +74,7 @@ public class ChecklistService {
 
     private Mono<ApiResponse<Void>> processSave(ChecklistDTO dto) {
         dto.setCheckType("GENERAL");
+
         return template.selectOne(
                         Query.query(Criteria.where("id").is(dto.getMachineId())),
                         Machine.class)
@@ -79,8 +82,8 @@ public class ChecklistService {
                 .flatMap(machine -> ReactiveSecurityContextHolder.getContext()
                         .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
                         .flatMap(principal -> {
-                            LocalDate today = LocalDate.now(ZONE);
-                            boolean isWeekend    = today.getDayOfWeek() == DayOfWeek.SATURDAY
+                            LocalDate today       = LocalDate.now(ZONE);
+                            boolean isWeekend     = today.getDayOfWeek() == DayOfWeek.SATURDAY
                                     || today.getDayOfWeek() == DayOfWeek.SUNDAY;
                             boolean isResponsible = Objects.equals(principal.memberId(), machine.getResponsiblePersonId());
                             boolean isPending     = "PENDING".equals(machine.getCheckStatus());
@@ -93,6 +96,7 @@ public class ChecklistService {
                             ChecklistRecord record = buildFromDTO(dto);
 
                             if (isResponsible && isPending && !isWeekend) {
+                                // ── Responsible person submitting on a weekday with PENDING status ──
                                 if (machine.getSupervisorId() != null) {
                                     record.setChecklistStatus("PENDING SUPERVISOR");
                                 } else {
@@ -101,12 +105,15 @@ public class ChecklistService {
                                 record.setRecheck(true);
 
                                 List<Long> checklistIds = parseChecklistIds(dto.getMachineChecklist());
+
+                                // Update each machine_checklist item's check_status by its own id
                                 Mono<Void> updateChecklistItems = Flux.fromIterable(checklistIds)
                                         .flatMap(id -> template.update(MachineChecklist.class)
                                                 .matching(Query.query(Criteria.where("id").is(id)))
                                                 .apply(Update.update("check_status", true)))
                                         .then();
 
+                                // Update machine by machine.id (not machine_code)
                                 Mono<Void> updateMachine = template.update(Machine.class)
                                         .matching(Query.query(Criteria.where("id").is(machine.getId())))
                                         .apply(Update.update("check_status", record.getChecklistStatus())
@@ -118,10 +125,13 @@ public class ChecklistService {
                                         .flatMap(saved -> updateMachine
                                                 .then(updateKpi(principal.memberId()))
                                                 .then(Mono.just(ApiResponse.<Void>success("MS001"))));
+
                             } else {
+                                // ── Non-responsible, already checked, or weekend ──
                                 record.setChecklistStatus("COMPLETED");
                                 record.setRecheck(false);
 
+                                // Update machine by machine.id (not machine_code)
                                 Mono<Void> updateMachine = template.update(Machine.class)
                                         .matching(Query.query(Criteria.where("id").is(machine.getId())))
                                         .apply(Update.update("machine_status", dto.getMachineStatus())
@@ -304,7 +314,7 @@ public class ChecklistService {
                     }
 
                     // MEMBER / SUPERVISOR / MANAGER:
-                    // ดึง machine codes ที่ memberId รับผิดชอบ แล้วสร้าง criteria ถูกต้อง
+                    // ดึง machine codes ที่ memberId รับผิดชอบ แล้วสร้าง criteria
                     return template.select(
                                     Query.query(Criteria.where("responsible_person_id").is(memberId)),
                                     Machine.class)
@@ -313,8 +323,6 @@ public class ChecklistService {
                             .flatMap(machineCodes -> {
                                 log.info("getWithRole machineCodes: {}", machineCodes);
 
-                                // OR chain: created_by = me OR machine_code IN (...) OR supervisor = me OR manager = me
-                                // Criteria.from() ใช้ AND — ต้องใช้ .or() chain แทน
                                 Criteria baseCriteria = Criteria.where("created_by").is(memberId)
                                         .or("supervisor").is(memberId)
                                         .or("manager").is(memberId);
@@ -357,8 +365,6 @@ public class ChecklistService {
                         return Mono.just(ListResponse.success("MS022", false, List.<ChecklistListDTO>of()));
                     }
 
-                    // (checklist_status = 'PENDING SUPERVISOR' AND supervisor = me)
-                    // OR (checklist_status = 'PENDING MANAGER'   AND manager   = me)
                     Criteria criteria = Criteria
                             .where("checklist_status").is("PENDING SUPERVISOR").and("supervisor").is(memberId)
                             .or(Criteria.where("checklist_status").is("PENDING MANAGER").and("manager").is(memberId));
@@ -418,20 +424,36 @@ public class ChecklistService {
 
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
 
-    public Mono<ChecklistDTO> validateData(ChecklistDTO checklistDTO) {
-        if (checklistDTO.getMachineStatus() == null || checklistDTO.getMachineStatus().isEmpty()) {
+    public Mono<ChecklistDTO> validateData(ChecklistDTO dto) {
+        // 1. Machine status required
+        if (!StringUtils.hasText(dto.getMachineStatus())) {
             return Mono.error(new ThrowException("MS008"));
         }
-        return Mono.just(checklistDTO);
+
+        // 2. machineChecklist must not be null or empty array "[]"
+        String mc = dto.getMachineChecklist();
+        if (!StringUtils.hasText(mc) || "[]".equals(mc.trim())) {
+            log.warn("validateData — machineChecklist is empty for machineId: {}", dto.getMachineId());
+            return Mono.error(new ThrowException("MS_CHECKLIST_EMPTY"));
+        }
+
+        // 3. Parse and verify at least one item exists
+        List<Long> ids = parseChecklistIds(mc);
+        if (ids.isEmpty()) {
+            log.warn("validateData — machineChecklist has no valid ids for machineId: {}", dto.getMachineId());
+            return Mono.error(new ThrowException("MS_CHECKLIST_EMPTY"));
+        }
+
+        return Mono.just(dto);
     }
 
     public Mono<ChecklistDTO> validateDataUpdate(ChecklistDTO dto) {
-        if (dto.getMachineStatus() == null || dto.getMachineStatus().isEmpty()) {
+        if (!StringUtils.hasText(dto.getMachineStatus())) {
             return Mono.error(new ThrowException("MS008"));
         }
 
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     Long    memberId = principal.memberId();
                     String  status   = dto.getChecklistStatus();
@@ -548,7 +570,6 @@ public class ChecklistService {
         if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
 
-    // FIX: ลบ parameter 'names' ที่ไม่ได้ใช้งาน (แก้ warning: Parameter 'names' is never used)
     private Mono<Void> postDeleteTask(Long memberId, Long departmentId) {
         return Mono.empty();
     }
