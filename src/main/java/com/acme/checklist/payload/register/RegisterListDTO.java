@@ -1,48 +1,82 @@
 package com.acme.checklist.payload.register;
 
-import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.Member;
 import com.acme.checklist.entity.RegisterRequest;
-import com.acme.checklist.payload.audit.AuditMemberDTO;
-import com.acme.checklist.payload.machine.MachineListDTO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+
 @Data
 @Builder
-@AllArgsConstructor
 @NoArgsConstructor
+@AllArgsConstructor
 public class RegisterListDTO {
-    private Long id;
+
+    private Long   id;
     private String machineName;
     private String brand;
     private String model;
     private String serialNumber;
-    private Double price;
-    private Integer quantity;
-    private Integer watt;
-    private Integer horsePower;
     private String department;
-    private Long responsibleId;
-    private Long supervisorId;
-    private Long managerId;
-    private String note;
-    private String attachment;
-    private String maintenance;
-    private String calibration;
-    private AuditMemberDTO createdBy;
-    private AuditMemberDTO updatedBy;
+    private String createdAt;
+    private CreatedByDTO createdBy;
+    private CreatedByDTO updatedBy;
 
-    public static RegisterListDTO from(RegisterRequest registerRequest) {
-        if (registerRequest == null) {
-            return null;
+    // ── nested DTO ────────────────────────────────────────────────────────────
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class CreatedByDTO {
+        private Long   id;
+        private String name;
+    }
+
+    // ── factory ───────────────────────────────────────────────────────────────
+
+    /** ใช้เมื่อไม่มี member map (fallback) */
+    public static RegisterListDTO from(RegisterRequest r) {
+        return from(r, null, null);
+    }
+
+    /** ใช้ใน convertRegisterListDTOs หลังจาก join member แล้ว */
+    public static RegisterListDTO from(RegisterRequest r, Member createdMember, Member updatedMember) {
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.of("Asia/Bangkok"));
+
+        CreatedByDTO createdByDTO = null;
+        if (createdMember != null) {
+            createdByDTO = new CreatedByDTO(
+                    createdMember.getId(),
+                    createdMember.getFirstName() + " " + createdMember.getLastName()
+            );
+        } else if (r.getCreatedBy() != null) {
+            createdByDTO = new CreatedByDTO(r.getCreatedBy(), null);
         }
-        return RegisterListDTO.builder()
-                .id(registerRequest.getId())
-                .machineName(registerRequest.getMachineName())
-                .model(registerRequest.getModel())
 
+        CreatedByDTO updatedByDTO = null;
+        if (updatedMember != null) {
+            updatedByDTO = new CreatedByDTO(
+                    updatedMember.getId(),
+                    updatedMember.getFirstName() + " " + updatedMember.getLastName()
+            );
+        } else if (r.getUpdatedBy() != null) {
+            updatedByDTO = new CreatedByDTO(r.getUpdatedBy(), null);
+        }
+
+        return RegisterListDTO.builder()
+                .id(r.getId())
+                .machineName(r.getMachineName())
+                .brand(r.getBrand())
+                .model(r.getModel())
+                .serialNumber(r.getSerialNumber())
+                .department(r.getDepartment())
+                .createdAt(r.getCreatedAt() != null ? fmt.format(r.getCreatedAt()) : null)
+                .createdBy(createdByDTO)
+                .updatedBy(updatedByDTO)
                 .build();
     }
 }

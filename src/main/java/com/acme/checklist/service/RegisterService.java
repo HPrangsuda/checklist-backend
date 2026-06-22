@@ -29,10 +29,13 @@ import java.util.*;
 @Service
 @AllArgsConstructor
 public class RegisterService {
-    private final LarkService larkService;
+
+    private final LarkService    larkService;
     private final R2dbcEntityTemplate template;
-    private final CommonService commonService;
-    private final ObjectMapper objectMapper;
+    private final CommonService  commonService;
+    private final ObjectMapper   objectMapper;
+
+    // ─── CREATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> create(RegisterDTO dto) {
         return validateData(dto)
@@ -40,38 +43,188 @@ public class RegisterService {
                     RegisterRequest registerRequest = buildFromDTO(validateDTO);
                     return commonService.save(registerRequest, RegisterRequest.class)
                             .flatMap(this::sendLarkNotificationToMember)
-                            .then(Mono.just(ApiResponse.success("RG001")));
+                            .then(Mono.just(ApiResponse.<Void>success("RG001")));
+                })
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business validation failed during register create: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to create the register: {}", e.getMessage(), e);
-                    return Mono.just(ApiResponse.error("RG002", e.getMessage()));
+                    return Mono.just(ApiResponse.<Void>error("RG002", e.getMessage()));
                 });
     }
+
+    // ─── UPDATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> update(RegisterDTO registerDTO) {
         return validateData(registerDTO)
                 .flatMap(validateData -> {
                     Update update = buildUpdateFromDTO(validateData);
                     return commonService.update(registerDTO.getId(), update, RegisterRequest.class)
-                            .then(Mono.just(ApiResponse.success("RG")));
+                            .then(Mono.just(ApiResponse.<Void>success("RG003")));
+                })
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business validation failed during register update: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to update the register: {}", e.getMessage());
-                    return Mono.just(ApiResponse.error("MS004", e.getMessage()));
+                    return Mono.just(ApiResponse.<Void>error("RG004", e.getMessage()));
                 });
     }
+
+    // ─── DELETE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> delete(List<Long> ids) {
         return commonService.deleteEntitiesByIds(
                 ids,
                 RegisterRequest.class,
-                "Register not found",
-                "Register(s) deleted successfully",
-                "Failed to delete register(s)",
+                "RG005", "RG006", "RG007",
                 RegisterRequest::getMachineName,
                 names -> Mono.empty()
         );
     }
+
+    // ─── GET WITH ROLE (paged list) ───────────────────────────────────────────
+
+    public Mono<PagedResponse<RegisterListDTO>> getWithRole(String keyword, int index, int size) {
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .flatMap(principal -> {
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
+
+                    return switch (role) {
+                        case "ADMIN" -> {
+                            Criteria criteria = buildKeywordCriteria(keyword);
+                            Query query = Query.query(criteria)
+                                    .with(commonService.pageable(index, size, "created_at"));
+                            yield commonService.executePagedQuery(
+                                    index, size, query, criteria,
+                                    RegisterRequest.class, this::convertRegisterListDTOs);
+                        }
+                        case "MANAGER" -> {
+                            Criteria roleCriteria = Criteria
+                                    .where("created_by").is(memberId)
+                                    .or("manager_id").is(memberId);
+                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
+                        }
+                        case "SUPERVISOR" -> {
+                            Criteria roleCriteria = Criteria
+                                    .where("created_by").is(memberId)
+                                    .or("supervisor_id").is(memberId);
+                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
+                        }
+                        default -> {
+                            Criteria roleCriteria = Criteria.where("created_by").is(memberId);
+                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
+                        }
+                    };
+                });
+    }
+
+    private Mono<PagedResponse<RegisterListDTO>> fetchWithRoleAndKeyword(
+            Criteria roleCriteria, String keyword, int index, int size) {
+        Criteria criteria = roleCriteria;
+        if (StringUtils.hasText(keyword)) {
+            criteria = roleCriteria.and(
+                    Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true));
+        }
+        Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
+        return commonService.executePagedQuery(
+                index, size, query, criteria,
+                RegisterRequest.class, this::convertRegisterListDTOs);
+    }
+
+    private Criteria buildKeywordCriteria(String keyword) {
+        if (StringUtils.hasText(keyword)) {
+            return Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true);
+        }
+        return Criteria.empty();
+    }
+
+    // ─── FIX: convertRegisterListDTOs — join member สำหรับ createdBy/updatedBy ──
+
+    private Flux<RegisterListDTO> convertRegisterListDTOs(List<RegisterRequest> list) {
+        // รวบรวม member ids ทั้งหมด (createdBy + updatedBy)
+        Set<Long> memberIdSet = new HashSet<>();
+        for (RegisterRequest r : list) {
+            if (r.getCreatedBy() != null) memberIdSet.add(r.getCreatedBy());
+            if (r.getUpdatedBy()  != null) memberIdSet.add(r.getUpdatedBy());
+        }
+
+        Mono<Map<Long, Member>> memberMapMono = memberIdSet.isEmpty()
+                ? Mono.just(new HashMap<>())
+                : commonService.fetchMembersByIds(new ArrayList<>(memberIdSet));
+
+        return memberMapMono.flatMapMany(memberMap ->
+                Flux.fromIterable(list).map(r -> RegisterListDTO.from(
+                        r,
+                        memberMap.get(r.getCreatedBy()),   // createdBy member
+                        memberMap.get(r.getUpdatedBy())    // updatedBy member
+                ))
+        );
+    }
+
+    // ─── GET BY ID ────────────────────────────────────────────────────────────
+
+    public Mono<ApiResponse<RegisterResponseDTO>> getById(Long id) {
+        return template.selectOne(Query.query(Criteria.where("id").is(id)), RegisterRequest.class)
+                .flatMap(registerRequest -> {
+                    List<Long> auditIds = new ArrayList<>();
+                    if (registerRequest.getCreatedBy() != null) auditIds.add(registerRequest.getCreatedBy());
+                    if (registerRequest.getUpdatedBy()  != null) auditIds.add(registerRequest.getUpdatedBy());
+
+                    Mono<Map<Long, Member>> auditMono = auditIds.isEmpty()
+                            ? Mono.just(new HashMap<>())
+                            : commonService.fetchMembersByIds(auditIds);
+
+                    Mono<String> deptNameMono = Mono.justOrEmpty(registerRequest.getDepartment())
+                            .flatMap(deptCode -> template.selectOne(
+                                            Query.query(Criteria.where("department_code").is(deptCode)),
+                                            Department.class)
+                                    .map(Department::getDepartment))
+                            .defaultIfEmpty(registerRequest.getDepartment() != null
+                                    ? registerRequest.getDepartment() : "-");
+
+                    Mono<String> responsibleMono = resolveMemberName(registerRequest.getResponsibleId());
+                    Mono<String>  supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
+                    Mono<String>    managerMono  = resolveMemberName(registerRequest.getManagerId());
+
+                    return Mono.zip(auditMono, deptNameMono, responsibleMono, supervisorMono, managerMono)
+                            .map(tuple -> {
+                                Map<Long, Member> memberMap    = tuple.getT1();
+                                String            deptName     = tuple.getT2();
+                                String            responsibleName = tuple.getT3();
+                                String            supervisorName  = tuple.getT4();
+                                String            managerName     = tuple.getT5();
+
+                                AuditMemberDTO createdByDTO = registerRequest.getCreatedBy() != null
+                                        ? AuditMemberDTO.from(memberMap.get(registerRequest.getCreatedBy()))
+                                        : null;
+                                AuditMemberDTO updatedByDTO = registerRequest.getUpdatedBy() != null
+                                        ? AuditMemberDTO.from(memberMap.get(registerRequest.getUpdatedBy()))
+                                        : null;
+
+                                RegisterResponseDTO dto = RegisterResponseDTO.from(
+                                        registerRequest, createdByDTO, updatedByDTO);
+                                dto.setDepartmentName(deptName);
+                                dto.setResponsibleName(responsibleName);
+                                dto.setSupervisorName(supervisorName);
+                                dto.setManagerName(managerName);
+
+                                return ApiResponse.success("RG010", dto);
+                            });
+                })
+                .switchIfEmpty(Mono.just(ApiResponse.error("RG011", "Data not found")))
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch register {}: {}", id, e.getMessage(), e);
+                    return Mono.just(ApiResponse.error("RG012", e.getMessage()));
+                });
+    }
+
+    // ─── LARK NOTIFICATION ────────────────────────────────────────────────────
 
     private Mono<Void> sendLarkNotificationToMember(RegisterRequest saved) {
         List<Long> targetMemberIds = List.of(1L, 3L);
@@ -111,7 +264,6 @@ public class RegisterService {
                                             return larkService.sendCardMessage(openId, buildRegisterCardJson(saved));
                                         })
                                         .toList();
-
                                 return Mono.when(sends);
                             });
                 })
@@ -142,17 +294,11 @@ public class RegisterService {
                   "fields": [
                     {
                       "is_short": true,
-                      "text": {
-                        "tag": "lark_md",
-                        "content": "**ชื่อเครื่องจักร**\\n%s"
-                      }
+                      "text": { "tag": "lark_md", "content": "**ชื่อเครื่องจักร**\\n%s" }
                     },
                     {
                       "is_short": true,
-                      "text": {
-                        "tag": "lark_md",
-                        "content": "**แผนก**\\n%s"
-                      }
+                      "text": { "tag": "lark_md", "content": "**แผนก**\\n%s" }
                     }
                   ]
                 },
@@ -161,10 +307,7 @@ public class RegisterService {
                   "fields": [
                     {
                       "is_short": true,
-                      "text": {
-                        "tag": "lark_md",
-                        "content": "**Serial No**\\n%s"
-                      }
+                      "text": { "tag": "lark_md", "content": "**Serial No**\\n%s" }
                     }
                   ]
                 }
@@ -173,149 +316,16 @@ public class RegisterService {
             """.formatted(machineName, department, serialNo);
     }
 
-    public Mono<PagedResponse<RegisterListDTO>> getWithRole(String keyword, int index, int size) {
-        return ReactiveSecurityContextHolder.getContext()
-                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
-                .flatMap(principal -> {
-                    String role       = principal.role();
-                    String employeeId = principal.employeeId();
-                    Long   memberId   = principal.memberId();
-
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria)
-                                    .with(commonService.pageable(index, size, "created_at"));
-                            yield commonService.executePagedQuery(
-                                    index, size, query, criteria,
-                                    RegisterRequest.class, this::convertRegisterListDTOs);
-                        }
-                        case "MANAGER" -> {
-                            Criteria roleCriteria = Criteria
-                                    .where("created_by").is(memberId)
-                                    .or("manager_id").is(Objects.requireNonNull(parseLongOrNull(employeeId)));
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
-                        case "SUPERVISOR" -> {
-                            Criteria roleCriteria = Criteria
-                                    .where("created_by").is(memberId)
-                                    .or("supervisor_id").is(Objects.requireNonNull(parseLongOrNull(employeeId)));
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
-                        default -> {
-                            Criteria roleCriteria = Criteria
-                                    .where("created_by").is(memberId);
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
-                    };
-                });
-    }
-
-    private Mono<PagedResponse<RegisterListDTO>> fetchWithRoleAndKeyword(
-            Criteria roleCriteria, String keyword, int index, int size) {
-        Criteria criteria = roleCriteria;
-        if (StringUtils.hasText(keyword)) {
-            criteria = roleCriteria.and(
-                    Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
-            );
-        }
-        Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
-        return commonService.executePagedQuery(
-                index, size, query, criteria,
-                RegisterRequest.class, this::convertRegisterListDTOs);
-    }
-
-    private Criteria buildKeywordCriteria(String keyword) {
-        if (StringUtils.hasText(keyword)) {
-            return Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true);
-        }
-        return Criteria.empty();
-    }
-
-    public Mono<ApiResponse<RegisterResponseDTO>> getById(Long id) {
-        Query query = Query.query(Criteria.where("id").is(id));
-
-        return template.selectOne(query, RegisterRequest.class)
-                .flatMap(registerRequest -> {
-                    List<Long> auditIds = new ArrayList<>();
-                    if (registerRequest.getCreatedBy() != null) auditIds.add(registerRequest.getCreatedBy());
-                    if (registerRequest.getUpdatedBy()  != null) auditIds.add(registerRequest.getUpdatedBy());
-
-                    Mono<Map<Long, Member>> auditMono = auditIds.isEmpty()
-                            ? Mono.just(new HashMap<>())
-                            : commonService.fetchMembersByIds(auditIds);
-
-                    Mono<String> deptNameMono = Mono.justOrEmpty(registerRequest.getDepartment())
-                            .flatMap(deptCode ->
-                                    template.selectOne(
-                                            Query.query(Criteria.where("department_code").is(deptCode)),
-                                            Department.class
-                                    ).map(Department::getDepartment)
-                            )
-                            .defaultIfEmpty(registerRequest.getDepartment() != null
-                                    ? registerRequest.getDepartment() : "-");
-
-                    // ✅ ส่ง Long โดยตรง ไม่ต้อง String.valueOf แล้ว
-                    Mono<String> responsibleMono = resolveMemberName(registerRequest.getResponsibleId());
-                    Mono<String>  supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
-                    Mono<String>    managerMono  = resolveMemberName(registerRequest.getManagerId());
-
-                    return Mono.zip(auditMono, deptNameMono, responsibleMono, supervisorMono, managerMono)
-                            .map(tuple -> {
-                                Map<Long, Member> memberMap = tuple.getT1();
-                                String deptName            = tuple.getT2();
-                                String responsibleName     = tuple.getT3();
-                                String supervisorName      = tuple.getT4();
-                                String managerName         = tuple.getT5();
-
-                                AuditMemberDTO createdByDTO = registerRequest.getCreatedBy() != null
-                                        ? AuditMemberDTO.from(memberMap.get(registerRequest.getCreatedBy()))
-                                        : null;
-                                AuditMemberDTO updatedByDTO = registerRequest.getUpdatedBy() != null
-                                        ? AuditMemberDTO.from(memberMap.get(registerRequest.getUpdatedBy()))
-                                        : null;
-
-                                RegisterResponseDTO dto = RegisterResponseDTO.from(
-                                        registerRequest, createdByDTO, updatedByDTO);
-
-                                dto.setDepartmentName(deptName);
-                                dto.setResponsibleName(responsibleName);
-                                dto.setSupervisorName(supervisorName);
-                                dto.setManagerName(managerName);
-
-                                return ApiResponse.success("MS017", dto);
-                            });
-                })
-                .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Data not found")))
-                .onErrorResume(e -> {
-                    log.error("Failed to fetch data: {}", e.getMessage(), e);
-                    return Mono.just(ApiResponse.error("MS019", e.getMessage()));
-                });
-    }
-
-    // ✅ รับ Long โดยตรง ไม่ต้อง parse String แล้ว
-    private Mono<String> resolveMemberName(Long memberId) {
-        if (memberId == null) return Mono.just("-");
-        return template.selectOne(
-                        Query.query(Criteria.where("id").is(memberId)), Member.class)
-                .map(m -> m.getFirstName() + " " + m.getLastName())
-                .defaultIfEmpty(String.valueOf(memberId));
-    }
-
-    private Flux<RegisterListDTO> convertRegisterListDTOs(List<RegisterRequest> registerRequests) {
-        return Flux.fromIterable(registerRequests).map(RegisterListDTO::from);
-    }
+    // ─── VALIDATE ─────────────────────────────────────────────────────────────
 
     public Mono<RegisterDTO> validateData(RegisterDTO registerDTO) {
         if (registerDTO.getDepartment() == null || registerDTO.getDepartment().isEmpty()) {
-            return Mono.error(new ThrowException("RG003"));
+            return Mono.error(new ThrowException("RG020", "Department is required"));
         }
-        return template.select(
-                        Query.query(Criteria.where("department").is(registerDTO.getDepartment())),
-                        RegisterRequest.class)
-                .collectList()
-                .flatMap(existing -> Mono.just(registerDTO));
+        return Mono.just(registerDTO);
     }
+
+    // ─── BUILD FROM DTO ───────────────────────────────────────────────────────
 
     public RegisterRequest buildFromDTO(RegisterDTO dto) {
         try {
@@ -332,13 +342,13 @@ public class RegisterService {
             String attachmentJson = null;
             if (dto.getAttachments() != null && !dto.getAttachments().isEmpty()) {
                 attachmentJson = objectMapper.writeValueAsString(dto.getAttachments());
-                log.info("✅ Attachments JSON: {}", attachmentJson);
+                log.info("Attachments JSON: {}", attachmentJson);
             }
 
             String workInstructionJson = null;
             if (dto.getWorkInstructions() != null && !dto.getWorkInstructions().isEmpty()) {
                 workInstructionJson = objectMapper.writeValueAsString(dto.getWorkInstructions());
-                log.info("✅ WorkInstruction JSON: {}", workInstructionJson);
+                log.info("WorkInstruction JSON: {}", workInstructionJson);
             }
 
             String warrantyFilesJson = null;
@@ -346,7 +356,7 @@ public class RegisterService {
                     && dto.getWarrantyFiles() != null
                     && !dto.getWarrantyFiles().isEmpty()) {
                 warrantyFilesJson = objectMapper.writeValueAsString(dto.getWarrantyFiles());
-                log.info("✅ WarrantyFiles JSON: {}", warrantyFilesJson);
+                log.info("WarrantyFiles JSON: {}", warrantyFilesJson);
             }
 
             return RegisterRequest.builder()
@@ -373,11 +383,12 @@ public class RegisterService {
                     .warrantyExpireDate("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyExpireDate() : null)
                     .warrantyFiles(warrantyFilesJson)
                     .build();
-
         } catch (Exception e) {
             throw new RuntimeException("Failed to process data: " + e.getMessage());
         }
     }
+
+    // ─── BUILD UPDATE ─────────────────────────────────────────────────────────
 
     private Update buildUpdateFromDTO(RegisterDTO dto) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
@@ -399,7 +410,7 @@ public class RegisterService {
                 addIfNotNull(params, "attachment",
                         objectMapper.writeValueAsString(dto.getAttachments()));
             } catch (Exception e) {
-                log.error("❌ Error converting attachments to JSON", e);
+                log.error("Error converting attachments to JSON", e);
             }
         }
 
@@ -410,7 +421,7 @@ public class RegisterService {
                                 ? null
                                 : objectMapper.writeValueAsString(dto.getWorkInstructions()));
             } catch (Exception e) {
-                log.error("❌ Error converting workInstructions to JSON", e);
+                log.error("Error converting workInstructions to JSON", e);
             }
         }
 
@@ -427,24 +438,24 @@ public class RegisterService {
                                 ? objectMapper.writeValueAsString(dto.getWarrantyFiles())
                                 : null);
             } catch (Exception e) {
-                log.error("❌ Error converting warrantyFiles to JSON", e);
+                log.error("Error converting warrantyFiles to JSON", e);
             }
         }
 
         return Update.from(params);
     }
 
-    private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
-        if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
+    // ─── HELPERS ──────────────────────────────────────────────────────────────
+
+    private Mono<String> resolveMemberName(Long memberId) {
+        if (memberId == null) return Mono.just("-");
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(memberId)), Member.class)
+                .map(m -> m.getFirstName() + " " + m.getLastName())
+                .defaultIfEmpty(String.valueOf(memberId));
     }
 
-    private Long parseLongOrNull(String value) {
-        if (!StringUtils.hasText(value)) return null;
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException e) {
-            log.warn("Cannot parse '{}' as Long, returning null", value);
-            return null;
-        }
+    private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
+        if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
 }
