@@ -34,6 +34,8 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
 
+// ─── ChecklistService.java ────────────────────────────────────────────────────
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -106,11 +108,21 @@ public class ChecklistService {
 
                                 List<Long> checklistIds = parseChecklistIds(dto.getMachineChecklist());
 
-                                Mono<Void> updateChecklistItems = Flux.fromIterable(checklistIds)
-                                        .flatMap(id -> template.update(MachineChecklist.class)
-                                                .matching(Query.query(Criteria.where("id").is(id)))
-                                                .apply(Update.update("check_status", true)))
-                                        .then();
+                                // Set true เฉพาะ row ที่ reset_time != "0 0 0 * * 1"
+                                Mono<Void> updateChecklistItems = template.select(
+                                                Query.query(Criteria.where("id").in(checklistIds)
+                                                        .and("reset_time").not("0 0 0 * * 1")),
+                                                MachineChecklist.class)
+                                        .map(MachineChecklist::getId)
+                                        .collectList()
+                                        .flatMap(filteredIds -> {
+                                            if (filteredIds.isEmpty()) return Mono.<Void>empty();
+                                            return Flux.fromIterable(filteredIds)
+                                                    .flatMap(id -> template.update(MachineChecklist.class)
+                                                            .matching(Query.query(Criteria.where("id").is(id)))
+                                                            .apply(Update.update("check_status", true)))
+                                                    .then();
+                                        });
 
                                 Mono<Void> updateMachine = template.update(Machine.class)
                                         .matching(Query.query(Criteria.where("id").is(machine.getId())))
@@ -305,7 +317,7 @@ public class ChecklistService {
 
     public Mono<PagedResponse<ChecklistListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
@@ -359,7 +371,7 @@ public class ChecklistService {
 
     public Mono<ListResponse<List<ChecklistListDTO>>> getPendingApprovals() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     Long   memberId = principal.memberId();
                     String role     = principal.role();
@@ -395,20 +407,10 @@ public class ChecklistService {
 
     public Mono<List<ChecklistStatsDTO>> getChecklistStats(Integer year, String department) {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal())
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     int    targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
-                    String role       = principal.role();
-                    Long   memberId   = principal.memberId();
-
-                    String roleFilter = switch (role) {
-                        case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
-                        case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId
-                                + " OR m.supervisor_id = " + memberId + ")";
-                        case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId
-                                + " OR m.manager_id = " + memberId + ")";
-                        default           -> "";
-                    };
+                    String roleFilter = getString(principal);
 
                     String deptFilter = StringUtils.hasText(department)
                             ? "AND d.department_code = :department" : "";
@@ -425,6 +427,21 @@ public class ChecklistService {
 
                     return spec.map((row, metadata) -> mapRowToStatsDTO(row)).all().collectList();
                 });
+    }
+
+    private static String getString(MemberPrincipal principal) {
+        String role       = principal.role();
+        Long   memberId   = principal.memberId();
+
+        String roleFilter = switch (role) {
+            case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
+            case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId
+                    + " OR m.supervisor_id = " + memberId + ")";
+            case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId
+                    + " OR m.manager_id = " + memberId + ")";
+            default           -> "";
+        };
+        return roleFilter;
     }
 
     // ─── VALIDATE ─────────────────────────────────────────────────────────────

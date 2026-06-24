@@ -2,6 +2,7 @@ package com.acme.checklist.scheduler;
 
 import com.acme.checklist.entity.ChecklistRecord;
 import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.MachineChecklist;
 import com.acme.checklist.entity.enums.MachineStatus;
 import com.acme.checklist.entity.Member;
 import lombok.RequiredArgsConstructor;
@@ -24,16 +25,12 @@ import java.util.List;
 public class ChecklistScheduler {
 
     private final R2dbcEntityTemplate template;
-    private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
+    private static final ZoneId   ZONE             = ZoneId.of("Asia/Bangkok");
+    private static final String   WEEKLY_CRON      = "0 0 0 * * 1";
 
     // ─── WEEKLY ───────────────────────────────────────────────────────────────
 
-    /**
-     * ทุกวันจันทร์ 00:01 น. — mark overdue + reset check_status = PENDING
-     * ต้องรันก่อน autoSaveWeeklyChecklistRecords (Friday 23:59)
-     * ลำดับ: Monday 00:01 reset → Friday 23:59 auto-save สัปดาห์ถัดไป ✅
-     */
-    @Scheduled(cron = "0 40 0 * * MON", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 5 0 * * MON", zone = "Asia/Bangkok")
     public void updateOverdueChecklistsWeek() {
         buildUpdateOverdue("WEEKLY")
                 .then(resetMachineCheckStatus("WEEKLY"))
@@ -44,11 +41,7 @@ public class ChecklistScheduler {
 
     // ─── MONTHLY ──────────────────────────────────────────────────────────────
 
-    /**
-     * ทุกวันที่ 1 ของเดือน 00:00 น. — mark overdue + reset check_status = PENDING
-     * ต้องรันก่อน autoSaveMonthlyChecklistRecords (วันที่ 1 23:55) ✅
-     */
-    @Scheduled(cron = "0 0 0 1 * *", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 10 0 1 * *", zone = "Asia/Bangkok")
     public void updateOverdueChecklistsMonth() {
         buildUpdateOverdue("MONTHLY")
                 .then(resetMachineCheckStatus("MONTHLY"))
@@ -57,21 +50,37 @@ public class ChecklistScheduler {
                 .block();
     }
 
+    // ─── RESET MACHINE CHECKLIST ──────────────────────────────────────────────
+
+    @Scheduled(cron = "0 0 0 * * *", zone = "Asia/Bangkok")
+    public void resetMachineChecklistByResetTime() {
+        LocalDate today      = LocalDate.now(ZONE);
+        DayOfWeek dow        = today.getDayOfWeek();
+        int       dayOfMonth = today.getDayOfMonth();
+
+        template.select(
+                        Query.query(Criteria.where("check_status").is(true)
+                                .and("reset_time").not(WEEKLY_CRON)),
+                        MachineChecklist.class
+                )
+                .filter(item -> shouldResetToday(item.getResetTime(), dow, dayOfMonth))
+                .flatMap(item -> template.update(MachineChecklist.class)
+                        .matching(Query.query(Criteria.where("id").is(item.getId())))
+                        .apply(Update.update("check_status", false))
+                        .then()
+                )
+                .then()
+                .block();
+    }
+
     // ─── AUTO SAVE WEEKLY ─────────────────────────────────────────────────────
 
-    /**
-     * ทุกวันศุกร์ 23:59 น. — บันทึก auto record สำหรับ machine ที่ยังไม่ได้เช็คในสัปดาห์นี้
-     *
-     * Window: จันทร์ 00:00 — ศุกร์ 23:59:59.999999999
-     * เงื่อนไข: machine check_status = PENDING (ยังไม่ได้เช็คสัปดาห์นี้)
-     */
     @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
         LocalDate friday = today.with(DayOfWeek.FRIDAY);
 
-        // Monday 00:00:00 → Saturday 00:00:00 - 1ns (= Friday 23:59:59.999999999)
         Instant startOfWeek = monday.atStartOfDay(ZONE).toInstant();
         Instant endOfWeek   = friday.atTime(LocalTime.MAX).atZone(ZONE).toInstant();
 
@@ -85,44 +94,24 @@ public class ChecklistScheduler {
                         ),
                         Machine.class
                 )
-                // FIX: ใช้ concatMap แทน flatMap เพื่อป้องกัน race condition
-                // flatMap รัน concurrent หลาย thread พร้อมกัน → hasChecklistRecord อาจ return false
-                // ก่อนที่ thread อื่นจะ insert เสร็จ → duplicate key
                 .concatMap(machine -> {
                     if (machine.getResponsiblePersonId() == null) {
-                        log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — responsiblePersonId is null",
-                                machine.getId(), machine.getMachineCode());
                         return Mono.empty();
                     }
                     return hasChecklistRecord(machine, startOfWeek, endOfWeek)
                             .flatMap(exists -> {
                                 if (exists) {
-                                    log.info("[CHECKLIST-AUTO] Skip machine id={} code={} (record exists in this week)",
-                                            machine.getId(), machine.getMachineCode());
                                     return Mono.<Void>empty();
                                 }
                                 return saveDefaultRecord(machine);
                             });
                 })
                 .then()
-                .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Weekly auto-save completed"))
-                .doOnError(e -> log.error("[CHECKLIST-AUTO] Weekly auto-save failed: {}", e.getMessage()))
                 .block();
     }
 
     // ─── AUTO SAVE MONTHLY ────────────────────────────────────────────────────
 
-    /**
-     * ทุกวันที่ 1 ของเดือน 23:55 น. — บันทึก auto record สำหรับ machine ที่ยังไม่ได้เช็คในเดือนที่แล้ว
-     *
-     * ลำดับในวันที่ 1:
-     *   00:00 → reset check_status = PENDING  (updateOverdueChecklistsMonth)
-     *   23:55 → auto-save เดือนที่แล้ว        (autoSaveMonthlyChecklistRecords)
-     *
-     * Window: วันที่ 1 ของเดือนที่แล้ว 00:00 — วันสุดท้ายของเดือนที่แล้ว 23:59:59.999999999
-     * ตรวจสอบว่า machine เคยมี record ในเดือนที่แล้วหรือไม่
-     * ถ้าไม่มี → สร้าง auto record (created_at = now = วันที่ 1 เดือนนี้ ซึ่งถูกต้องตามเวลาจริงที่บันทึก)
-     */
     @Scheduled(cron = "0 55 23 1 * *", zone = "Asia/Bangkok")
     public void autoSaveMonthlyChecklistRecords() {
         LocalDate today               = LocalDate.now(ZONE);
@@ -133,8 +122,6 @@ public class ChecklistScheduler {
         Instant startOfPrevMonth = firstDayOfPrevMonth.atStartOfDay(ZONE).toInstant();
         Instant endOfPrevMonth   = lastDayOfPrevMonth.atTime(LocalTime.MAX).atZone(ZONE).toInstant();
 
-        log.info("[CHECKLIST-AUTO] Monthly run — {} ~ {}", firstDayOfPrevMonth, lastDayOfPrevMonth);
-
         template.select(
                         Query.query(
                                 Criteria.where("machine_status").in(MachineStatus.activeDbValues())
@@ -143,11 +130,8 @@ public class ChecklistScheduler {
                         ),
                         Machine.class
                 )
-                // FIX: ใช้ concatMap แทน flatMap เพื่อป้องกัน race condition
                 .concatMap(machine -> {
                     if (machine.getResponsiblePersonId() == null) {
-                        log.warn("[CHECKLIST-AUTO] Skip machine id={} code={} — responsiblePersonId is null",
-                                machine.getId(), machine.getMachineCode());
                         return Mono.empty();
                     }
                     return hasChecklistRecord(machine, startOfPrevMonth, endOfPrevMonth)
@@ -161,17 +145,12 @@ public class ChecklistScheduler {
                             });
                 })
                 .then()
-                .doOnSuccess(v -> log.info("[CHECKLIST-AUTO] Monthly auto-save completed"))
-                .doOnError(e -> log.error("[CHECKLIST-AUTO] Monthly auto-save failed: {}", e.getMessage()))
                 .block();
     }
 
     // ─── CORE ─────────────────────────────────────────────────────────────────
 
     private Mono<Void> buildUpdateOverdue(String period) {
-        // mark overdue ทุก checklist_record ที่ยัง PENDING SUPERVISOR/MANAGER
-        // โดย join ผ่าน machine_code เพื่อกรองเฉพาะ reset_period ที่ถูกต้อง
-        // ไม่ต้องการ machine.id เพราะไม่ได้ update machine table ที่นี่
         List<String> statuses = List.of("PENDING SUPERVISOR", "PENDING MANAGER");
 
         return template.select(
@@ -182,11 +161,8 @@ public class ChecklistScheduler {
                 .collectList()
                 .flatMap(machineCodes -> {
                     if (machineCodes.isEmpty()) {
-                        log.info("[OVERDUE-{}] No machines found for period", period);
                         return Mono.empty();
                     }
-
-                    log.info("[OVERDUE-{}] Marking overdue for {} machine codes", period, machineCodes.size());
 
                     return Flux.fromIterable(statuses)
                             .flatMap(status -> template.update(
@@ -216,13 +192,28 @@ public class ChecklistScheduler {
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-    /**
-     * ตรวจสอบว่ามี checklist record ของ machine นี้ในช่วงเวลาที่กำหนดหรือไม่
-     *
-     * FIX: เปลี่ยนจาก .and("created_at").greaterThanOrEquals(from) + .and("created_at").lessThanOrEquals(to)
-     *      ซึ่ง R2DBC จะ override field เดิม ทำให้ condition แรกหายไป
-     *      → ใช้ .and("created_at").between(from, to) แทน (inclusive both ends)
-     */
+    private boolean shouldResetToday(String cron, DayOfWeek dow, int dayOfMonth) {
+        if (cron == null || cron.isBlank()) return false;
+        try {
+            String[] parts = cron.trim().split("\\s+");
+            if (parts.length < 6) return false;
+
+            String domField = parts[3];
+            String dowField = parts[5];
+
+            boolean domMatch = "*".equals(domField) || String.valueOf(dayOfMonth).equals(domField);
+            boolean dowMatch = "*".equals(dowField)
+                    || String.valueOf(dow.getValue()).equals(dowField)
+                    || ("0".equals(dowField) && dow == DayOfWeek.SUNDAY)
+                    || ("7".equals(dowField) && dow == DayOfWeek.SUNDAY);
+
+            return domMatch && dowMatch;
+        } catch (Exception e) {
+            log.warn("[CHECKLIST-RESET] Invalid reset_time cron: {}", cron);
+            return false;
+        }
+    }
+
     private Mono<Boolean> hasChecklistRecord(Machine machine, Instant from, Instant to) {
         return template.count(
                 Query.query(
@@ -230,7 +221,7 @@ public class ChecklistScheduler {
                                 .and("created_by").is(machine.getResponsiblePersonId())
                                 .and("recheck").is(true)
                                 .and("check_type").is("GENERAL")
-                                .and("created_at").between(from, to)   // ← FIX: ใช้ between แทน 2 conditions
+                                .and("created_at").between(from, to)
                 ),
                 ChecklistRecord.class
         ).map(count -> {
@@ -280,9 +271,6 @@ public class ChecklistScheduler {
                             .build();
                     record.setCreatedBy(machine.getResponsiblePersonId());
 
-                    // UPDATE machine check_status ก่อน INSERT
-                    // เพื่อให้ machine ออกจาก PENDING แม้ว่า insert จะล้มเหลว (เช่น duplicate)
-                    // ป้องกัน scheduler รอบถัดไปดึง machine นี้มาซ้ำอีก
                     Mono<Void> updateMachine = template.update(Machine.class)
                             .matching(Query.query(Criteria.where("id").is(machine.getId())))
                             .apply(Update.update("check_status", checklistStatus)
@@ -294,8 +282,6 @@ public class ChecklistScheduler {
                             .doOnSuccess(saved -> log.info("[CHECKLIST-AUTO] Created auto record machine id={} code={} status={}",
                                     machine.getId(), machine.getMachineCode(), checklistStatus))
                             .onErrorResume(e -> {
-                                // duplicate key = record มีอยู่แล้ว (จากรอบก่อน) → log warn แล้วข้ามไป
-                                // machine.check_status ถูก update แล้วข้างบน จะไม่ถูกดึงซ้ำอีก
                                 if (e.getMessage() != null && e.getMessage().contains("duplicate key")) {
                                     log.warn("[CHECKLIST-AUTO] Skip duplicate machine id={} code={} (record already exists)",
                                             machine.getId(), machine.getMachineCode());
