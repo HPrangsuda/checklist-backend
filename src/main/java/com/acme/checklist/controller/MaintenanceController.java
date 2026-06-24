@@ -51,4 +51,10 @@ public class MaintenanceController {
     public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummary() {
         return maintenanceService.getDepartmentSummaryWithRole();
     }
+
+    @GetMapping("/monthly-summary")
+    public Flux<MaintenanceMonthlyDTO> getMonthlySummary(
+            @RequestParam(required = false) Integer year) {
+        return maintenanceService.getMonthlyPlanActualSummary(year);
+    }
 }

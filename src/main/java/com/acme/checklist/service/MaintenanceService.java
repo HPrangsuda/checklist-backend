@@ -1,6 +1,5 @@
 package com.acme.checklist.service;
 
-import com.acme.checklist.entity.Machine;
 import com.acme.checklist.entity.MaintenanceRecord;
 import com.acme.checklist.entity.Member;
 import com.acme.checklist.exception.ThrowException;
@@ -11,7 +10,6 @@ import com.acme.checklist.payload.file.FileUploadDTO;
 import com.acme.checklist.payload.maintenance.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
@@ -213,17 +211,7 @@ public class MaintenanceService {
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     String role     = principal.role();
-                    Long   memberId = principal.memberId();
-
-                    // ทุก column เป็น BIGINT → ใช้ memberId ทั้งหมด (ปลอดภัยจาก SQL Injection)
-                    String roleFilter = switch (role) {
-                        case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND m.manager_id = " + memberId;
-                        case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-                        // machine.responsible_person_id (BIGINT) หรือ maintenance_record.responsible_maintenance (BIGINT)
-                        default           -> "AND (m.responsible_person_id = " + memberId +
-                                " OR mr.responsible_maintenance = " + memberId + ")";
-                    };
+                    String roleFilter = getString(principal, role);
 
                     return template.getDatabaseClient()
                             .sql(buildDepartmentSummarySQL(roleFilter))
@@ -234,6 +222,18 @@ public class MaintenanceService {
                                 return Flux.empty();
                             });
                 });
+    }
+
+    private static String getString(MemberPrincipal principal, String role) {
+        Long   memberId = principal.memberId();
+
+        return switch (role) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND m.manager_id = " + memberId;
+            case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+            default           -> "AND (m.responsible_person_id = " + memberId +
+                    " OR mr.responsible_maintenance = " + memberId + ")";
+        };
     }
 
     private String buildDepartmentSummarySQL(String roleFilter) {
@@ -268,6 +268,125 @@ public class MaintenanceService {
             HAVING COUNT(*) > 0
             ORDER BY total DESC
             """.formatted(roleFilter);
+    }
+
+    public Flux<MaintenanceMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .flatMapMany(principal -> {
+                    String role     = principal.role();
+                    String sql = getSql(year, principal, role);
+
+                    return template.getDatabaseClient()
+                            .sql(sql)
+                            .map((row, meta) -> {
+                                int    y    = getIntValue(row, "year");
+                                int    mo   = getIntValue(row, "month");
+                                Long   mid  = row.get("member_id",   Long.class);
+                                String mn   = row.get("member_name", String.class);
+                                long   plan = getLongValue(row, "total_plan");
+                                long   ot   = getLongValue(row, "total_on_time");
+                                long   ov   = getLongValue(row, "total_overdue");
+                                return new Object[]{ y, mo, mid, mn, plan, ot, ov };
+                            })
+                            .all()
+                            .collectList()
+                            .flatMapMany(flatRows -> {
+                                java.util.LinkedHashMap<String,
+                                        java.util.List<MaintenanceMonthlyDTO.ResponsibleSummary>> monthMap =
+                                        new java.util.LinkedHashMap<>();
+                                java.util.Map<String, long[]> monthTotals = new java.util.LinkedHashMap<>();
+
+                                for (Object[] r : flatRows) {
+                                    int    y    = (int)    r[0];
+                                    int    mo   = (int)    r[1];
+                                    Long   mid  = (Long)   r[2];
+                                    String mn   = (String) r[3];
+                                    long   plan = (long)   r[4];
+                                    long   ot   = (long)   r[5];
+                                    long   ov   = (long)   r[6];
+
+                                    String key = y + "-" + mo;
+                                    monthMap.computeIfAbsent(key, k -> new java.util.ArrayList<>())
+                                            .add(MaintenanceMonthlyDTO.ResponsibleSummary.builder()
+                                                    .memberId(mid)
+                                                    .memberName(mn)
+                                                    .totalPlan(plan)
+                                                    .totalOnTime(ot)
+                                                    .totalOverdue(ov)
+                                                    .build());
+
+                                    monthTotals.merge(key, new long[]{ plan, ot, ov },
+                                            (a, b) -> new long[]{
+                                                    a[0]+b[0], a[1]+b[1], a[2]+b[2] });
+                                }
+
+                                java.util.List<MaintenanceMonthlyDTO> result = new java.util.ArrayList<>();
+                                for (String key : monthMap.keySet()) {
+                                    String[] parts = key.split("-");
+                                    long[]   tots  = monthTotals.get(key);
+                                    result.add(MaintenanceMonthlyDTO.builder()
+                                            .year(Integer.parseInt(parts[0]))
+                                            .month(Integer.parseInt(parts[1]))
+                                            .totalPlan(tots[0])
+                                            .totalOnTime(tots[1])
+                                            .totalOverdue(tots[2])
+                                            .byResponsible(monthMap.get(key))
+                                            .build());
+                                }
+                                return reactor.core.publisher.Flux.fromIterable(result);
+                            })
+                            .onErrorResume(e -> {
+                                log.error("Error fetching monthly plan-actual summary", e);
+                                return reactor.core.publisher.Flux.empty();
+                            });
+                });
+    }
+
+    private static String getSql(Integer year, MemberPrincipal principal, String role) {
+        Long   memberId = principal.memberId();
+
+        String roleFilter = switch (role) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND m.manager_id = " + memberId;
+            case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+            default           -> "AND (m.responsible_person_id = " + memberId +
+                    " OR mr.responsible_maintenance = " + memberId + ")";
+        };
+
+        String yearFilter = (year != null)
+                ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
+                : "";
+
+        String sql = """
+            SELECT
+                EXTRACT(YEAR  FROM mr.due_date)::int  AS year,
+                EXTRACT(MONTH FROM mr.due_date)::int  AS month,
+                mr.responsible_maintenance            AS member_id,
+                COALESCE(
+                    NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
+                    mb.first_name,
+                    mb.user_name,
+                    'Unassigned')                     AS member_name,
+                COUNT(*)                              AS total_plan,
+                COUNT(CASE WHEN mr.actual_date IS NOT NULL
+                           AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
+                COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.actual_date > mr.due_date)
+                            OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
+            FROM maintenance_record mr
+            LEFT JOIN machine  m  ON m.machine_code = mr.machine_code
+            LEFT JOIN member   mb ON mb.id          = mr.responsible_maintenance
+            WHERE mr.due_date IS NOT NULL
+              %s
+              %s
+            GROUP BY
+                EXTRACT(YEAR  FROM mr.due_date),
+                EXTRACT(MONTH FROM mr.due_date),
+                mr.responsible_maintenance,
+                mb.first_name, mb.last_name, mb.user_name
+            ORDER BY year ASC, month ASC, member_name ASC
+            """.formatted(roleFilter, yearFilter);
+        return sql;
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
@@ -348,10 +467,6 @@ public class MaintenanceService {
         return Update.from(params);
     }
 
-    private Flux<MaintenanceListDTO> convertMaintenanceListDTOs(List<MaintenanceRecord> records) {
-        return Flux.fromIterable(records).map(MaintenanceListDTO::from);
-    }
-
     private MaintenanceDepartmentSummaryDTO mapDepartmentSummary(io.r2dbc.spi.Row row) {
         try {
             return MaintenanceDepartmentSummaryDTO.builder()
@@ -377,6 +492,15 @@ public class MaintenanceService {
             case Long l -> l;
             case Number n -> n.longValue();
             case null, default -> 0L;
+        };
+    }
+
+    private int getIntValue(io.r2dbc.spi.Row row, String col) {
+        Object v = row.get(col);
+        return switch (v) {
+            case Integer i -> i;
+            case Number  n -> n.intValue();
+            case null, default -> 0;
         };
     }
 
