@@ -397,7 +397,7 @@ public class MaintenanceService {
                 EXTRACT(YEAR  FROM mr.due_date),
                 EXTRACT(MONTH FROM mr.due_date),
                 mr.responsible_maintenance,
-                mb.first_name, mb.last_name, mb.user_name
+                member_name
             ORDER BY year ASC, month ASC, member_name ASC
             """.formatted(roleFilter, yearFilter);
     }
