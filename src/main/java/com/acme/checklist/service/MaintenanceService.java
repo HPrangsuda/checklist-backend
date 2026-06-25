@@ -377,11 +377,11 @@ public class MaintenanceService {
                 EXTRACT(YEAR  FROM mr.due_date)::int  AS year,
                 EXTRACT(MONTH FROM mr.due_date)::int  AS month,
                 mr.responsible_maintenance            AS member_id,
-                COALESCE(
+                MAX(COALESCE(
                     NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
                     mb.first_name,
                     mb.user_name,
-                    'Unassigned')                     AS member_name,
+                    'Unassigned'))                    AS member_name,
                 COUNT(*)                              AS total_plan,
                 COUNT(CASE WHEN mr.actual_date IS NOT NULL
                            AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
@@ -396,8 +396,7 @@ public class MaintenanceService {
             GROUP BY
                 EXTRACT(YEAR  FROM mr.due_date),
                 EXTRACT(MONTH FROM mr.due_date),
-                mr.responsible_maintenance,
-                member_name
+                mr.responsible_maintenance
             ORDER BY year ASC, month ASC, member_name ASC
             """.formatted(roleFilter, yearFilter);
     }
