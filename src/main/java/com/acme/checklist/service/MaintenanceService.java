@@ -361,8 +361,7 @@ public class MaintenanceService {
             case "ADMIN"      -> "";
             case "MANAGER"    -> "AND m.manager_id = " + memberId;
             case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-            default           -> "AND (m.responsible_person_id = " + memberId +
-                    " OR mr.responsible_maintenance = " + memberId + ")";
+            default -> "AND mr.responsible_maintenance = " + memberId;
         };
 
         String yearFilter = (year != null)
