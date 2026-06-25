@@ -50,18 +50,29 @@ public class MaintenanceService {
 
         Mono<List<String>> fileNamesMono = (files != null && !files.isEmpty())
                 ? Flux.fromIterable(files)
-                .flatMap(f -> fileStorageService.uploadFile(f, "maintenance").map(FileUploadDTO::getFileName))
+                .flatMap(f -> fileStorageService.uploadFile(f, "maintenance")
+                        .map(FileUploadDTO::getFileName))
                 .collectList()
                 : Mono.just(List.of());
 
         MaintenanceDTO finalDto = dto;
         return fileNamesMono
-                .flatMap(fileNames -> validateData(finalDto, true)
-                        .flatMap(validated -> {
-                            Update update = buildUpdateFromDTO(validated);
-                            return commonService.update(finalDto.getId(), update, MaintenanceRecord.class)
-                                    .then(Mono.just(ApiResponse.<Void>success("MS001")));
-                        }))
+                .flatMap(fileNames -> {
+                    if (!fileNames.isEmpty()) {
+                        String joined = String.join(",", fileNames);
+                        if (finalDto.getAttachment() != null && !finalDto.getAttachment().isBlank()) {
+                            finalDto.setAttachment(finalDto.getAttachment() + "," + joined);
+                        } else {
+                            finalDto.setAttachment(joined);
+                        }
+                    }
+                    return validateData(finalDto, true)
+                            .flatMap(validated -> {
+                                Update update = buildUpdateFromDTO(validated);
+                                return commonService.update(finalDto.getId(), update, MaintenanceRecord.class)
+                                        .then(Mono.just(ApiResponse.<Void>success("MS001")));
+                            });
+                })
                 .onErrorResume(e -> {
                     log.error("Failed to update the maintenance: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS001", e.getMessage()));
