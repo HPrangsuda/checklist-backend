@@ -243,59 +243,62 @@ public class MaintenanceService {
         return switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> """
-                    AND EXISTS (
-                        SELECT 1 FROM machine m
-                        WHERE m.machine_code = mr.machine_code
-                          AND m.manager_id =""" + memberId + """
-                    )""";
+AND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.manager_id = """ + memberId + "\n)";
             case "SUPERVISOR" -> """
-                    AND EXISTS (
-                        SELECT 1 FROM machine m
-                        WHERE m.machine_code = mr.machine_code
-                          AND m.supervisor_id =""" + memberId + """
-                    )""";
+AND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.supervisor_id = """ + memberId + "\n)";
             default           -> """
-                    AND (EXISTS (
-                        SELECT 1 FROM machine m
-                        WHERE m.machine_code = mr.machine_code
-                          AND m.responsible_person_id =""" + memberId + """
-                    ) OR mr.responsible_maintenance =""" + memberId + ")";
+AND (EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.responsible_person_id = """ + memberId + """
+) OR mr.responsible_maintenance = """ + memberId + "\n)";
         };
     }
 
     private String buildDepartmentSummarySQL(String roleFilter) {
         return """
             SELECT
-                COALESCE((SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1),
-                SUBSTRING(mr.machine_code FROM 6 FOR 3)) as department,
+                COALESCE(
+                    (SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1),
+                    SUBSTRING(mr.machine_code FROM 6 FOR 3)
+                ) AS department,
                 CASE
                     WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != '' THEN
                         d.department || ' - ' || d.division
                     WHEN d.department IS NOT NULL THEN
                         d.department
                     ELSE
-                        'Department ' || COALESCE(m.department, SUBSTRING(mr.machine_code FROM 6 FOR 3))
-                END as department_name,
-                COUNT(*) as total,
-                COUNT(CASE WHEN mr.status = 'Pass' THEN 1 END) as total_pass,
-                COUNT(CASE WHEN mr.status = 'Not Pass' THEN 1 END) as total_not_pass,
+                        'Department ' || COALESCE(
+                            (SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1),
+                            SUBSTRING(mr.machine_code FROM 6 FOR 3)
+                        )
+                END AS department_name,
+                COUNT(*) AS total,
+                COUNT(CASE WHEN mr.status = 'Pass' THEN 1 END) AS total_pass,
+                COUNT(CASE WHEN mr.status = 'Not Pass' THEN 1 END) AS total_not_pass,
                 COUNT(CASE WHEN mr.actual_date IS NOT NULL
-                           AND mr.actual_date <= mr.due_date THEN 1 END) as total_on_time,
+                           AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
                 COUNT(CASE WHEN mr.actual_date IS NOT NULL
-                           AND mr.actual_date > mr.due_date THEN 1 END) as total_overdue,
-                COUNT(CASE WHEN mr.actual_date IS NOT NULL THEN 1 END) as total_completed,
-                COUNT(CASE WHEN mr.actual_date IS NULL THEN 1 END) as total_pending
+                           AND mr.actual_date > mr.due_date THEN 1 END) AS total_overdue,
+                COUNT(CASE WHEN mr.actual_date IS NOT NULL THEN 1 END) AS total_completed,
+                COUNT(CASE WHEN mr.actual_date IS NULL THEN 1 END) AS total_pending
             FROM maintenance_record mr
             LEFT JOIN department d ON d.department_code = (
-                SELECT m2.department FROM machine m2
-                WHERE m2.machine_code = mr.machine_code
-                LIMIT 1
+                SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1
             )
             WHERE 1=1
               %s
             GROUP BY
-                COALESCE((SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1),
-                         SUBSTRING(mr.machine_code FROM 6 FOR 3)),
+                COALESCE(
+                    (SELECT m2.department FROM machine m2 WHERE m2.machine_code = mr.machine_code LIMIT 1),
+                    SUBSTRING(mr.machine_code FROM 6 FOR 3)
+                ),
                 d.department, d.division
             HAVING COUNT(*) > 0
             ORDER BY total DESC
@@ -383,24 +386,24 @@ public class MaintenanceService {
         Long memberId = principal.memberId();
 
         String yearFilter = (year != null)
-                ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
+                ? "\nAND EXTRACT(YEAR FROM mr.due_date) = " + year
                 : "";
 
+        // ไม่ JOIN machine เพราะ machine_code ซ้ำได้ทำให้ COUNT(*) เกิน
+        // ใช้ EXISTS subquery แทนสำหรับ MANAGER/SUPERVISOR
         String roleFilter = switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> """
-                    AND EXISTS (
-                        SELECT 1 FROM machine m
-                        WHERE m.machine_code = mr.machine_code
-                          AND m.manager_id =""" + memberId + """
-                    )""";
+\nAND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.manager_id = """ + memberId + "\n)";
             case "SUPERVISOR" -> """
-                    AND EXISTS (
-                        SELECT 1 FROM machine m
-                        WHERE m.machine_code = mr.machine_code
-                          AND m.supervisor_id =""" + memberId + """
-                    )""";
-            default           -> "AND mr.responsible_maintenance = " + memberId;
+\nAND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.supervisor_id = """ + memberId + "\n)";
+            default           -> "\nAND mr.responsible_maintenance = " + memberId;
         };
 
         return """
@@ -420,9 +423,7 @@ public class MaintenanceService {
                             OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
             FROM maintenance_record mr
             LEFT JOIN member mb ON mb.id = mr.responsible_maintenance
-            WHERE mr.due_date IS NOT NULL
-             """ + roleFilter + """
-              """ + yearFilter + """
+            WHERE mr.due_date IS NOT NULL            """ + roleFilter + yearFilter + """
             GROUP BY
                 EXTRACT(YEAR  FROM mr.due_date),
                 EXTRACT(MONTH FROM mr.due_date),
