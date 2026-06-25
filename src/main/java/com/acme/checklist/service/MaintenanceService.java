@@ -286,48 +286,7 @@ public class MaintenanceService {
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     String role     = principal.role();
-                    Long   memberId = principal.memberId();
-
-                    String roleFilter = switch (role) {
-                        case "ADMIN"      -> "";
-                        case "MANAGER"    -> "AND m.manager_id = " + memberId;
-                        case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-                        default           -> "AND (m.responsible_person_id = " + memberId +
-                                " OR mr.responsible_maintenance = " + memberId + ")";
-                    };
-
-                    String yearFilter = (year != null)
-                            ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
-                            : "";
-
-                    String sql = """
-                        SELECT
-                            EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS year,
-                            EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS month,
-                            mr.responsible_maintenance            AS member_id,
-                            COALESCE(
-                                NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
-                                mb.first_name,
-                                mb.user_name,
-                                'Unassigned')                     AS member_name,
-                            COUNT(*)                              AS total_plan,
-                            COUNT(CASE WHEN mr.actual_date IS NOT NULL
-                                       AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
-                            COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.due_date IS NOT NULL AND mr.actual_date > mr.due_date)
-                                        OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
-                        FROM maintenance_record mr
-                        LEFT JOIN machine  m  ON m.machine_code = mr.machine_code
-                        LEFT JOIN member   mb ON mb.id          = mr.responsible_maintenance
-                        WHERE COALESCE(mr.due_date, mr.plan_date, mr.actual_date) IS NOT NULL
-                          %s
-                          %s
-                        GROUP BY
-                            EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
-                            EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
-                            mr.responsible_maintenance,
-                            mb.first_name, mb.last_name, mb.user_name
-                        ORDER BY year ASC, month ASC, member_name ASC
-                        """.formatted(roleFilter, yearFilter);
+                    String sql = getString(year, principal, role);
 
                     return template.getDatabaseClient()
                             .sql(sql)
@@ -393,6 +352,53 @@ public class MaintenanceService {
                                 return reactor.core.publisher.Flux.empty();
                             });
                 });
+    }
+
+    private static String getString(Integer year, MemberPrincipal principal, String role) {
+        Long   memberId = principal.memberId();
+
+        String roleFilter = switch (role) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND m.manager_id = " + memberId;
+            case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+            default           -> "AND (m.responsible_person_id = " + memberId +
+                    " OR mr.responsible_maintenance = " + memberId + ")";
+        };
+
+        String yearFilter = (year != null)
+                ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
+                : "";
+
+        String sql = """
+            SELECT
+                EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS year,
+                EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS month,
+                mr.responsible_maintenance            AS member_id,
+                COALESCE(
+                    NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
+                    mb.first_name,
+                    mb.user_name,
+                    'Unassigned')                     AS member_name,
+                COUNT(*)                              AS total_plan,
+                COUNT(CASE WHEN mr.actual_date IS NOT NULL
+                           AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
+                COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.due_date IS NOT NULL AND mr.actual_date > mr.due_date)
+                            OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
+            FROM maintenance_record mr
+            LEFT JOIN machine  m  ON m.machine_code = mr.machine_code
+            LEFT JOIN member   mb ON mb.id          = mr.responsible_maintenance
+            WHERE COALESCE(mr.due_date, mr.plan_date, mr.actual_date) IS NOT NULL
+              %s
+              %s
+            GROUP BY
+                EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
+                EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
+                mr.responsible_maintenance,
+                mb.first_name, mb.last_name, mb.user_name
+            HAVING EXTRACT(YEAR FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)) IS NOT NULL
+            ORDER BY year ASC, month ASC, member_name ASC
+            """.formatted(roleFilter, yearFilter);
+        return sql;
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
