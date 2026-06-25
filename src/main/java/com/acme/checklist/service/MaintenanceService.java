@@ -356,8 +356,6 @@ public class MaintenanceService {
                 });
     }
 
-    // role filter สำหรับ monthly summary — ใช้ responsible_maintenance เท่านั้น
-    // เพื่อให้ตัวเลขตรงกับงานที่ตัวเองรับผิดชอบทำ PM จริงๆ
     private static String buildMonthlySummarySQL(Integer year, MemberPrincipal principal, String role) {
         Long memberId = principal.memberId();
 
