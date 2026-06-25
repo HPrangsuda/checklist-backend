@@ -79,6 +79,8 @@ public class MaintenanceService {
                 });
     }
 
+    // ─── GET PAGE ─────────────────────────────────────────────────────────────
+
     public Mono<PagedResponse<MaintenanceResponseDTO>> getPage(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
@@ -107,7 +109,6 @@ public class MaintenanceService {
                             LEFT JOIN machine m ON m.machine_code = mr.machine_code
                             """ + where;
 
-                    // ★ เพิ่ม JOIN department + ดึง d.department AS department_name
                     String dataSql = """
                             SELECT
                                 mr.id,
@@ -178,8 +179,8 @@ public class MaintenanceService {
                                     .maintenanceBy(row.get("maintenance_by", String.class))
                                     .responsibleMaintenance(row.get("responsible_maintenance", Long.class))
                                     .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
-                                    .machineDepartmentCode(row.get("machine_department_code", String.class)) // ★
-                                    .machineDepartmentName(row.get("machine_department_name", String.class)) // ★
+                                    .machineDepartmentCode(row.get("machine_department_code", String.class))
+                                    .machineDepartmentName(row.get("machine_department_name", String.class))
                                     .note(row.get("note", String.class))
                                     .attachment(row.get("attachment", String.class))
                                     .checklistRecordId(row.get("checklist_record_id", Long.class))
@@ -221,8 +222,8 @@ public class MaintenanceService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    String role     = principal.role();
-                    String roleFilter = getString(principal, role);
+                    String role       = principal.role();
+                    String roleFilter = buildDepartmentRoleFilter(principal, role);
 
                     return template.getDatabaseClient()
                             .sql(buildDepartmentSummarySQL(roleFilter))
@@ -235,9 +236,9 @@ public class MaintenanceService {
                 });
     }
 
-    private static String getString(MemberPrincipal principal, String role) {
-        Long   memberId = principal.memberId();
-
+    // role filter สำหรับ department summary — ใช้ responsible_person_id ด้วยเพื่อให้เห็นภาพรวมแผนก
+    private static String buildDepartmentRoleFilter(MemberPrincipal principal, String role) {
+        Long memberId = principal.memberId();
         return switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> "AND m.manager_id = " + memberId;
@@ -281,12 +282,14 @@ public class MaintenanceService {
             """.formatted(roleFilter);
     }
 
+    // ─── MONTHLY PLAN vs ACTUAL SUMMARY ───────────────────────────────────────
+
     public Flux<MaintenanceMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    String role     = principal.role();
-                    String sql = getString(year, principal, role);
+                    String role = principal.role();
+                    String sql  = buildMonthlySummarySQL(year, principal, role);
 
                     return template.getDatabaseClient()
                             .sql(sql)
@@ -303,10 +306,9 @@ public class MaintenanceService {
                             .all()
                             .collectList()
                             .flatMapMany(flatRows -> {
-                                java.util.LinkedHashMap<String,
-                                        java.util.List<MaintenanceMonthlyDTO.ResponsibleSummary>> monthMap =
-                                        new java.util.LinkedHashMap<>();
-                                java.util.Map<String, long[]> monthTotals = new java.util.LinkedHashMap<>();
+                                LinkedHashMap<String, List<MaintenanceMonthlyDTO.ResponsibleSummary>> monthMap =
+                                        new LinkedHashMap<>();
+                                Map<String, long[]> monthTotals = new LinkedHashMap<>();
 
                                 for (Object[] r : flatRows) {
                                     int    y    = (int)    r[0];
@@ -318,7 +320,7 @@ public class MaintenanceService {
                                     long   ov   = (long)   r[6];
 
                                     String key = y + "-" + mo;
-                                    monthMap.computeIfAbsent(key, k -> new java.util.ArrayList<>())
+                                    monthMap.computeIfAbsent(key, k -> new ArrayList<>())
                                             .add(MaintenanceMonthlyDTO.ResponsibleSummary.builder()
                                                     .memberId(mid)
                                                     .memberName(mn)
@@ -332,7 +334,7 @@ public class MaintenanceService {
                                                     a[0]+b[0], a[1]+b[1], a[2]+b[2] });
                                 }
 
-                                java.util.List<MaintenanceMonthlyDTO> result = new java.util.ArrayList<>();
+                                List<MaintenanceMonthlyDTO> result = new ArrayList<>();
                                 for (String key : monthMap.keySet()) {
                                     String[] parts = key.split("-");
                                     long[]   tots  = monthTotals.get(key);
@@ -345,33 +347,35 @@ public class MaintenanceService {
                                             .byResponsible(monthMap.get(key))
                                             .build());
                                 }
-                                return reactor.core.publisher.Flux.fromIterable(result);
+                                return Flux.fromIterable(result);
                             })
                             .onErrorResume(e -> {
                                 log.error("Error fetching monthly plan-actual summary", e);
-                                return reactor.core.publisher.Flux.empty();
+                                return Flux.empty();
                             });
                 });
     }
 
-    private static String getString(Integer year, MemberPrincipal principal, String role) {
-        Long   memberId = principal.memberId();
+    // role filter สำหรับ monthly summary — ใช้ responsible_maintenance เท่านั้น
+    // เพื่อให้ตัวเลขตรงกับงานที่ตัวเองรับผิดชอบทำ PM จริงๆ
+    private static String buildMonthlySummarySQL(Integer year, MemberPrincipal principal, String role) {
+        Long memberId = principal.memberId();
 
         String roleFilter = switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> "AND m.manager_id = " + memberId;
             case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
-            default -> "AND mr.responsible_maintenance = " + memberId;
+            default           -> "AND mr.responsible_maintenance = " + memberId;
         };
 
         String yearFilter = (year != null)
                 ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
                 : "";
 
-        String sql = """
+        return """
             SELECT
-                EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS year,
-                EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date))::int  AS month,
+                EXTRACT(YEAR  FROM mr.due_date)::int  AS year,
+                EXTRACT(MONTH FROM mr.due_date)::int  AS month,
                 mr.responsible_maintenance            AS member_id,
                 COALESCE(
                     NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
@@ -381,23 +385,21 @@ public class MaintenanceService {
                 COUNT(*)                              AS total_plan,
                 COUNT(CASE WHEN mr.actual_date IS NOT NULL
                            AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
-                COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.due_date IS NOT NULL AND mr.actual_date > mr.due_date)
+                COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.actual_date > mr.due_date)
                             OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
             FROM maintenance_record mr
             LEFT JOIN machine  m  ON m.machine_code = mr.machine_code
             LEFT JOIN member   mb ON mb.id          = mr.responsible_maintenance
-            WHERE COALESCE(mr.due_date, mr.plan_date, mr.actual_date) IS NOT NULL
+            WHERE mr.due_date IS NOT NULL
               %s
               %s
             GROUP BY
-                EXTRACT(YEAR  FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
-                EXTRACT(MONTH FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)),
+                EXTRACT(YEAR  FROM mr.due_date),
+                EXTRACT(MONTH FROM mr.due_date),
                 mr.responsible_maintenance,
                 mb.first_name, mb.last_name, mb.user_name
-            HAVING EXTRACT(YEAR FROM COALESCE(mr.due_date, mr.plan_date, mr.actual_date)) IS NOT NULL
             ORDER BY year ASC, month ASC, member_name ASC
             """.formatted(roleFilter, yearFilter);
-        return sql;
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
@@ -454,7 +456,6 @@ public class MaintenanceService {
         if (!isUpdate && dto.getDueDate() == null) {
             return Mono.error(new ThrowException("MS001", "Maintenance due date is required"));
         }
-        // ตรวจสอบว่า record มีอยู่จริง
         return template.selectOne(
                         Query.query(Criteria.where("id").is(dto.getId())),
                         MaintenanceRecord.class)
