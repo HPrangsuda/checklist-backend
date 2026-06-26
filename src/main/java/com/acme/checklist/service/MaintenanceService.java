@@ -314,7 +314,6 @@ AND (EXISTS (
                     String role = principal.role();
                     String sql  = buildMonthlySummarySQL(year, principal, role);
 
-                    log.info("Monthly SQL: {}", sql);
                     return template.getDatabaseClient()
                             .sql(sql)
                             .map((row, meta) -> {
