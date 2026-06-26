@@ -246,18 +246,18 @@ public class MaintenanceService {
 AND EXISTS (
     SELECT 1 FROM machine m2
     WHERE m2.machine_code = mr.machine_code
-      AND m2.manager_id = """ + memberId + "\n)";
+      AND m2.manager_id =\s""" + memberId + "\n)";
             case "SUPERVISOR" -> """
 AND EXISTS (
     SELECT 1 FROM machine m2
     WHERE m2.machine_code = mr.machine_code
-      AND m2.supervisor_id = """ + memberId + "\n)";
+      AND m2.supervisor_id =\s""" + memberId + "\n)";
             default           -> """
 AND (EXISTS (
     SELECT 1 FROM machine m2
     WHERE m2.machine_code = mr.machine_code
-      AND m2.responsible_person_id = """ + memberId + """
-) OR mr.responsible_maintenance = """ + memberId + "\n)";
+      AND m2.responsible_person_id =\s""" + memberId + """
+) OR mr.responsible_maintenance =\s""" + memberId + "\n)";
         };
     }
 
