@@ -385,24 +385,14 @@ AND (EXISTS (
         Long memberId = principal.memberId();
 
         String yearFilter = (year != null)
-                ? "\nAND EXTRACT(YEAR FROM mr.due_date) = " + year
+                ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year
                 : "";
 
-        // ไม่ JOIN machine เพราะ machine_code ซ้ำได้ทำให้ COUNT(*) เกิน
-        // ใช้ EXISTS subquery แทนสำหรับ MANAGER/SUPERVISOR
         String roleFilter = switch (role) {
             case "ADMIN"      -> "";
-            case "MANAGER"    -> """
-\nAND EXISTS (
-    SELECT 1 FROM machine m2
-    WHERE m2.machine_code = mr.machine_code
-      AND m2.manager_id = """ + memberId + "\n)";
-            case "SUPERVISOR" -> """
-\nAND EXISTS (
-    SELECT 1 FROM machine m2
-    WHERE m2.machine_code = mr.machine_code
-      AND m2.supervisor_id = """ + memberId + "\n)";
-            default           -> "\nAND mr.responsible_maintenance = " + memberId;
+            case "MANAGER"    -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.manager_id = " + memberId + ")";
+            case "SUPERVISOR" -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.supervisor_id = " + memberId + ")";
+            default           -> "AND mr.responsible_maintenance = " + memberId;
         };
 
         return """
@@ -422,13 +412,15 @@ AND (EXISTS (
                             OR   mr.actual_date IS NULL                  THEN 1 END) AS total_overdue
             FROM maintenance_record mr
             LEFT JOIN member mb ON mb.id = mr.responsible_maintenance
-            WHERE mr.due_date IS NOT NULL            """ + roleFilter + yearFilter + """
+            WHERE mr.due_date IS NOT NULL
+            %s
+            %s
             GROUP BY
                 EXTRACT(YEAR  FROM mr.due_date),
                 EXTRACT(MONTH FROM mr.due_date),
                 mr.responsible_maintenance
             ORDER BY year ASC, month ASC, member_name ASC
-            """;
+            """.formatted(roleFilter, yearFilter);
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
