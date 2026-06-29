@@ -250,6 +250,123 @@ public class CalibrationService {
                 });
     }
 
+    public Flux<CalibrationMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .flatMapMany(principal -> {
+                    String role = principal.role();
+                    String sql  = buildCalibrationMonthlySummarySQL(year, principal, role);
+
+                    return template.getDatabaseClient()
+                            .sql(sql)
+                            .map((row, meta) -> {
+                                int    y    = getIntValue(row, "year");
+                                int    mo   = getIntValue(row, "month");
+                                Long   mid  = row.get("member_id",   Long.class);
+                                String mn   = row.get("member_name", String.class);
+                                long   plan = getLongValue(row, "total_plan");
+                                long   ot   = getLongValue(row, "total_on_time");
+                                long   ov   = getLongValue(row, "total_overdue");
+                                return new Object[]{ y, mo, mid, mn, plan, ot, ov };
+                            })
+                            .all()
+                            .collectList()
+                            .flatMapMany(flatRows -> {
+                                LinkedHashMap<String, List<CalibrationMonthlyDTO.ResponsibleSummary>> monthMap =
+                                        new LinkedHashMap<>();
+                                Map<String, long[]> monthTotals = new LinkedHashMap<>();
+
+                                for (Object[] r : flatRows) {
+                                    int    y    = (int)    r[0];
+                                    int    mo   = (int)    r[1];
+                                    Long   mid  = (Long)   r[2];
+                                    String mn   = (String) r[3];
+                                    long   plan = (long)   r[4];
+                                    long   ot   = (long)   r[5];
+                                    long   ov   = (long)   r[6];
+
+                                    String key = y + "-" + mo;
+                                    monthMap.computeIfAbsent(key, k -> new ArrayList<>())
+                                            .add(CalibrationMonthlyDTO.ResponsibleSummary.builder()
+                                                    .memberId(mid)
+                                                    .memberName(mn)
+                                                    .totalPlan(plan)
+                                                    .totalOnTime(ot)
+                                                    .totalOverdue(ov)
+                                                    .build());
+
+                                    monthTotals.merge(key, new long[]{ plan, ot, ov },
+                                            (a, b) -> new long[]{
+                                                    a[0]+b[0], a[1]+b[1], a[2]+b[2] });
+                                }
+
+                                List<CalibrationMonthlyDTO> result = new ArrayList<>();
+                                for (String key : monthMap.keySet()) {
+                                    String[] parts = key.split("-");
+                                    long[]   tots  = monthTotals.get(key);
+                                    result.add(CalibrationMonthlyDTO.builder()
+                                            .year(Integer.parseInt(parts[0]))
+                                            .month(Integer.parseInt(parts[1]))
+                                            .totalPlan(tots[0])
+                                            .totalOnTime(tots[1])
+                                            .totalOverdue(tots[2])
+                                            .byResponsible(monthMap.get(key))
+                                            .build());
+                                }
+                                return Flux.fromIterable(result);
+                            })
+                            .onErrorResume(e -> {
+                                log.error("Error fetching calibration monthly plan-actual summary", e);
+                                return Flux.empty();
+                            });
+                });
+    }
+
+    private static String buildCalibrationMonthlySummarySQL(Integer year, MemberPrincipal principal, String role) {
+        Long memberId = principal.memberId();
+
+        String yearFilter = (year != null)
+                ? "AND EXTRACT(YEAR FROM c.due_date) = " + year
+                : "";
+
+        // ไม่ JOIN machine เพราะ machine_code ซ้ำได้
+        String roleFilter = switch (role) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.manager_id = " + memberId + ")";
+            case "SUPERVISOR" -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.supervisor_id = " + memberId + ")";
+            default           -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.responsible_person_id = " + memberId + ")";
+        };
+
+        return """
+            SELECT
+                EXTRACT(YEAR  FROM c.due_date)::int   AS year,
+                EXTRACT(MONTH FROM c.due_date)::int   AS month,
+                (SELECT m2.responsible_person_id FROM machine m2 WHERE m2.machine_code = c.machine_code LIMIT 1) AS member_id,
+                MAX(COALESCE(
+                    NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
+                    mb.first_name,
+                    mb.user_name,
+                    'Unassigned'))                    AS member_name,
+                COUNT(*)                              AS total_plan,
+                COUNT(CASE WHEN c.certificate_date IS NOT NULL
+                           AND c.certificate_date <= c.due_date THEN 1 END) AS total_on_time,
+                COUNT(CASE WHEN (c.certificate_date IS NOT NULL AND c.certificate_date > c.due_date)
+                            OR   c.certificate_date IS NULL                  THEN 1 END) AS total_overdue
+            FROM calibration_record c
+            LEFT JOIN member mb ON mb.id = (
+                SELECT m2.responsible_person_id FROM machine m2 WHERE m2.machine_code = c.machine_code LIMIT 1
+            )
+            WHERE c.due_date IS NOT NULL
+            %s
+            %s
+            GROUP BY
+                EXTRACT(YEAR  FROM c.due_date),
+                EXTRACT(MONTH FROM c.due_date),
+                (SELECT m2.responsible_person_id FROM machine m2 WHERE m2.machine_code = c.machine_code LIMIT 1)
+            ORDER BY year ASC, month ASC, member_name ASC
+            """.formatted(roleFilter, yearFilter);
+    }
+
     private static String getString(MemberPrincipal principal) {
         String role       = principal.role();
         String employeeId = principal.employeeId();
@@ -396,6 +513,15 @@ public class CalibrationService {
             case Long l -> l;
             case Number n -> n.longValue();
             case null, default -> 0L;
+        };
+    }
+
+    private int getIntValue(io.r2dbc.spi.Row row, String col) {
+        Object v = row.get(col);
+        return switch (v) {
+            case Integer i -> i;
+            case Number  n -> n.intValue();
+            case null, default -> 0;
         };
     }
 }

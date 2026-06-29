@@ -48,4 +48,10 @@ public class CalibrationController {
     public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummary() {
         return calibrationService.getDepartmentSummaryWithRole();
     }
+
+    @GetMapping("/monthly-summary")
+    public Flux<CalibrationMonthlyDTO> getMonthlySummary(
+            @RequestParam(required = false) Integer year) {
+        return calibrationService.getMonthlyPlanActualSummary(year);
+    }
 }
