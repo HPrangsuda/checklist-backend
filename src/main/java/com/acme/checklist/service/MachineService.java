@@ -55,7 +55,18 @@ public class MachineService {
     private final CommonService commonService;
     private final KpiService kpiService;
 
-    private static final List<String> ACTIVE_STATUSES = List.of("IN USE", "NOT IN USE", "UNDER MAINTENANCE");
+    // Active statuses — machines still in service
+    private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+
+    // ─── HELPERS ──────────────────────────────────────────────────────────────
+
+    /**
+     * Returns true when the given machine_status means the machine is no longer
+     * in active service (CANCELED / TRANSFER / SCRAPPED / NOT FOUND / etc.).
+     */
+    private boolean isNonActiveStatus(String status) {
+        return status != null && !ACTIVE_STATUSES.contains(status);
+    }
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
@@ -69,7 +80,6 @@ public class MachineService {
                                     .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO))
                                     .then(Mono.just(ApiResponse.<Void>success("MS001")));
                         }))
-                // ── FIX: แยก ThrowException (business error) ออกจาก runtime error ──────
                 .onErrorResume(ThrowException.class, e -> {
                     log.warn("Business validation failed during machine create: {}", e.getMessage());
                     return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
@@ -148,39 +158,61 @@ public class MachineService {
                                 Machine.class)
                         .switchIfEmpty(Mono.error(new ThrowException("MS004", "Machine not found with id: " + v.getId())))
                         .flatMap(existing -> {
-                            Long oldPersonId = existing.getResponsiblePersonId();
-                            Long newPersonId = v.getResponsiblePersonId();
+                            Long    oldPersonId   = existing.getResponsiblePersonId();
+                            Long    newPersonId   = v.getResponsiblePersonId();
+                            String  newStatus     = v.getMachineStatus();
+                            boolean nonActive     = isNonActiveStatus(newStatus);
                             boolean personChanged = newPersonId != null && !newPersonId.equals(oldPersonId);
+
+                            // ── Non-active status → force check_status = OUT OF SERVICE ──────────
+                            if (nonActive) {
+                                v.setCheckStatus("OUT OF SERVICE");
+                                log.info("Machine {} set to non-active status '{}', forcing check_status=OUT OF SERVICE",
+                                        existing.getMachineCode(), newStatus);
+                            }
 
                             Mono<Void> updateMachine = commonService
                                     .update(machineDTO.getId(), buildUpdateFromDTO(v), Machine.class).then();
 
-                            if (!personChanged) {
-                                return updateMachine.then(Mono.just(ApiResponse.<Void>success("MS003")));
+                            // ── No history changes needed ─────────────────────────────────────────
+                            if (!personChanged && !nonActive) {
+                                return updateMachine
+                                        .then(Mono.just(ApiResponse.<Void>success("MS003")));
                             }
 
                             LocalDate today     = LocalDate.now();
                             LocalDate yesterday = today.minusDays(1);
 
+                            // ── Close the current open responsible history record ─────────────────
                             Mono<Void> closeOld = template.update(
                                     Query.query(Criteria.where("machine_code").is(existing.getMachineCode())
                                             .and("effective_to").isNull()),
                                     Update.update("effective_to", yesterday),
                                     ResponsibleHistory.class).then();
 
-                            ResponsibleHistory newHistory = ResponsibleHistory.builder()
-                                    .machineCode(existing.getMachineCode())
-                                    .responsiblePersonId(newPersonId)
-                                    .effectiveFrom(today)
-                                    .effectiveTo(null)
-                                    .build();
-                            Mono<Void> insertNew = template.insert(newHistory).then();
+                            // ── Insert new history only when person changes AND status stays active ─
+                            Mono<Void> insertNew = Mono.empty();
+                            if (personChanged && !nonActive) {
+                                ResponsibleHistory newHistory = ResponsibleHistory.builder()
+                                        .machineCode(existing.getMachineCode())
+                                        .responsiblePersonId(newPersonId)
+                                        .effectiveFrom(today)
+                                        .effectiveTo(null)
+                                        .build();
+                                insertNew = template.insert(newHistory).then();
+                            }
+
+                            // ── Recalculate KPI for affected persons ──────────────────────────────
+                            Mono<Void> kpiOld = kpiService.recalculateKpiForPerson(oldPersonId);
+                            Mono<Void> kpiNew = (personChanged && !nonActive)
+                                    ? kpiService.recalculateKpiForPerson(newPersonId)
+                                    : Mono.empty();
 
                             return updateMachine
                                     .then(closeOld)
                                     .then(insertNew)
-                                    .then(kpiService.recalculateKpiForPerson(oldPersonId))
-                                    .then(kpiService.recalculateKpiForPerson(newPersonId))
+                                    .then(kpiOld)
+                                    .then(kpiNew)
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
                 .onErrorResume(ThrowException.class, e -> {
@@ -276,7 +308,7 @@ public class MachineService {
                     }
 
                     Criteria baseCriteria = Criteria.where("machine_status")
-                            .in("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+                            .in(ACTIVE_STATUSES);
                     baseCriteria = applyExtraFilters(baseCriteria, checkStatus, department, machineStatus, responsiblePersonName);
 
                     if (mine) {
@@ -336,11 +368,11 @@ public class MachineService {
                     return template.getDatabaseClient()
                             .sql(sql)
                             .map((row, meta) -> new Object[]{
-                                    row.get("department",            String.class),
-                                    row.get("department_name",       String.class),
-                                    row.get("division",              String.class),
-                                    row.get("machine_status",        String.class),
-                                    row.get("check_status",          String.class),
+                                    row.get("department",              String.class),
+                                    row.get("department_name",         String.class),
+                                    row.get("division",                String.class),
+                                    row.get("machine_status",          String.class),
+                                    row.get("check_status",            String.class),
                                     row.get("responsible_person_name", String.class)
                             })
                             .all()
@@ -697,7 +729,6 @@ public class MachineService {
         addIfNotNull(p, "department",              dto.getDepartment());
         addIfNotNull(p, "business_unit",           dto.getBusinessUnit());
         addIfNotNull(p, "machine_status",          dto.getMachineStatus());
-        addIfNotNull(p, "check_status",            dto.getCheckStatus());
         addIfNotNull(p, "cancel_date",             dto.getCancelDate());
         addIfNotNull(p, "reason_cancel",           dto.getReasonCancel());
         addIfNotNull(p, "machine_group_id",        dto.getMachineGroupId());
@@ -712,6 +743,13 @@ public class MachineService {
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
         addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
+
+        // ── check_status — always write (may be "OUT OF SERVICE" for non-active) ──
+        // Use explicit put (not addIfNotNull) so a set value is never skipped
+        if (dto.getCheckStatus() != null) {
+            p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
+        }
+
         p.put(SqlIdentifier.quoted("warranty_note"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
         p.put(SqlIdentifier.quoted("warranty_expire_date"),
@@ -738,7 +776,7 @@ public class MachineService {
                 Machine.class);
     }
 
-    // ─── HELPERS ──────────────────────────────────────────────────────────────
+    // ─── PRIVATE HELPERS ──────────────────────────────────────────────────────
 
     private String buildDeptLabel(String deptName, String division) {
         if (deptName == null) return "";
@@ -820,7 +858,6 @@ public class MachineService {
 
             Font font = new Font(Font.SANS_SERIF, Font.BOLD, 12);
             g.setFont(font);
-
             FontMetrics fm = g.getFontMetrics();
             g.drawString(machineCode, (qrSize - fm.stringWidth(machineCode)) / 2,
                     qrSize + (textAreaHeight / 2) + (fm.getAscent() / 2));
@@ -844,8 +881,8 @@ public class MachineService {
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object v = row.get(columnName);
         return switch (v) {
-            case Long l -> l;
-            case Number n -> n.longValue();
+            case Long l    -> l;
+            case Number n  -> n.longValue();
             case null, default -> 0L;
         };
     }
