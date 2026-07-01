@@ -729,8 +729,10 @@ public class MachineService {
         addIfNotNull(p, "department",              dto.getDepartment());
         addIfNotNull(p, "business_unit",           dto.getBusinessUnit());
         addIfNotNull(p, "machine_status",          dto.getMachineStatus());
-        addIfNotNull(p, "cancel_date",             dto.getCancelDate());
-        addIfNotNull(p, "reason_cancel",           dto.getReasonCancel());
+        // ── cancel_date & reason_cancel — always write so they can be cleared ──
+        // when reverting from non-active → active status we must explicitly null them
+        p.put(SqlIdentifier.quoted("cancel_date"),   dto.getCancelDate());
+        p.put(SqlIdentifier.quoted("reason_cancel"), dto.getReasonCancel());
         addIfNotNull(p, "machine_group_id",        dto.getMachineGroupId());
         addIfNotNull(p, "maintenance_period",      dto.getMaintenancePeriod());
         addIfNotNull(p, "certificate_period",      dto.getCertificatePeriod());
@@ -749,6 +751,9 @@ public class MachineService {
         if (dto.getCheckStatus() != null) {
             p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
         }
+
+        // ── updated_at — stamp every update explicitly ──────────────────────────
+        p.put(SqlIdentifier.quoted("updated_at"), java.time.LocalDateTime.now());
 
         p.put(SqlIdentifier.quoted("warranty_note"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
