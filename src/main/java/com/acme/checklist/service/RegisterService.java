@@ -24,16 +24,17 @@ import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @AllArgsConstructor
 public class RegisterService {
 
-    private final LarkService    larkService;
+    private final LarkService larkService;
     private final R2dbcEntityTemplate template;
-    private final CommonService  commonService;
-    private final ObjectMapper   objectMapper;
+    private final CommonService commonService;
+    private final ObjectMapper objectMapper;
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
@@ -92,8 +93,8 @@ public class RegisterService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role     = principal.role();
-                    Long   memberId = principal.memberId();
+                    String role = principal.role();
+                    Long memberId = principal.memberId();
 
                     return switch (role) {
                         case "ADMIN" -> {
@@ -144,14 +145,13 @@ public class RegisterService {
         return Criteria.empty();
     }
 
-    // ─── FIX: convertRegisterListDTOs — join member สำหรับ createdBy/updatedBy ──
+    // ─── convertRegisterListDTOs ──────────────────────────────────────────────
 
     private Flux<RegisterListDTO> convertRegisterListDTOs(List<RegisterRequest> list) {
-        // รวบรวม member ids ทั้งหมด (createdBy + updatedBy)
         Set<Long> memberIdSet = new HashSet<>();
         for (RegisterRequest r : list) {
             if (r.getCreatedBy() != null) memberIdSet.add(r.getCreatedBy());
-            if (r.getUpdatedBy()  != null) memberIdSet.add(r.getUpdatedBy());
+            if (r.getUpdatedBy() != null) memberIdSet.add(r.getUpdatedBy());
         }
 
         Mono<Map<Long, Member>> memberMapMono = memberIdSet.isEmpty()
@@ -161,8 +161,8 @@ public class RegisterService {
         return memberMapMono.flatMapMany(memberMap ->
                 Flux.fromIterable(list).map(r -> RegisterListDTO.from(
                         r,
-                        memberMap.get(r.getCreatedBy()),   // createdBy member
-                        memberMap.get(r.getUpdatedBy())    // updatedBy member
+                        memberMap.get(r.getCreatedBy()),
+                        memberMap.get(r.getUpdatedBy())
                 ))
         );
     }
@@ -174,7 +174,7 @@ public class RegisterService {
                 .flatMap(registerRequest -> {
                     List<Long> auditIds = new ArrayList<>();
                     if (registerRequest.getCreatedBy() != null) auditIds.add(registerRequest.getCreatedBy());
-                    if (registerRequest.getUpdatedBy()  != null) auditIds.add(registerRequest.getUpdatedBy());
+                    if (registerRequest.getUpdatedBy() != null) auditIds.add(registerRequest.getUpdatedBy());
 
                     Mono<Map<Long, Member>> auditMono = auditIds.isEmpty()
                             ? Mono.just(new HashMap<>())
@@ -189,16 +189,16 @@ public class RegisterService {
                                     ? registerRequest.getDepartment() : "-");
 
                     Mono<String> responsibleMono = resolveMemberName(registerRequest.getResponsibleId());
-                    Mono<String>  supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
-                    Mono<String>    managerMono  = resolveMemberName(registerRequest.getManagerId());
+                    Mono<String> supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
+                    Mono<String> managerMono = resolveMemberName(registerRequest.getManagerId());
 
                     return Mono.zip(auditMono, deptNameMono, responsibleMono, supervisorMono, managerMono)
                             .map(tuple -> {
-                                Map<Long, Member> memberMap    = tuple.getT1();
-                                String            deptName     = tuple.getT2();
-                                String            responsibleName = tuple.getT3();
-                                String            supervisorName  = tuple.getT4();
-                                String            managerName     = tuple.getT5();
+                                Map<Long, Member> memberMap = tuple.getT1();
+                                String deptName = tuple.getT2();
+                                String responsibleName = tuple.getT3();
+                                String supervisorName = tuple.getT4();
+                                String managerName = tuple.getT5();
 
                                 AuditMemberDTO createdByDTO = registerRequest.getCreatedBy() != null
                                         ? AuditMemberDTO.from(memberMap.get(registerRequest.getCreatedBy()))
@@ -227,11 +227,14 @@ public class RegisterService {
     // ─── LARK NOTIFICATION ────────────────────────────────────────────────────
 
     private Mono<Void> sendLarkNotificationToMember(RegisterRequest saved) {
-        List<Long> targetMemberIds = List.of(1L, 3L);
+        List<Long> targetMemberIds = List.of(1L, 3L, 99L);
+
+        String inClause = targetMemberIds.stream()
+                .map(String::valueOf)
+                .collect(Collectors.joining(", "));
 
         return template.getDatabaseClient()
-                .sql("SELECT id, first_name, mobiles FROM member WHERE id = ANY($1)")
-                .bind(0, targetMemberIds.toArray(new Long[0]))
+                .sql("SELECT id, first_name, last_name, mobiles FROM member WHERE id IN (" + inClause + ")")
                 .fetch().all()
                 .collectList()
                 .flatMap(rows -> {
@@ -248,22 +251,32 @@ public class RegisterService {
                         return Mono.<Void>empty();
                     }
 
+                    // ✅ สร้าง card JSON ครั้งเดียว ใช้ร่วมกันทุก recipient
+                    String cardJson = buildRegisterCardJson(saved);
+
                     return larkService.batchGetOpenIdsByMobile(rawMobiles)
                             .flatMap(openIdMap -> {
+                                log.info("openIdMap resolved: {}", openIdMap);
+
                                 List<Mono<Void>> sends = rawMobiles.stream()
                                         .map(mobile -> {
-                                            String normalized = mobile.startsWith("+66")
-                                                    ? "0" + mobile.substring(3) : mobile;
+                                            String alt = mobile.startsWith("+66")
+                                                    ? "0" + mobile.substring(3)
+                                                    : "+66" + mobile.substring(1);
+
                                             String openId = openIdMap.getOrDefault(mobile,
-                                                    openIdMap.get(normalized));
+                                                    openIdMap.get(alt));
+
                                             if (openId == null) {
-                                                log.warn("Cannot resolve open_id for mobile={}", mobile);
+                                                log.warn("Cannot resolve open_id for mobile={} alt={}", mobile, alt);
                                                 return Mono.<Void>empty();
                                             }
+
                                             log.info("Sending to openId={}", openId);
-                                            return larkService.sendCardMessage(openId, buildRegisterCardJson(saved));
+                                            return larkService.sendCardMessage(openId, cardJson);
                                         })
                                         .toList();
+
                                 return Mono.when(sends);
                             });
                 })
@@ -279,41 +292,41 @@ public class RegisterService {
         String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
 
         return """
-            {
-              "config": { "wide_screen_mode": true },
-              "header": {
-                "title": {
-                  "tag": "plain_text",
-                  "content": "🔔 มีการลงทะเบียนเครื่องจักรใหม่"
-                },
-                "template": "blue"
-              },
-              "elements": [
                 {
-                  "tag": "div",
-                  "fields": [
+                  "config": { "wide_screen_mode": true },
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "🔔 มีการลงทะเบียนเครื่องจักรใหม่"
+                    },
+                    "template": "blue"
+                  },
+                  "elements": [
                     {
-                      "is_short": true,
-                      "text": { "tag": "lark_md", "content": "**ชื่อเครื่องจักร**\\n%s" }
+                      "tag": "div",
+                      "fields": [
+                        {
+                          "is_short": true,
+                          "text": { "tag": "lark_md", "content": "**ชื่อเครื่องจักร**\\n%s" }
+                        },
+                        {
+                          "is_short": true,
+                          "text": { "tag": "lark_md", "content": "**แผนก**\\n%s" }
+                        }
+                      ]
                     },
                     {
-                      "is_short": true,
-                      "text": { "tag": "lark_md", "content": "**แผนก**\\n%s" }
-                    }
-                  ]
-                },
-                {
-                  "tag": "div",
-                  "fields": [
-                    {
-                      "is_short": true,
-                      "text": { "tag": "lark_md", "content": "**Serial No**\\n%s" }
+                      "tag": "div",
+                      "fields": [
+                        {
+                          "is_short": true,
+                          "text": { "tag": "lark_md", "content": "**Serial No**\\n%s" }
+                        }
+                      ]
                     }
                   ]
                 }
-              ]
-            }
-            """.formatted(machineName, department, serialNo);
+                """.formatted(machineName, department, serialNo);
     }
 
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
