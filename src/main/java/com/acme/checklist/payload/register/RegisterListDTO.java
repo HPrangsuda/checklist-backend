@@ -16,13 +16,15 @@ import java.time.format.DateTimeFormatter;
 @AllArgsConstructor
 public class RegisterListDTO {
 
-    private Long   id;
-    private String machineName;
-    private String brand;
-    private String model;
-    private String serialNumber;
-    private String department;
-    private String createdAt;
+    private Long         id;
+    private String       machineName;
+    private String       brand;
+    private String       model;
+    private String       serialNumber;
+    private String       department;
+    private boolean      hasMachine;
+    private long         machineCount;   // ← เพิ่ม
+    private String       createdAt;
     private CreatedByDTO createdBy;
     private CreatedByDTO updatedBy;
 
@@ -37,12 +39,10 @@ public class RegisterListDTO {
 
     // ── factory ───────────────────────────────────────────────────────────────
 
-    /** ใช้เมื่อไม่มี member map (fallback) */
     public static RegisterListDTO from(RegisterRequest r) {
         return from(r, null, null);
     }
 
-    /** ใช้ใน convertRegisterListDTOs หลังจาก join member แล้ว */
     public static RegisterListDTO from(RegisterRequest r, Member createdMember, Member updatedMember) {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
                 .withZone(ZoneId.of("Asia/Bangkok"));
@@ -74,6 +74,8 @@ public class RegisterListDTO {
                 .model(r.getModel())
                 .serialNumber(r.getSerialNumber())
                 .department(r.getDepartment())
+                .hasMachine(false)
+                .machineCount(0)
                 .createdAt(r.getCreatedAt() != null ? fmt.format(r.getCreatedAt()) : null)
                 .createdBy(createdByDTO)
                 .updatedBy(updatedByDTO)

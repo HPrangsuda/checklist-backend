@@ -93,13 +93,13 @@ public class RegisterService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role = principal.role();
-                    Long memberId = principal.memberId();
+                    String role     = principal.role();
+                    Long   memberId = principal.memberId();
 
                     return switch (role) {
                         case "ADMIN" -> {
                             Criteria criteria = buildKeywordCriteria(keyword);
-                            Query query = Query.query(criteria)
+                            Query    query    = Query.query(criteria)
                                     .with(commonService.pageable(index, size, "created_at"));
                             yield commonService.executePagedQuery(
                                     index, size, query, criteria,
@@ -148,6 +148,7 @@ public class RegisterService {
     // ─── convertRegisterListDTOs ──────────────────────────────────────────────
 
     private Flux<RegisterListDTO> convertRegisterListDTOs(List<RegisterRequest> list) {
+        // ── 1. รวบรวม member IDs สำหรับ audit ────────────────────────────────
         Set<Long> memberIdSet = new HashSet<>();
         for (RegisterRequest r : list) {
             if (r.getCreatedBy() != null) memberIdSet.add(r.getCreatedBy());
@@ -158,13 +159,48 @@ public class RegisterService {
                 ? Mono.just(new HashMap<>())
                 : commonService.fetchMembersByIds(new ArrayList<>(memberIdSet));
 
-        return memberMapMono.flatMapMany(memberMap ->
-                Flux.fromIterable(list).map(r -> RegisterListDTO.from(
-                        r,
-                        memberMap.get(r.getCreatedBy()),
-                        memberMap.get(r.getUpdatedBy())
-                ))
-        );
+        // ── 2. batch-query นับจำนวน machine ต่อ register ID ─────────────────
+        List<Long> registerIds = list.stream().map(RegisterRequest::getId).toList();
+
+        Mono<Map<Long, Long>> machineCountMapMono = registerIds.isEmpty()
+                ? Mono.just(Map.of())
+                : template.getDatabaseClient()
+                .sql("SELECT note FROM machine WHERE note LIKE 'REF:REGISTER-%'")
+                .fetch().all()
+                .mapNotNull(row -> {
+                    Object val = row.get("note");
+                    if (val == null) return null;
+                    // ตัดบรรทัดแรกออกมา กรณี note มีข้อความต่อท้าย
+                    // เช่น "REF:REGISTER-7\nเครื่องมือประจำรถ..."
+                    String firstLine = val.toString().split("\\R")[0].trim();
+                    if (!firstLine.startsWith("REF:REGISTER-")) return null;
+                    try {
+                        return Long.parseLong(firstLine.substring("REF:REGISTER-".length()));
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                })
+                .filter(registerIds::contains)
+                .collect(Collectors.groupingBy(id -> id, Collectors.counting()));
+
+        // ── 3. zip แล้ว map ───────────────────────────────────────────────────
+        return Mono.zip(memberMapMono, machineCountMapMono)
+                .flatMapMany(tuple -> {
+                    Map<Long, Member> memberMap       = tuple.getT1();
+                    Map<Long, Long>   machineCountMap = tuple.getT2();
+
+                    return Flux.fromIterable(list).map(r -> {
+                        RegisterListDTO dto = RegisterListDTO.from(
+                                r,
+                                memberMap.get(r.getCreatedBy()),
+                                memberMap.get(r.getUpdatedBy())
+                        );
+                        long count = machineCountMap.getOrDefault(r.getId(), 0L);
+                        dto.setHasMachine(count > 0);
+                        dto.setMachineCount(count);
+                        return dto;
+                    });
+                });
     }
 
     // ─── GET BY ID ────────────────────────────────────────────────────────────
@@ -189,16 +225,16 @@ public class RegisterService {
                                     ? registerRequest.getDepartment() : "-");
 
                     Mono<String> responsibleMono = resolveMemberName(registerRequest.getResponsibleId());
-                    Mono<String> supervisorMono = resolveMemberName(registerRequest.getSupervisorId());
-                    Mono<String> managerMono = resolveMemberName(registerRequest.getManagerId());
+                    Mono<String> supervisorMono  = resolveMemberName(registerRequest.getSupervisorId());
+                    Mono<String> managerMono     = resolveMemberName(registerRequest.getManagerId());
 
                     return Mono.zip(auditMono, deptNameMono, responsibleMono, supervisorMono, managerMono)
                             .map(tuple -> {
-                                Map<Long, Member> memberMap = tuple.getT1();
-                                String deptName = tuple.getT2();
-                                String responsibleName = tuple.getT3();
-                                String supervisorName = tuple.getT4();
-                                String managerName = tuple.getT5();
+                                Map<Long, Member> memberMap       = tuple.getT1();
+                                String            deptName        = tuple.getT2();
+                                String            responsibleName = tuple.getT3();
+                                String            supervisorName  = tuple.getT4();
+                                String            managerName     = tuple.getT5();
 
                                 AuditMemberDTO createdByDTO = registerRequest.getCreatedBy() != null
                                         ? AuditMemberDTO.from(memberMap.get(registerRequest.getCreatedBy()))
@@ -251,7 +287,6 @@ public class RegisterService {
                         return Mono.<Void>empty();
                     }
 
-                    // ✅ สร้าง card JSON ครั้งเดียว ใช้ร่วมกันทุก recipient
                     String cardJson = buildRegisterCardJson(saved);
 
                     return larkService.batchGetOpenIdsByMobile(rawMobiles)
