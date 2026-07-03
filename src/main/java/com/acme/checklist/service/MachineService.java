@@ -54,6 +54,7 @@ public class MachineService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
     private final KpiService kpiService;
+    private final LarkService larkService;
 
     // Active statuses — machines still in service
     private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
@@ -83,6 +84,14 @@ public class MachineService {
                             return commonService.save(machine, Machine.class)
                                     .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO)
                                             .then(Mono.just(savedMachine)))
+                                    .flatMap(savedMachine ->
+                                            // แจ้งเตือน ADMIN ทุกคนที่ ACTIVE — non-blocking (ไม่ block response)
+                                            notifyAdminsNewMachine(savedMachine)
+                                                    .onErrorResume(e -> {
+                                                        log.warn("Lark notify failed (non-blocking): {}", e.getMessage());
+                                                        return Mono.empty();
+                                                    })
+                                                    .thenReturn(savedMachine))
                                     .map(savedMachine -> {
                                         Map<String, Object> result = new HashMap<>();
                                         result.put("id",          savedMachine.getId());
@@ -110,21 +119,33 @@ public class MachineService {
             tasks.add(createMaintenanceRecords(machine, dto.getMaintenanceList()).then());
 
         if (machine.getResponsiblePersonId() != null) {
-            // FIX: ใช้ ON CONFLICT DO NOTHING แทน template.insert() เพื่อป้องกัน
-            // DuplicateKeyException เมื่อ user กด submit ซ้ำ หรือมี retry เกิดขึ้น
-            Mono<Void> insertHistory = template.getDatabaseClient()
-                    .sql("""
-                            INSERT INTO responsible_history
-                                (machine_code, responsible_person_id, effective_from)
-                            VALUES ($1, $2, $3)
-                            ON CONFLICT ON CONSTRAINT responsible_history_pkey DO NOTHING
-                            """)
-                    .bind("$1", machine.getMachineCode())
-                    .bind("$2", machine.getResponsiblePersonId())
-                    .bind("$3", LocalDate.now())
-                    .fetch()
-                    .rowsUpdated()
-                    .then();
+            // FIX: ตรวจสอบก่อนว่ามี open record อยู่แล้วหรือไม่
+            // แล้วค่อย insert เพื่อป้องกัน DuplicateKeyException
+            // ไม่ว่าจะเกิดจาก double-submit หรือ machine_code ซ้ำกัน
+            Mono<Void> insertHistory = template
+                    .exists(Query.query(
+                                    Criteria.where("machine_code").is(machine.getMachineCode())
+                                            .and("effective_to").isNull()),
+                            ResponsibleHistory.class)
+                    .flatMap(exists -> {
+                        if (exists) {
+                            log.warn("responsible_history open record already exists for machine={}, skipping insert",
+                                    machine.getMachineCode());
+                            return Mono.<Void>empty();
+                        }
+                        ResponsibleHistory history = ResponsibleHistory.builder()
+                                .machineCode(machine.getMachineCode())
+                                .responsiblePersonId(machine.getResponsiblePersonId())
+                                .effectiveFrom(LocalDate.now())
+                                .effectiveTo(null)
+                                .build();
+                        return template.insert(history).then();
+                    })
+                    .onErrorResume(org.springframework.dao.DuplicateKeyException.class, ex -> {
+                        log.warn("responsible_history duplicate key for machine={}, skipping",
+                                machine.getMachineCode());
+                        return Mono.empty();
+                    });
             tasks.add(insertHistory);
         }
 
@@ -895,6 +916,69 @@ public class MachineService {
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
         if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
+
+    /**
+     * ดึง ADMIN ที่ ACTIVE ทุกคน → หา open_id จาก mobile → ส่ง Lark card แจ้งเตือน
+     * เครื่องจักรใหม่ พร้อม machine_code, machine_name, responsible_name
+     */
+    private Mono<Void> notifyAdminsNewMachine(Machine machine) {
+        return template.select(
+                        Query.query(
+                                Criteria.where("role_type").is("ADMIN")
+                                        .and("status").is("ACTIVE")),
+                        Member.class)
+                .collectList()
+                .flatMap(admins -> {
+                    if (admins.isEmpty()) {
+                        log.info("No active ADMIN found, skip Lark notification");
+                        return Mono.empty();
+                    }
+
+                    // รวม responsible person เข้าไปด้วย (ถ้ายังไม่อยู่ใน admins)
+                    List<Member> targets = new ArrayList<>(admins);
+
+                    // เก็บเฉพาะ member ที่มี mobiles
+                    List<String> mobiles = targets.stream()
+                            .map(Member::getMobiles)
+                            .filter(m -> m != null && !m.isBlank())
+                            .distinct()
+                            .toList();
+
+                    // ดึง responsible person แยก (เพิ่มเข้า mobiles ถ้ายังไม่มี)
+                    Mono<List<String>> mobilesMono = machine.getResponsiblePersonId() == null
+                            ? Mono.just(mobiles)
+                            : template.selectOne(
+                                    Query.query(Criteria.where("id").is(machine.getResponsiblePersonId())),
+                                    Member.class)
+                            .map(resp -> {
+                                List<String> all = new ArrayList<>(mobiles);
+                                if (resp.getMobiles() != null && !resp.getMobiles().isBlank()
+                                        && !all.contains(resp.getMobiles())) {
+                                    all.add(resp.getMobiles());
+                                }
+                                return all;
+                            })
+                            .defaultIfEmpty(mobiles);
+
+                    return mobilesMono.flatMap(allMobiles -> {
+                        if (allMobiles.isEmpty()) {
+                            log.warn("No mobile numbers found for notification, skip");
+                            return Mono.empty();
+                        }
+                        return larkService.batchGetOpenIdsByMobile(allMobiles)
+                                .flatMap(openIdMap -> {
+                                    return Flux.fromIterable(openIdMap.values())
+                                            .flatMap(openId -> larkService.sendMachineNotification(openId, machine)
+                                                    .onErrorResume(e -> {
+                                                        log.warn("Failed to notify openId={}: {}", openId, e.getMessage());
+                                                        return Mono.empty();
+                                                    }))
+                                            .then();
+                                });
+                    });
+                });
+    }
+
 
     private Mono<Void> postDeleteTask(List<String> names, Long memberId, Long departmentId) {
         return Mono.empty();

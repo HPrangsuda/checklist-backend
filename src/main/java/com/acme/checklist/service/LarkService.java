@@ -46,6 +46,8 @@ public class LarkService {
         this.client = Client.newBuilder(appId, appSecret).build();
     }
 
+    // ==================== Messaging ====================
+
     public Mono<Map<String, String>> batchGetOpenIdsByMobile(List<String> mobiles) {
         return Mono.fromCallable(() -> {
                     log.info("=== Lark batchGetId mobiles input: {} ===", mobiles);
@@ -104,33 +106,66 @@ public class LarkService {
                 .then();
     }
 
+    // ── Register notification ──────────────────────────────────────────────────
+
     public Mono<Void> sendRegisterNotification(String openId, RegisterRequest registerRequest) {
         String cardJson = buildRegisterCardJson(registerRequest);
         return sendCardMessage(openId, cardJson);
     }
 
     private String buildRegisterCardJson(RegisterRequest req) {
-        String machineName = req.getMachineName() != null ? req.getMachineName() : "-";
-        String department  = req.getDepartment()  != null ? req.getDepartment()  : "-";
+        String machineName = req.getMachineName()  != null ? req.getMachineName()  : "-";
+        String department  = req.getDepartment()   != null ? req.getDepartment()   : "-";
         String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
 
         return """
-        {
-          "type": "template",
-          "data": {
-            "template_id": "AAqkOi53Gw8W5",
-            "template_variable": {
-              "title": "🔔 มีการลงทะเบียนเครื่องจักรใหม่",
-              "machine_name": "%s",
-              "department": "%s",
-              "serial_number": "%s"
-            }
-          }
-        }
-        """.formatted(machineName, department, serialNo);
+                {
+                  "type": "template",
+                  "data": {
+                    "template_id": "AAqkOi53Gw8W5",
+                    "template_variable": {
+                      "title": "🔔 มีการลงทะเบียนเครื่องจักรใหม่",
+                      "machine_name": "%s",
+                      "department": "%s",
+                      "serial_number": "%s"
+                    }
+                  }
+                }
+                """.formatted(machineName, department, serialNo);
     }
 
-    // ==================== Machine ====================
+    // ── Machine notification ───────────────────────────────────────────────────
+
+    public Mono<Void> sendMachineNotification(String openId, Machine machine) {
+        String cardJson = buildMachineCardJson(machine);
+        return sendCardMessage(openId, cardJson);
+    }
+
+    private String buildMachineCardJson(Machine machine) {
+        String machineCode     = machine.getMachineCode()            != null ? machine.getMachineCode()            : "-";
+        String machineName     = machine.getMachineName()            != null ? machine.getMachineName()            : "-";
+        String responsibleName = machine.getResponsiblePersonName()  != null ? machine.getResponsiblePersonName()  : "-";
+
+        return String.format(
+                "{"
+                        + "\"config\":{\"wide_screen_mode\":true},"
+                        + "\"header\":{"
+                        +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"เพิ่มเครื่องจักรใหม่\"},"
+                        +   "\"template\":\"blue\""
+                        + "},"
+                        + "\"elements\":["
+                        +   "{\"tag\":\"div\",\"fields\":["
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n%s\"}},"
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n%s\"}}"
+                        +   "]},"
+                        +   "{\"tag\":\"div\",\"fields\":["
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n%s\"}}"
+                        +   "]}"
+                        + "]}",
+                machineCode, machineName, responsibleName);
+    }
+
+    // ==================== Machine Bitable ====================
 
     public void updateRecord(String recordId, Map<String, Object> fields) throws Exception {
         UpdateAppTableRecordReq req = UpdateAppTableRecordReq.newBuilder()
@@ -225,13 +260,13 @@ public class LarkService {
         return items[0].getRecordId();
     }
 
-    // ==================== Department ====================
+    // ==================== Department Bitable ====================
 
     public Mono<Void> upsertDepartmentRecord(Department department) {
         return Mono.fromCallable(() -> {
 
                     Map<String, Object> fields = new HashMap<>();
-                    fields.put("id", department.getId());
+                    fields.put("id",             department.getId());
                     fields.put("businessUnit",   nullSafe(department.getBusinessUnit()));
                     fields.put("department",     nullSafe(department.getDepartment()));
                     fields.put("departmentCode", nullSafe(department.getDepartmentCode()));
