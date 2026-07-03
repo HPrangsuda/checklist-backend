@@ -1,5 +1,6 @@
 package com.acme.checklist.service;
 
+import com.acme.checklist.entity.Department;
 import com.acme.checklist.entity.Machine;
 import com.acme.checklist.entity.RegisterRequest;
 import com.lark.oapi.Client;
@@ -37,6 +38,9 @@ public class LarkService {
     @Value("${lark.table-id}")
     private String tableId;
 
+    @Value("${lark.department-table-id}")
+    private String departmentTableId;
+
     @PostConstruct
     public void init() {
         this.client = Client.newBuilder(appId, appSecret).build();
@@ -61,7 +65,6 @@ public class LarkService {
                         throw new RuntimeException("Lark batchGetId error: " + resp.getMsg());
                     }
 
-                    // Map<mobile, open_id>
                     Map<String, String> result = new HashMap<>();
                     if (resp.getData() != null && resp.getData().getUserList() != null) {
                         Arrays.stream(resp.getData().getUserList()).forEach(user -> {
@@ -101,7 +104,6 @@ public class LarkService {
                 .then();
     }
 
-    // LarkService.java — เพิ่ม method นี้
     public Mono<Void> sendRegisterNotification(String openId, RegisterRequest registerRequest) {
         String cardJson = buildRegisterCardJson(registerRequest);
         return sendCardMessage(openId, cardJson);
@@ -128,6 +130,8 @@ public class LarkService {
         """.formatted(machineName, department, serialNo);
     }
 
+    // ==================== Machine ====================
+
     public void updateRecord(String recordId, Map<String, Object> fields) throws Exception {
         UpdateAppTableRecordReq req = UpdateAppTableRecordReq.newBuilder()
                 .appToken(appToken)
@@ -149,13 +153,13 @@ public class LarkService {
                     fields.put("id",               String.valueOf(machine.getId()));
                     fields.put("รหัสเครื่องจักร",  nullSafe(machine.getMachineCode()));
                     fields.put("ชื่อเครื่องจักร",  nullSafe(machine.getMachineName()));
-                    fields.put("กลุ่ม", nullSafe(machine.getMachineGroupId()));
-                    fields.put("ประเภท", nullSafe(machine.getMachineTypeId()));
+                    fields.put("กลุ่ม",            nullSafe(machine.getMachineGroupId()));
+                    fields.put("ประเภท",           nullSafe(machine.getMachineTypeId()));
                     fields.put("แบรนด์",           nullSafe(machine.getBrand()));
                     fields.put("รุ่น",             nullSafe(machine.getModel()));
                     fields.put("หมายเลขซีเรียล",  nullSafe(machine.getSerialNumber()));
                     fields.put("หน่วยธุรกิจ",      nullSafe(machine.getBusinessUnit()));
-                    fields.put("แผนก",            nullSafe(machine.getDepartment()));
+                    fields.put("แผนก",             nullSafe(machine.getDepartment()));
                     fields.put("สถานะเครื่องจักร", nullSafe(machine.getMachineStatus()));
                     fields.put("สถานะการตรวจสอบ",  nullSafe(machine.getCheckStatus()));
                     fields.put("ผู้รับผิดชอบ",      nullSafe(machine.getResponsiblePersonName()));
@@ -221,7 +225,91 @@ public class LarkService {
         return items[0].getRecordId();
     }
 
-    // helper แปลง null เป็น string ว่าง
+    // ==================== Department ====================
+
+    public Mono<Void> upsertDepartmentRecord(Department department) {
+        return Mono.fromCallable(() -> {
+
+                    Map<String, Object> fields = new HashMap<>();
+                    fields.put("id", department.getId());
+                    fields.put("businessUnit",   nullSafe(department.getBusinessUnit()));
+                    fields.put("department",     nullSafe(department.getDepartment()));
+                    fields.put("departmentCode", nullSafe(department.getDepartmentCode()));
+                    fields.put("division",       nullSafe(department.getDivision()));
+                    fields.put("status",         nullSafe(department.getStatus()));
+
+                    String recordId = findRecordIdByDepartmentId(String.valueOf(department.getId()));
+
+                    if (recordId != null) {
+                        updateDepartmentRecord(recordId, fields);
+                        log.info("Updated department {} (id={}) in Lark Base",
+                                department.getDepartment(), department.getId());
+                    } else {
+                        CreateAppTableRecordReq req = CreateAppTableRecordReq.newBuilder()
+                                .appToken(appToken)
+                                .tableId(departmentTableId)
+                                .appTableRecord(AppTableRecord.newBuilder()
+                                        .fields(fields)
+                                        .build())
+                                .build();
+                        CreateAppTableRecordResp resp = client.bitable().appTableRecord().create(req);
+                        if (!resp.success()) {
+                            log.error("Failed department {} (id={}): {}",
+                                    department.getDepartment(), department.getId(), resp.getMsg());
+                            return null;
+                        }
+                        log.info("Created department {} (id={}) in Lark Base",
+                                department.getDepartment(), department.getId());
+                    }
+                    return null;
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .then();
+    }
+
+    public String findRecordIdByDepartmentId(String departmentId) throws Exception {
+        SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
+                .appToken(appToken)
+                .tableId(departmentTableId)
+                .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
+                        .fieldNames(new String[]{"id"})
+                        .filter(FilterInfo.newBuilder()
+                                .conjunction("and")
+                                .conditions(new Condition[]{
+                                        Condition.newBuilder()
+                                                .fieldName("id")
+                                                .operator("is")
+                                                .value(new String[]{departmentId})
+                                                .build()
+                                })
+                                .build())
+                        .build())
+                .build();
+
+        SearchAppTableRecordResp resp = client.bitable().appTableRecord().search(req);
+        if (!resp.success()) throw new RuntimeException("Search department failed: " + resp.getMsg());
+
+        AppTableRecord[] items = resp.getData().getItems();
+        if (items == null || items.length == 0) return null;
+        return items[0].getRecordId();
+    }
+
+    public void updateDepartmentRecord(String recordId, Map<String, Object> fields) throws Exception {
+        UpdateAppTableRecordReq req = UpdateAppTableRecordReq.newBuilder()
+                .appToken(appToken)
+                .tableId(departmentTableId)
+                .recordId(recordId)
+                .appTableRecord(AppTableRecord.newBuilder()
+                        .fields(fields)
+                        .build())
+                .build();
+
+        UpdateAppTableRecordResp resp = client.bitable().appTableRecord().update(req);
+        if (!resp.success()) throw new RuntimeException("Update department failed: " + resp.getMsg());
+    }
+
+    // ==================== Helper ====================
+
     private String nullSafe(String value) {
         return value != null ? value : "";
     }

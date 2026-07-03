@@ -20,6 +20,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -30,8 +31,9 @@ public class MachineController {
     private final MachineService machineService;
     private final LarkService larkService;
 
+    // FIX: เปลี่ยน Void → Map<String, Object> ให้ตรงกับ MachineService.create()
     @PostMapping("/create")
-    public Mono<ApiResponse<Void>> create(@RequestBody MachineDTO dto) {
+    public Mono<ApiResponse<Map<String, Object>>> create(@RequestBody MachineDTO dto) {
         return machineService.create(dto);
     }
 
@@ -69,10 +71,6 @@ public class MachineController {
         return machineService.getList(keyword, ids, index, size);
     }
 
-    /**
-     * ดึง distinct filter options ทั้งหมดตาม role ของ user ที่ login
-     * departments → [{code, name}] โดย name = "dept - division" หรือ "dept"
-     */
     @GetMapping("/filter-options")
     public Mono<ApiResponse<FilterOptionsDTO>> getFilterOptions() {
         return machineService.getFilterOptions();

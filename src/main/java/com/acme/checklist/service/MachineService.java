@@ -70,25 +70,35 @@ public class MachineService {
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
-    public Mono<ApiResponse<Void>> create(MachineDTO dto) {
+    /**
+     * FIX: ส่ง id + machineCode กลับใน data field เพื่อให้ frontend ใช้ sync-to-lark
+     * Controller เปลี่ยน return type เป็น Mono<ApiResponse<Map<String,Object>>> แล้ว
+     */
+    public Mono<ApiResponse<Map<String, Object>>> create(MachineDTO dto) {
         dto.setId(null);
         return validateData(dto, false)
                 .flatMap(validateDTO -> resolveDepartmentFields(validateDTO)
                         .flatMap(resolvedDTO -> {
                             Machine machine = buildFromDTO(resolvedDTO);
                             return commonService.save(machine, Machine.class)
-                                    .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO))
-                                    .then(Mono.just(ApiResponse.<Void>success("MS001")));
+                                    .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO)
+                                            .then(Mono.just(savedMachine)))
+                                    .map(savedMachine -> {
+                                        Map<String, Object> result = new HashMap<>();
+                                        result.put("id",          savedMachine.getId());
+                                        result.put("machineCode", savedMachine.getMachineCode());
+                                        return ApiResponse.<Map<String, Object>>success("MS001", result);
+                                    });
                         }))
                 .onErrorResume(ThrowException.class, e -> {
                     log.warn("Business validation failed during machine create: {}", e.getMessage());
-                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
+                    return Mono.just(ApiResponse.<Map<String, Object>>error(e.getCode(), e.getMessage()));
                 })
                 .onErrorResume(e -> {
                     log.error("Unexpected error during machine create", e);
                     String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                     if (e instanceof NullPointerException) msg = "ข้อมูลบางส่วนเป็น null กรุณาตรวจสอบข้อมูล";
-                    return Mono.just(ApiResponse.<Void>error("MS002", msg));
+                    return Mono.just(ApiResponse.<Map<String, Object>>error("MS002", msg));
                 });
     }
 
@@ -100,13 +110,22 @@ public class MachineService {
             tasks.add(createMaintenanceRecords(machine, dto.getMaintenanceList()).then());
 
         if (machine.getResponsiblePersonId() != null) {
-            ResponsibleHistory history = ResponsibleHistory.builder()
-                    .machineCode(machine.getMachineCode())
-                    .responsiblePersonId(machine.getResponsiblePersonId())
-                    .effectiveFrom(LocalDate.now())
-                    .effectiveTo(null)
-                    .build();
-            tasks.add(template.insert(history).then());
+            // FIX: ใช้ ON CONFLICT DO NOTHING แทน template.insert() เพื่อป้องกัน
+            // DuplicateKeyException เมื่อ user กด submit ซ้ำ หรือมี retry เกิดขึ้น
+            Mono<Void> insertHistory = template.getDatabaseClient()
+                    .sql("""
+                            INSERT INTO responsible_history
+                                (machine_code, responsible_person_id, effective_from)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT ON CONSTRAINT responsible_history_pkey DO NOTHING
+                            """)
+                    .bind("$1", machine.getMachineCode())
+                    .bind("$2", machine.getResponsiblePersonId())
+                    .bind("$3", LocalDate.now())
+                    .fetch()
+                    .rowsUpdated()
+                    .then();
+            tasks.add(insertHistory);
         }
 
         return Mono.when(tasks);
@@ -730,7 +749,6 @@ public class MachineService {
         addIfNotNull(p, "business_unit",           dto.getBusinessUnit());
         addIfNotNull(p, "machine_status",          dto.getMachineStatus());
         // ── cancel_date & reason_cancel — always write so they can be cleared ──
-        // when reverting from non-active → active status we must explicitly null them
         p.put(SqlIdentifier.quoted("cancel_date"),   dto.getCancelDate());
         p.put(SqlIdentifier.quoted("reason_cancel"), dto.getReasonCancel());
         addIfNotNull(p, "machine_group_id",        dto.getMachineGroupId());
@@ -747,7 +765,6 @@ public class MachineService {
         addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
 
         // ── check_status — always write (may be "OUT OF SERVICE" for non-active) ──
-        // Use explicit put (not addIfNotNull) so a set value is never skipped
         if (dto.getCheckStatus() != null) {
             p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
         }

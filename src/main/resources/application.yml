@@ -71,7 +71,7 @@ lark:
   app-secret: 1tL35lbTGzarQ5PZhlQKZVvOIKvZiOpY
   base-app-token: BzyAbfBZgaVI6PsUEYAl9aMjgyb
   table-id: tbl5ZjsvWyZJk0kU
-
+  department-table-id: tblFFqgaZGCZSjR4
 jwt:
   secret: PP/e22h/W97Ahtx26r/fGTAnQQgvwvN7OPyP5Kp7NT0bnYvwSUJZ/DSwG183hkLH
   access-token-expiry: 3600000
