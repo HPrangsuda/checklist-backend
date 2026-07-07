@@ -15,7 +15,6 @@ import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
-import org.springframework.data.relational.core.sql.SqlIdentifier;
 import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
@@ -483,23 +482,66 @@ AND (EXISTS (
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
-        Map<SqlIdentifier, Object> params = new HashMap<>();
+        // We need at least one field to start the chain; use a sentinel that is
+        // always safe to repeat, then chain all conditional fields.
+        // Pick the first non-null field as the seed, or fall back to a no-op
+        // touch of updated_at if every optional field happens to be null.
 
-        // Date / scalar fields — update only when sent by the client
-        addIfNotNull(params, "due_date",       dto.getDueDate());
-        addIfNotNull(params, "plan_date",      dto.getPlanDate());
-        addIfNotNull(params, "start_date",     dto.getStartDate());
-        addIfNotNull(params, "actual_date",    dto.getActualDate());
-        addIfNotNull(params, "status",         dto.getStatus());
-        addIfNotNull(params, "maintenance_by", dto.getMaintenanceBy());
-        addIfNotNull(params, "note",           dto.getNote());
-        addIfNotNull(params, "attachment",     dto.getAttachment());
+        Update update = null;
 
-        // responsible_maintenance — update ONLY when a new id is provided.
-        // A null value means "user did not change the field", so we skip it.
-        addIfNotNull(params, "responsible_maintenance", dto.getResponsibleMaintenance());
+        if (dto.getDueDate() != null) {
+            update = Update.update("due_date", dto.getDueDate());
+        }
+        if (dto.getPlanDate() != null) {
+            update = (update == null)
+                    ? Update.update("plan_date", dto.getPlanDate())
+                    : update.set("plan_date", dto.getPlanDate());
+        }
+        if (dto.getStartDate() != null) {
+            update = (update == null)
+                    ? Update.update("start_date", dto.getStartDate())
+                    : update.set("start_date", dto.getStartDate());
+        }
+        if (dto.getActualDate() != null) {
+            update = (update == null)
+                    ? Update.update("actual_date", dto.getActualDate())
+                    : update.set("actual_date", dto.getActualDate());
+        }
+        if (dto.getStatus() != null) {
+            update = (update == null)
+                    ? Update.update("status", dto.getStatus())
+                    : update.set("status", dto.getStatus());
+        }
+        if (dto.getMaintenanceBy() != null) {
+            update = (update == null)
+                    ? Update.update("maintenance_by", dto.getMaintenanceBy())
+                    : update.set("maintenance_by", dto.getMaintenanceBy());
+        }
+        if (dto.getNote() != null) {
+            update = (update == null)
+                    ? Update.update("note", dto.getNote())
+                    : update.set("note", dto.getNote());
+        }
+        if (dto.getAttachment() != null) {
+            update = (update == null)
+                    ? Update.update("attachment", dto.getAttachment())
+                    : update.set("attachment", dto.getAttachment());
+        }
+        if (dto.getResponsibleMaintenance() != null) {
+            update = (update == null)
+                    ? Update.update("responsible_maintenance", dto.getResponsibleMaintenance())
+                    : update.set("responsible_maintenance", dto.getResponsibleMaintenance());
+        }
 
-        return Update.from(params);
+        if (update == null) {
+            // Nothing to update — return a harmless no-op (touch updated_at if
+            // the column exists, otherwise the caller's commonService.update()
+            // will simply execute a WHERE-only statement with no SET clause,
+            // which most drivers reject; throw early instead).
+            throw new IllegalArgumentException("No fields to update");
+        }
+
+        return update;
     }
 
     private MaintenanceDepartmentSummaryDTO mapDepartmentSummary(io.r2dbc.spi.Row row) {
@@ -539,7 +581,5 @@ AND (EXISTS (
         };
     }
 
-    private void addIfNotNull(Map<SqlIdentifier, Object> params, String fieldName, Object value) {
-        if (value != null) params.put(SqlIdentifier.unquoted(fieldName), value);
-    }
+
 }
