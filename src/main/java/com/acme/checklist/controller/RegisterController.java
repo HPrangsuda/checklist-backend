@@ -22,7 +22,6 @@ public class RegisterController {
 
     @PostMapping("/create")
     public Mono<ApiResponse<Void>> create(@RequestBody RegisterDTO dto) {
-        log.info("Register request: {}", dto);
         return registerService.create(dto);
     }
 

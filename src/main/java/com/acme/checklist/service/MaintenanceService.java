@@ -85,9 +85,9 @@ public class MaintenanceService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role     = principal.role();
-                    Long   memberId = principal.memberId();
-                    boolean hasKw   = StringUtils.hasText(keyword);
+                    String  role     = principal.role();
+                    Long    memberId = principal.memberId();
+                    boolean hasKw    = StringUtils.hasText(keyword);
 
                     String roleFragment = switch (role) {
                         case "ADMIN"      -> "";
@@ -236,8 +236,6 @@ public class MaintenanceService {
                 });
     }
 
-    // role filter สำหรับ department summary
-    // ใช้ EXISTS subquery แทน JOIN เพราะ machine_code อาจซ้ำใน machine table
     private static String buildDepartmentRoleFilter(MemberPrincipal principal, String role) {
         Long memberId = principal.memberId();
         return switch (role) {
@@ -379,8 +377,6 @@ AND (EXISTS (
                 });
     }
 
-    // role filter สำหรับ monthly summary — ใช้ responsible_maintenance เท่านั้น
-    // เพื่อให้ตัวเลขตรงกับงานที่ตัวเองรับผิดชอบทำ PM จริงๆ
     private static String buildMonthlySummarySQL(Integer year, MemberPrincipal principal, String role) {
         Long memberId = principal.memberId();
 
@@ -488,15 +484,21 @@ AND (EXISTS (
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
-        addIfNotNull(params, "due_date",                dto.getDueDate());
-        addIfNotNull(params, "plan_date",               dto.getPlanDate());
-        addIfNotNull(params, "start_date",              dto.getStartDate());
-        addIfNotNull(params, "actual_date",             dto.getActualDate());
-        addIfNotNull(params, "status",                  dto.getStatus());
-        addIfNotNull(params, "maintenance_by",          dto.getMaintenanceBy());
+
+        // Date / scalar fields — update only when sent by the client
+        addIfNotNull(params, "due_date",       dto.getDueDate());
+        addIfNotNull(params, "plan_date",      dto.getPlanDate());
+        addIfNotNull(params, "start_date",     dto.getStartDate());
+        addIfNotNull(params, "actual_date",    dto.getActualDate());
+        addIfNotNull(params, "status",         dto.getStatus());
+        addIfNotNull(params, "maintenance_by", dto.getMaintenanceBy());
+        addIfNotNull(params, "note",           dto.getNote());
+        addIfNotNull(params, "attachment",     dto.getAttachment());
+
+        // responsible_maintenance — update ONLY when a new id is provided.
+        // A null value means "user did not change the field", so we skip it.
         addIfNotNull(params, "responsible_maintenance", dto.getResponsibleMaintenance());
-        addIfNotNull(params, "note",                    dto.getNote());
-        addIfNotNull(params, "attachment",              dto.getAttachment());
+
         return Update.from(params);
     }
 
@@ -522,7 +524,7 @@ AND (EXISTS (
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object value = row.get(columnName);
         return switch (value) {
-            case Long l -> l;
+            case Long   l -> l;
             case Number n -> n.longValue();
             case null, default -> 0L;
         };
