@@ -47,7 +47,7 @@ public class MaintenanceService {
             return Mono.just(ApiResponse.error("MS001", "Invalid request format"));
         }
 
-        Mono<List<String>> fileNamesMono = (files != null && !files.isEmpty())
+        Mono<List<String>> uploadedNamesMono = (files != null && !files.isEmpty())
                 ? Flux.fromIterable(files)
                 .flatMap(f -> fileStorageService.uploadFile(f, "maintenance")
                         .map(FileUploadDTO::getFileName))
@@ -55,21 +55,36 @@ public class MaintenanceService {
                 : Mono.just(List.of());
 
         MaintenanceDTO finalDto = dto;
-        return fileNamesMono
-                .flatMap(fileNames -> {
-                    if (!fileNames.isEmpty()) {
-                        String joined = String.join(",", fileNames);
-                        if (finalDto.getAttachment() != null && !finalDto.getAttachment().isBlank()) {
-                            finalDto.setAttachment(finalDto.getAttachment() + "," + joined);
+        return uploadedNamesMono
+                .flatMap(newFileNames -> {
+                    if (!newFileNames.isEmpty()) {
+                        String existing = finalDto.getAttachment();
+                        if (existing != null && existing.trim().startsWith("[")) {
+                            String extras = newFileNames.stream()
+                                    .map(n -> "\"" + n + "\"")
+                                    .reduce("", (a, b) -> a.isEmpty() ? b : a + "," + b);
+                            String merged = existing.trim();
+                            if (merged.equals("[]")) {
+                                merged = "[" + extras + "]";
+                            } else {
+                                merged = merged.substring(0, merged.lastIndexOf(']'))
+                                        + "," + extras + "]";
+                            }
+                            finalDto.setAttachment(merged);
                         } else {
-                            finalDto.setAttachment(joined);
+                            // Legacy / no existing attachment — store as comma-separated names
+                            String joined = String.join(",", newFileNames);
+                            finalDto.setAttachment(
+                                    (existing != null && !existing.isBlank())
+                                            ? existing + "," + joined
+                                            : joined);
                         }
                     }
                     return validateData(finalDto, true)
                             .flatMap(validated -> {
                                 Update update = buildUpdateFromDTO(validated);
                                 return commonService.update(finalDto.getId(), update, MaintenanceRecord.class)
-                                        .then(Mono.just(ApiResponse.<Void>success("MS001")));
+                                        .then(Mono.just(ApiResponse.success("MS001")));
                             });
                 })
                 .onErrorResume(e -> {
@@ -240,23 +255,23 @@ public class MaintenanceService {
         return switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> """
-AND EXISTS (
-    SELECT 1 FROM machine m2
-    WHERE m2.machine_code = mr.machine_code
-      AND m2.manager_id =\s""" + memberId + "\n)";
-            case "SUPERVISOR" -> """
-AND EXISTS (
-    SELECT 1 FROM machine m2
-    WHERE m2.machine_code = mr.machine_code
-      AND m2.supervisor_id =\s""" + memberId + "\n)";
-            default           -> """
-AND (EXISTS (
-    SELECT 1 FROM machine m2
-    WHERE m2.machine_code = mr.machine_code
-      AND m2.responsible_person_id =\s""" + memberId + """
-) OR mr.responsible_maintenance =\s""" + memberId + "\n)";
-        };
-    }
+                AND EXISTS (
+                    SELECT 1 FROM machine m2
+                    WHERE m2.machine_code = mr.machine_code
+                      AND m2.manager_id =\s""" + memberId + "\n)";
+                            case "SUPERVISOR" -> """
+                AND EXISTS (
+                    SELECT 1 FROM machine m2
+                    WHERE m2.machine_code = mr.machine_code
+                      AND m2.supervisor_id =\s""" + memberId + "\n)";
+                            default           -> """
+                AND (EXISTS (
+                    SELECT 1 FROM machine m2
+                    WHERE m2.machine_code = mr.machine_code
+                      AND m2.responsible_person_id =\s""" + memberId + """
+                ) OR mr.responsible_maintenance =\s""" + memberId + "\n)";
+                        };
+                    }
 
     private String buildDepartmentSummarySQL(String roleFilter) {
         return """
@@ -482,64 +497,21 @@ AND (EXISTS (
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
-        // We need at least one field to start the chain; use a sentinel that is
-        // always safe to repeat, then chain all conditional fields.
-        // Pick the first non-null field as the seed, or fall back to a no-op
-        // touch of updated_at if every optional field happens to be null.
+        // attachment is always written so that saving with no files persists null
+        // instead of silently leaving stale data in the column.
+        Update update = Update.update("attachment", dto.getAttachment());
 
-        Update update = null;
+        if (dto.getDueDate()       != null) update = update.set("due_date",       dto.getDueDate());
+        if (dto.getPlanDate()      != null) update = update.set("plan_date",      dto.getPlanDate());
+        if (dto.getStartDate()     != null) update = update.set("start_date",     dto.getStartDate());
+        if (dto.getActualDate()    != null) update = update.set("actual_date",    dto.getActualDate());
+        if (dto.getStatus()        != null) update = update.set("status",         dto.getStatus());
+        if (dto.getMaintenanceBy() != null) update = update.set("maintenance_by", dto.getMaintenanceBy());
+        if (dto.getNote()          != null) update = update.set("note",           dto.getNote());
 
-        if (dto.getDueDate() != null) {
-            update = Update.update("due_date", dto.getDueDate());
-        }
-        if (dto.getPlanDate() != null) {
-            update = (update == null)
-                    ? Update.update("plan_date", dto.getPlanDate())
-                    : update.set("plan_date", dto.getPlanDate());
-        }
-        if (dto.getStartDate() != null) {
-            update = (update == null)
-                    ? Update.update("start_date", dto.getStartDate())
-                    : update.set("start_date", dto.getStartDate());
-        }
-        if (dto.getActualDate() != null) {
-            update = (update == null)
-                    ? Update.update("actual_date", dto.getActualDate())
-                    : update.set("actual_date", dto.getActualDate());
-        }
-        if (dto.getStatus() != null) {
-            update = (update == null)
-                    ? Update.update("status", dto.getStatus())
-                    : update.set("status", dto.getStatus());
-        }
-        if (dto.getMaintenanceBy() != null) {
-            update = (update == null)
-                    ? Update.update("maintenance_by", dto.getMaintenanceBy())
-                    : update.set("maintenance_by", dto.getMaintenanceBy());
-        }
-        if (dto.getNote() != null) {
-            update = (update == null)
-                    ? Update.update("note", dto.getNote())
-                    : update.set("note", dto.getNote());
-        }
-        if (dto.getAttachment() != null) {
-            update = (update == null)
-                    ? Update.update("attachment", dto.getAttachment())
-                    : update.set("attachment", dto.getAttachment());
-        }
-        if (dto.getResponsibleMaintenance() != null) {
-            update = (update == null)
-                    ? Update.update("responsible_maintenance", dto.getResponsibleMaintenance())
-                    : update.set("responsible_maintenance", dto.getResponsibleMaintenance());
-        }
-
-        if (update == null) {
-            // Nothing to update — return a harmless no-op (touch updated_at if
-            // the column exists, otherwise the caller's commonService.update()
-            // will simply execute a WHERE-only statement with no SET clause,
-            // which most drivers reject; throw early instead).
-            throw new IllegalArgumentException("No fields to update");
-        }
+        // responsible_maintenance: skip when null (no change by user)
+        if (dto.getResponsibleMaintenance() != null)
+            update = update.set("responsible_maintenance", dto.getResponsibleMaintenance());
 
         return update;
     }
