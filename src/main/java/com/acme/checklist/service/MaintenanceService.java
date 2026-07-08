@@ -508,8 +508,6 @@ AND (EXISTS (
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
-        // attachment is always written so that saving with no files persists null
-        // instead of silently leaving stale data in the column.
         Update update = Update.update("attachment", dto.getAttachment());
 
         if (dto.getDueDate()       != null) update = update.set("due_date",       dto.getDueDate());
@@ -520,7 +518,6 @@ AND (EXISTS (
         if (dto.getMaintenanceBy() != null) update = update.set("maintenance_by", dto.getMaintenanceBy());
         if (dto.getNote()          != null) update = update.set("note",           dto.getNote());
 
-        // responsible_maintenance: skip when null (no change by user)
         if (dto.getResponsibleMaintenance() != null)
             update = update.set("responsible_maintenance", dto.getResponsibleMaintenance());
 
