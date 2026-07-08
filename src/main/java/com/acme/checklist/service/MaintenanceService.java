@@ -47,22 +47,38 @@ public class MaintenanceService {
             return Mono.just(ApiResponse.error("MS001", "Invalid request format"));
         }
 
-        Mono<List<String>> uploadedNamesMono = (files != null && !files.isEmpty())
+        // Upload any binary files sent with the request, then merge their
+        // file names into dto.attachment (which may already contain a JSON
+        // string of previously-saved files sent back by the frontend).
+        Mono<List<FileUploadDTO>> uploadedDtosMono = (files != null && !files.isEmpty())
                 ? Flux.fromIterable(files)
-                .flatMap(f -> fileStorageService.uploadFile(f, "maintenance")
-                        .map(FileUploadDTO::getFileName))
+                .flatMap(f -> fileStorageService.uploadFile(f, "maintenance"))
                 .collectList()
                 : Mono.just(List.of());
 
         MaintenanceDTO finalDto = dto;
-        return uploadedNamesMono
-                .flatMap(newFileNames -> {
-                    if (!newFileNames.isEmpty()) {
+        return uploadedDtosMono
+                .flatMap(uploadedDtos -> {
+                    if (!uploadedDtos.isEmpty()) {
+                        // fileUrl from FileStorageService is "/uploads/filename.ext"
+                        // Rewrite to the authenticated download endpoint.
                         String existing = finalDto.getAttachment();
+                        List<String> newObjects = uploadedDtos.stream()
+                                .map(d -> {
+                                    String name = d.getFileName() != null ? d.getFileName().replace("\"", "\\\"") : "";
+                                    String url  = "/api/files/download/" + name;
+                                    String type = d.getFileType() != null ? d.getFileType().replace("\"", "\\\"") : "";
+                                    long   size = d.getFileSize() != null ? d.getFileSize() : 0L;
+                                    return "{\"fileName\":\"" + name + "\"," +
+                                            "\"fileUrl\":\"" + url + "\"," +
+                                            "\"fileType\":\"" + type + "\"," +
+                                            "\"fileSize\":" + size + "," +
+                                            "\"uploadedBy\":null}";
+                                })
+                                .toList();
+                        String extras = String.join(",", newObjects);
+
                         if (existing != null && existing.trim().startsWith("[")) {
-                            String extras = newFileNames.stream()
-                                    .map(n -> "\"" + n + "\"")
-                                    .reduce("", (a, b) -> a.isEmpty() ? b : a + "," + b);
                             String merged = existing.trim();
                             if (merged.equals("[]")) {
                                 merged = "[" + extras + "]";
@@ -72,12 +88,7 @@ public class MaintenanceService {
                             }
                             finalDto.setAttachment(merged);
                         } else {
-                            // Legacy / no existing attachment — store as comma-separated names
-                            String joined = String.join(",", newFileNames);
-                            finalDto.setAttachment(
-                                    (existing != null && !existing.isBlank())
-                                            ? existing + "," + joined
-                                            : joined);
+                            finalDto.setAttachment("[" + extras + "]");
                         }
                     }
                     return validateData(finalDto, true)
@@ -255,23 +266,23 @@ public class MaintenanceService {
         return switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> """
-                AND EXISTS (
-                    SELECT 1 FROM machine m2
-                    WHERE m2.machine_code = mr.machine_code
-                      AND m2.manager_id =\s""" + memberId + "\n)";
-                            case "SUPERVISOR" -> """
-                AND EXISTS (
-                    SELECT 1 FROM machine m2
-                    WHERE m2.machine_code = mr.machine_code
-                      AND m2.supervisor_id =\s""" + memberId + "\n)";
-                            default           -> """
-                AND (EXISTS (
-                    SELECT 1 FROM machine m2
-                    WHERE m2.machine_code = mr.machine_code
-                      AND m2.responsible_person_id =\s""" + memberId + """
-                ) OR mr.responsible_maintenance =\s""" + memberId + "\n)";
-                        };
-                    }
+AND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.manager_id =\s""" + memberId + "\n)";
+            case "SUPERVISOR" -> """
+AND EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.supervisor_id =\s""" + memberId + "\n)";
+            default           -> """
+AND (EXISTS (
+    SELECT 1 FROM machine m2
+    WHERE m2.machine_code = mr.machine_code
+      AND m2.responsible_person_id =\s""" + memberId + """
+) OR mr.responsible_maintenance =\s""" + memberId + "\n)";
+        };
+    }
 
     private String buildDepartmentSummarySQL(String roleFilter) {
         return """
