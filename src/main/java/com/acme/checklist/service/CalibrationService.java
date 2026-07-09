@@ -63,7 +63,8 @@ public class CalibrationService {
                     String  role     = principal.role();
                     Long    memberId = principal.memberId();
                     boolean hasKw    = StringUtils.hasText(keyword);
-                    boolean hasYear  = year != null;
+                    // ถ้าไม่ได้ส่ง year มา ใช้ปีปัจจุบันเป็น default
+                    int     effectiveYear = (year != null) ? year : LocalDate.now().getYear();
                     boolean hasDept  = StringUtils.hasText(department);
                     boolean hasRes   = StringUtils.hasText(results);
                     boolean hasCal   = StringUtils.hasText(calibrationStatus);
@@ -77,8 +78,9 @@ public class CalibrationService {
                     };
 
                     // ── Optional filters ─────────────────────────────────────
-                    String kwFragment   = hasKw   ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "";
-                    String yearFragment = hasYear  ? "AND EXTRACT(YEAR FROM c.due_date) = :year"                 : "";
+                    String kwFragment   = hasKw ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "";
+                    // year filter เสมอ (ค่า default = ปีปัจจุบัน, ผู้ใช้เลือกปีอื่นได้จาก filter)
+                    String yearFragment = "AND EXTRACT(YEAR FROM c.due_date) = :year";
                     String deptFragment = hasDept  ? "AND m.department = :department"                            : "";
                     String resFragment  = hasRes   ? "AND LOWER(c.results) = LOWER(:results)"                    : "";
                     String calFragment  = hasCal   ? "AND LOWER(c.calibration_status) = LOWER(:calibrationStatus)" : "";
@@ -131,7 +133,7 @@ public class CalibrationService {
                             LEFT JOIN department d ON d.department_code = m.department
                             """ + where + """
 
-                            ORDER BY c.due_date DESC NULLS LAST
+                            ORDER BY c.due_date ASC NULLS LAST
                             LIMIT :size OFFSET :offset
                             """;
 
@@ -150,10 +152,9 @@ public class CalibrationService {
                         countSpec = countSpec.bind("kw", kwValue);
                         dataSpec  = dataSpec.bind("kw", kwValue);
                     }
-                    if (hasYear) {
-                        countSpec = countSpec.bind("year", year);
-                        dataSpec  = dataSpec.bind("year", year);
-                    }
+                    // bind year เสมอ (effectiveYear = year ที่รับมา หรือปีปัจจุบัน)
+                    countSpec = countSpec.bind("year", effectiveYear);
+                    dataSpec  = dataSpec.bind("year", effectiveYear);
                     if (hasDept) {
                         countSpec = countSpec.bind("department", department.trim());
                         dataSpec  = dataSpec.bind("department", department.trim());
@@ -254,6 +255,7 @@ public class CalibrationService {
                                 EXTRACT(YEAR FROM c.due_date)::int                         AS year,
                                 m.department                                                AS department_code,
                                 COALESCE(d.department, m.department, '')                   AS department_name,
+                                d.division                                                  AS division,
                                 c.results                                                   AS results,
                                 c.calibration_status                                       AS calibration_status
                             FROM calibration_record c
@@ -269,9 +271,10 @@ public class CalibrationService {
                                 Integer yr   = getIntValueNullable(row);
                                 String  dc   = row.get("department_code", String.class);
                                 String  dn   = row.get("department_name", String.class);
+                                String  div  = row.get("division", String.class);
                                 String  res  = row.get("results", String.class);
                                 String  cal  = row.get("calibration_status", String.class);
-                                return new Object[]{ yr, dc, dn, res, cal };
+                                return new Object[]{ yr, dc, dn, div, res, cal };
                             })
                             .all()
                             .collectList()
@@ -283,11 +286,16 @@ public class CalibrationService {
 
                                 for (Object[] r : rows) {
                                     if (r[0] != null) years.add((Integer) r[0]);
-                                    String dc = (String) r[1];
-                                    String dn = (String) r[2];
-                                    if (StringUtils.hasText(dc)) depts.putIfAbsent(dc, dn);
-                                    if (StringUtils.hasText((String) r[3])) resultSet.add((String) r[3]);
-                                    if (StringUtils.hasText((String) r[4])) calStatusSet.add((String) r[4]);
+                                    String dc  = (String) r[1];
+                                    String dn  = (String) r[2];
+                                    String div = (String) r[3];
+                                    // แสดง "department - division" ถ้า division มีค่า
+                                    String label = (StringUtils.hasText(div))
+                                            ? dn + " - " + div
+                                            : dn;
+                                    if (StringUtils.hasText(dc)) depts.putIfAbsent(dc, label);
+                                    if (StringUtils.hasText((String) r[4])) resultSet.add((String) r[4]);
+                                    if (StringUtils.hasText((String) r[5])) calStatusSet.add((String) r[5]);
                                 }
 
                                 List<CalibrationFilterOptionsDTO.DepartmentOption> deptList = depts.entrySet().stream()
