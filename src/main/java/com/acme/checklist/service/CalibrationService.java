@@ -133,7 +133,7 @@ public class CalibrationService {
                             LEFT JOIN department d ON d.department_code = m.department
                             """ + where + """
 
-                            ORDER BY c.due_date ASC NULLS LAST
+                            ORDER BY m.department ASC NULLS LAST, c.due_date ASC NULLS LAST
                             LIMIT :size OFFSET :offset
                             """;
 
@@ -263,6 +263,7 @@ public class CalibrationService {
                             LEFT JOIN department d ON d.department_code = m.department
                             WHERE c.due_date IS NOT NULL
                             %s
+                            ORDER BY department_name ASC, division ASC
                             """.formatted(roleFilter);
 
                     return template.getDatabaseClient()
