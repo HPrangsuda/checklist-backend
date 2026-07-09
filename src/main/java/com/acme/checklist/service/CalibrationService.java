@@ -6,6 +6,7 @@ import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.calibration.*;
+import io.r2dbc.spi.Row;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -42,21 +43,32 @@ public class CalibrationService {
                     return spec.then()
                             .then(Mono.just(ApiResponse.<Void>success("MS003")));
                 })
-                .onErrorResume(e -> {
-                    return Mono.just(ApiResponse.error("MS004", e.getMessage()));
-                });
+                .onErrorResume(e -> Mono.just(ApiResponse.error("MS004", e.getMessage())));
     }
 
-    // ─── getPage (SQL-injection safe, JOIN machine + department) ─────────────
+    // ─── getPage (filters: keyword, year, department, results, calibrationStatus) ─
 
-    public Mono<PagedResponse<CalibrationResponseDTO>> getPage(String keyword, int index, int size) {
+    public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
+            String keyword,
+            Integer year,
+            String department,
+            String results,
+            String calibrationStatus,
+            int index,
+            int size) {
+
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role     = principal.role();
-                    Long   memberId = principal.memberId();
-                    boolean hasKw   = StringUtils.hasText(keyword);
+                    String  role     = principal.role();
+                    Long    memberId = principal.memberId();
+                    boolean hasKw    = StringUtils.hasText(keyword);
+                    boolean hasYear  = year != null;
+                    boolean hasDept  = StringUtils.hasText(department);
+                    boolean hasRes   = StringUtils.hasText(results);
+                    boolean hasCal   = StringUtils.hasText(calibrationStatus);
 
+                    // ── Role filter ──────────────────────────────────────────
                     String roleFragment = switch (role) {
                         case "ADMIN"      -> "";
                         case "MANAGER"    -> "AND m.manager_id    = :memberId";
@@ -64,11 +76,20 @@ public class CalibrationService {
                         default           -> "AND m.responsible_person_id = :memberId";
                     };
 
-                    String kwFragment = hasKw
-                            ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)"
-                            : "";
+                    // ── Optional filters ─────────────────────────────────────
+                    String kwFragment   = hasKw   ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "";
+                    String yearFragment = hasYear  ? "AND EXTRACT(YEAR FROM c.due_date) = :year"                 : "";
+                    String deptFragment = hasDept  ? "AND m.department = :department"                            : "";
+                    String resFragment  = hasRes   ? "AND LOWER(c.results) = LOWER(:results)"                    : "";
+                    String calFragment  = hasCal   ? "AND LOWER(c.calibration_status) = LOWER(:calibrationStatus)" : "";
 
-                    String where = "WHERE 1=1 " + roleFragment + " " + kwFragment;
+                    String where = "WHERE 1=1 "
+                            + roleFragment  + " "
+                            + kwFragment    + " "
+                            + yearFragment  + " "
+                            + deptFragment  + " "
+                            + resFragment   + " "
+                            + calFragment;
 
                     String countSql = """
                             SELECT COUNT(*)
@@ -110,7 +131,7 @@ public class CalibrationService {
                             LEFT JOIN department d ON d.department_code = m.department
                             """ + where + """
 
-                            ORDER BY c.due_date ASC NULLS LAST
+                            ORDER BY c.due_date DESC NULLS LAST
                             LIMIT :size OFFSET :offset
                             """;
 
@@ -119,13 +140,31 @@ public class CalibrationService {
                     DatabaseClient.GenericExecuteSpec countSpec = template.getDatabaseClient().sql(countSql);
                     DatabaseClient.GenericExecuteSpec dataSpec  = template.getDatabaseClient().sql(dataSql);
 
+                    // Bind role param
                     if (!"ADMIN".equals(role)) {
                         countSpec = countSpec.bind("memberId", memberId);
                         dataSpec  = dataSpec.bind("memberId", memberId);
                     }
+                    // Bind optional params
                     if (hasKw) {
                         countSpec = countSpec.bind("kw", kwValue);
                         dataSpec  = dataSpec.bind("kw", kwValue);
+                    }
+                    if (hasYear) {
+                        countSpec = countSpec.bind("year", year);
+                        dataSpec  = dataSpec.bind("year", year);
+                    }
+                    if (hasDept) {
+                        countSpec = countSpec.bind("department", department.trim());
+                        dataSpec  = dataSpec.bind("department", department.trim());
+                    }
+                    if (hasRes) {
+                        countSpec = countSpec.bind("results", results.trim());
+                        dataSpec  = dataSpec.bind("results", results.trim());
+                    }
+                    if (hasCal) {
+                        countSpec = countSpec.bind("calibrationStatus", calibrationStatus.trim());
+                        dataSpec  = dataSpec.bind("calibrationStatus", calibrationStatus.trim());
                     }
 
                     dataSpec = dataSpec
@@ -197,6 +236,82 @@ public class CalibrationService {
                             .totalPages(0)
                             .index(index)
                             .size(size)
+                            .build());
+                });
+    }
+
+    // ─── FILTER OPTIONS ───────────────────────────────────────────────────────
+    // Returns distinct years / departments / results / calibrationStatuses for sidebar dropdowns
+
+    public Mono<CalibrationFilterOptionsDTO> getFilterOptions() {
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .flatMap(principal -> {
+                    String roleFilter = buildRoleJoinFilter(principal);
+
+                    String sql = """
+                            SELECT DISTINCT
+                                EXTRACT(YEAR FROM c.due_date)::int                         AS year,
+                                m.department                                                AS department_code,
+                                COALESCE(d.department, m.department, '')                   AS department_name,
+                                c.results                                                   AS results,
+                                c.calibration_status                                       AS calibration_status
+                            FROM calibration_record c
+                            LEFT JOIN machine m ON m.machine_code = c.machine_code
+                            LEFT JOIN department d ON d.department_code = m.department
+                            WHERE c.due_date IS NOT NULL
+                            %s
+                            """.formatted(roleFilter);
+
+                    return template.getDatabaseClient()
+                            .sql(sql)
+                            .map((row, meta) -> {
+                                Integer yr   = getIntValueNullable(row);
+                                String  dc   = row.get("department_code", String.class);
+                                String  dn   = row.get("department_name", String.class);
+                                String  res  = row.get("results", String.class);
+                                String  cal  = row.get("calibration_status", String.class);
+                                return new Object[]{ yr, dc, dn, res, cal };
+                            })
+                            .all()
+                            .collectList()
+                            .map(rows -> {
+                                Set<Integer> years        = new TreeSet<>(Comparator.reverseOrder());
+                                Map<String, String> depts = new LinkedHashMap<>();
+                                Set<String> resultSet     = new LinkedHashSet<>();
+                                Set<String> calStatusSet  = new LinkedHashSet<>();
+
+                                for (Object[] r : rows) {
+                                    if (r[0] != null) years.add((Integer) r[0]);
+                                    String dc = (String) r[1];
+                                    String dn = (String) r[2];
+                                    if (StringUtils.hasText(dc)) depts.putIfAbsent(dc, dn);
+                                    if (StringUtils.hasText((String) r[3])) resultSet.add((String) r[3]);
+                                    if (StringUtils.hasText((String) r[4])) calStatusSet.add((String) r[4]);
+                                }
+
+                                List<CalibrationFilterOptionsDTO.DepartmentOption> deptList = depts.entrySet().stream()
+                                        .map(e -> CalibrationFilterOptionsDTO.DepartmentOption.builder()
+                                                .code(e.getKey())
+                                                .name(e.getValue())
+                                                .build())
+                                        .toList();
+
+                                return CalibrationFilterOptionsDTO.builder()
+                                        .years(new ArrayList<>(years))
+                                        .departments(deptList)
+                                        .results(new ArrayList<>(resultSet))
+                                        .calibrationStatuses(new ArrayList<>(calStatusSet))
+                                        .build();
+                            });
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch calibration filter options: {}", e.getMessage(), e);
+                    return Mono.just(CalibrationFilterOptionsDTO.builder()
+                            .years(List.of())
+                            .departments(List.of())
+                            .results(List.of())
+                            .calibrationStatuses(List.of())
                             .build());
                 });
     }
@@ -296,8 +411,7 @@ public class CalibrationService {
                                                     .build());
 
                                     monthTotals.merge(key, new long[]{ plan, ot, ov },
-                                            (a, b) -> new long[]{
-                                                    a[0]+b[0], a[1]+b[1], a[2]+b[2] });
+                                            (a, b) -> new long[]{ a[0]+b[0], a[1]+b[1], a[2]+b[2] });
                                 }
 
                                 List<CalibrationMonthlyDTO> result = new ArrayList<>();
@@ -329,7 +443,6 @@ public class CalibrationService {
                 ? "AND EXTRACT(YEAR FROM c.due_date) = " + year
                 : "";
 
-        // ไม่ JOIN machine เพราะ machine_code ซ้ำได้
         String roleFilter = switch (role) {
             case "ADMIN"      -> "";
             case "MANAGER"    -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.manager_id = " + memberId + ")";
@@ -365,6 +478,17 @@ public class CalibrationService {
                 (SELECT m2.responsible_person_id FROM machine m2 WHERE m2.machine_code = c.machine_code LIMIT 1)
             ORDER BY year ASC, month ASC, member_name ASC
             """.formatted(roleFilter, yearFilter);
+    }
+
+    /** Role-based WHERE fragment (no JOIN needed — uses EXISTS subquery). */
+    private String buildRoleJoinFilter(MemberPrincipal principal) {
+        Long   memberId = principal.memberId();
+        return switch (principal.role()) {
+            case "ADMIN"      -> "";
+            case "MANAGER"    -> "AND m.manager_id = " + memberId;
+            case "SUPERVISOR" -> "AND m.supervisor_id = " + memberId;
+            default           -> "AND m.responsible_person_id = " + memberId;
+        };
     }
 
     private static String getString(MemberPrincipal principal) {
@@ -405,7 +529,7 @@ public class CalibrationService {
     public Mono<ApiResponse<List<CalibrationResponseDTO>>> getByMachineCode(String machineCode) {
         return template.select(
                         Query.query(Criteria.where("machine_code").is(machineCode))
-                                .sort(Sort.by("due_date").ascending()),
+                                .sort(Sort.by("due_date").descending()),
                         CalibrationRecord.class)
                 .collectList()
                 .flatMap(records -> {
@@ -441,7 +565,6 @@ public class CalibrationService {
         addDateParam(sets, values, "start_date",       dto.getStartDate());
         addDateParam(sets, values, "certificate_date", dto.getCertificateDate());
 
-        // String fields ปกติ
         addParam(sets, values, "results",              dto.getResults());
         addParam(sets, values, "criteria",             dto.getCriteria());
         addParam(sets, values, "measuring_range",      dto.getMeasuringRange());
@@ -510,7 +633,7 @@ public class CalibrationService {
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object v = row.get(columnName);
         return switch (v) {
-            case Long l -> l;
+            case Long l   -> l;
             case Number n -> n.longValue();
             case null, default -> 0L;
         };
@@ -522,6 +645,15 @@ public class CalibrationService {
             case Integer i -> i;
             case Number  n -> n.intValue();
             case null, default -> 0;
+        };
+    }
+
+    private Integer getIntValueNullable(Row row) {
+        Object v = row.get("year");
+        return switch (v) {
+            case Integer i -> i;
+            case Number  n -> n.intValue();
+            case null, default -> null;
         };
     }
 }
