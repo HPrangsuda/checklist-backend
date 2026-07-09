@@ -42,6 +42,7 @@ public class CalibrationController {
         return calibrationService.getPage(keyword, year, department, results, calibrationStatus, index, size);
     }
 
+    /** Distinct filter option values scoped to the caller's role. */
     @GetMapping("/filter-options")
     public Mono<CalibrationFilterOptionsDTO> getFilterOptions() {
         return calibrationService.getFilterOptions();
@@ -58,8 +59,9 @@ public class CalibrationController {
     }
 
     @GetMapping("/department-summary")
-    public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummary() {
-        return calibrationService.getDepartmentSummaryWithRole();
+    public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummary(
+            @RequestParam(required = false) Integer year) {
+        return calibrationService.getDepartmentSummaryWithRole(year);
     }
 
     @GetMapping("/monthly-summary")

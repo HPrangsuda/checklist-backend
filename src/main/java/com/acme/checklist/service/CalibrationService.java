@@ -327,11 +327,13 @@ public class CalibrationService {
 
     // ─── DEPARTMENT SUMMARY WITH ROLE ─────────────────────────────────────────
 
-    public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummaryWithRole() {
+    public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummaryWithRole(Integer year) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     String roleFilter = getString(principal);
+                    int    effectiveYear = (year != null) ? year : LocalDate.now().getYear();
+                    String yearFilter   = "AND EXTRACT(YEAR FROM c.due_date) = " + effectiveYear;
 
                     String sql = """
                         SELECT
@@ -345,10 +347,10 @@ public class CalibrationService {
                                     'Department ' || COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4))
                             END as department_name,
                             COUNT(*) as total,
-                            COUNT(CASE WHEN c.results = 'Pass' THEN 1 END) as total_pass,
-                            COUNT(CASE WHEN c.results = 'Not Pass' THEN 1 END) as total_not_pass,
-                            COUNT(CASE WHEN c.calibration_status = 'ON TIME' THEN 1 END) as total_on_time,
-                            COUNT(CASE WHEN c.calibration_status = 'OVERDUE' THEN 1 END) as total_overdue,
+                            COUNT(CASE WHEN LOWER(c.results) = 'pass' THEN 1 END) as total_pass,
+                            COUNT(CASE WHEN LOWER(c.results) = 'not pass' THEN 1 END) as total_not_pass,
+                            COUNT(CASE WHEN UPPER(c.calibration_status) = 'ON TIME' THEN 1 END) as total_on_time,
+                            COUNT(CASE WHEN UPPER(c.calibration_status) = 'OVERDUE' THEN 1 END) as total_overdue,
                             COUNT(CASE WHEN c.certificate_date IS NOT NULL THEN 1 END) as total_completed,
                             COUNT(CASE WHEN c.certificate_date IS NULL THEN 1 END) as total_pending
                         FROM calibration_record c
@@ -356,12 +358,13 @@ public class CalibrationService {
                         LEFT JOIN department d ON m.department = d.department_code
                         WHERE 1=1
                           %s
+                          %s
                         GROUP BY
                             COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4)),
                             d.department, d.division
                         HAVING COUNT(*) > 0
-                        ORDER BY total DESC
-                        """.formatted(roleFilter);
+                        ORDER BY department_name ASC
+                        """.formatted(roleFilter, yearFilter);
 
                     return template.getDatabaseClient()
                             .sql(sql)
