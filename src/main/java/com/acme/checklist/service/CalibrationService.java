@@ -337,14 +337,14 @@ public class CalibrationService {
 
                     String sql = """
                         SELECT
-                            COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4)) as department,
+                            COALESCE(d.department_code::text, m.department) as department,
                             CASE
                                 WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != '' THEN
                                     d.department || ' - ' || d.division
                                 WHEN d.department IS NOT NULL THEN
                                     d.department
                                 ELSE
-                                    'Department ' || COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4))
+                                    COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4))
                             END as department_name,
                             COUNT(*) as total,
                             COUNT(CASE WHEN LOWER(c.results) = 'pass' THEN 1 END) as total_pass,
@@ -360,7 +360,7 @@ public class CalibrationService {
                           %s
                           %s
                         GROUP BY
-                            COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4)),
+                            COALESCE(d.department_code::text, m.department),
                             d.department, d.division
                         HAVING COUNT(*) > 0
                         ORDER BY department_name ASC
