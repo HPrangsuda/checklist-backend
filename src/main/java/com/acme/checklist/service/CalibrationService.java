@@ -6,7 +6,6 @@ import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.calibration.*;
-import io.r2dbc.spi.Row;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -82,8 +81,8 @@ public class CalibrationService {
                     // year filter เสมอ (ค่า default = ปีปัจจุบัน, ผู้ใช้เลือกปีอื่นได้จาก filter)
                     String yearFragment = "AND EXTRACT(YEAR FROM c.due_date) = :year";
                     String deptFragment = hasDept  ? "AND m.department = :department"                            : "";
-                    String resFragment  = hasRes   ? "AND LOWER(c.results) = LOWER(:results)"                    : "";
-                    String calFragment  = hasCal   ? "AND LOWER(c.calibration_status) = LOWER(:calibrationStatus)" : "";
+                    String resFragment  = hasRes   ? "AND c.results = :results"                    : "";
+                    String calFragment  = hasCal   ? "AND c.calibration_status = :calibrationStatus" : "";
 
                     String where = "WHERE 1=1 "
                             + roleFragment  + " "
@@ -130,7 +129,7 @@ public class CalibrationService {
                                 d.department              AS machine_department_name
                             FROM calibration_record c
                             LEFT JOIN machine m ON m.machine_code = c.machine_code
-                            LEFT JOIN department d ON d.department_code = m.department
+                            LEFT JOIN department d ON d.department_code::text = m.department
                             """ + where + """
 
                             ORDER BY m.department ASC NULLS LAST, c.due_date ASC NULLS LAST
@@ -260,7 +259,7 @@ public class CalibrationService {
                                 c.calibration_status                                       AS calibration_status
                             FROM calibration_record c
                             LEFT JOIN machine m ON m.machine_code = c.machine_code
-                            LEFT JOIN department d ON d.department_code = m.department
+                            LEFT JOIN department d ON d.department_code::text = m.department
                             WHERE c.due_date IS NOT NULL
                             %s
                             ORDER BY department_name ASC, division ASC
@@ -269,7 +268,7 @@ public class CalibrationService {
                     return template.getDatabaseClient()
                             .sql(sql)
                             .map((row, meta) -> {
-                                Integer yr   = getIntValueNullable(row);
+                                Integer yr   = getIntValueNullable(row, "year");
                                 String  dc   = row.get("department_code", String.class);
                                 String  dn   = row.get("department_name", String.class);
                                 String  div  = row.get("division", String.class);
@@ -337,30 +336,30 @@ public class CalibrationService {
 
                     String sql = """
                         SELECT
-                            COALESCE(d.department_code::text, m.department) as department,
+                            m.department                                                    AS department,
                             CASE
                                 WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != '' THEN
                                     d.department || ' - ' || d.division
                                 WHEN d.department IS NOT NULL THEN
                                     d.department
                                 ELSE
-                                    COALESCE(m.department, SUBSTRING(c.machine_code FROM 1 FOR 4))
-                            END as department_name,
-                            COUNT(*) as total,
-                            COUNT(CASE WHEN LOWER(c.results) = 'pass' THEN 1 END) as total_pass,
-                            COUNT(CASE WHEN LOWER(c.results) = 'not pass' THEN 1 END) as total_not_pass,
-                            COUNT(CASE WHEN UPPER(c.calibration_status) = 'ON TIME' THEN 1 END) as total_on_time,
-                            COUNT(CASE WHEN UPPER(c.calibration_status) = 'OVERDUE' THEN 1 END) as total_overdue,
-                            COUNT(CASE WHEN c.certificate_date IS NOT NULL THEN 1 END) as total_completed,
-                            COUNT(CASE WHEN c.certificate_date IS NULL THEN 1 END) as total_pending
+                                    m.department
+                            END                                                             AS department_name,
+                            COUNT(*)                                                        AS total,
+                            COUNT(CASE WHEN c.results = 'PASS'              THEN 1 END) AS total_pass,
+                            COUNT(CASE WHEN c.results = 'FAILED'            THEN 1 END) AS total_not_pass,
+                            COUNT(CASE WHEN c.calibration_status = 'ON TIME' THEN 1 END) AS total_on_time,
+                            COUNT(CASE WHEN c.calibration_status = 'OVERDUE' THEN 1 END) AS total_overdue,
+                            COUNT(CASE WHEN c.certificate_date IS NOT NULL THEN 1 END)     AS total_completed,
+                            COUNT(CASE WHEN c.certificate_date IS NULL     THEN 1 END)     AS total_pending
                         FROM calibration_record c
-                        LEFT JOIN machine m ON c.machine_code = m.machine_code
-                        LEFT JOIN department d ON m.department = d.department_code
+                        JOIN machine m ON c.machine_code = m.machine_code
+                        LEFT JOIN department d ON m.department = d.department_code::text
                         WHERE 1=1
                           %s
                           %s
                         GROUP BY
-                            COALESCE(d.department_code::text, m.department),
+                            m.department,
                             d.department, d.division
                         HAVING COUNT(*) > 0
                         ORDER BY department_name ASC
@@ -660,8 +659,8 @@ public class CalibrationService {
         };
     }
 
-    private Integer getIntValueNullable(Row row) {
-        Object v = row.get("year");
+    private Integer getIntValueNullable(io.r2dbc.spi.Row row, String col) {
+        Object v = row.get(col);
         return switch (v) {
             case Integer i -> i;
             case Number  n -> n.intValue();
