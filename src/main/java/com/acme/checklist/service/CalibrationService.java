@@ -6,6 +6,7 @@ import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.calibration.*;
+import io.r2dbc.spi.Row;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -268,7 +269,7 @@ public class CalibrationService {
                     return template.getDatabaseClient()
                             .sql(sql)
                             .map((row, meta) -> {
-                                Integer yr   = getIntValueNullable(row, "year");
+                                Integer yr   = getIntValueNullable(row);
                                 String  dc   = row.get("department_code", String.class);
                                 String  dn   = row.get("department_name", String.class);
                                 String  div  = row.get("division", String.class);
@@ -659,8 +660,8 @@ public class CalibrationService {
         };
     }
 
-    private Integer getIntValueNullable(io.r2dbc.spi.Row row, String col) {
-        Object v = row.get(col);
+    private Integer getIntValueNullable(Row row) {
+        Object v = row.get("year");
         return switch (v) {
             case Integer i -> i;
             case Number  n -> n.intValue();
