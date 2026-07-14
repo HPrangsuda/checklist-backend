@@ -31,10 +31,18 @@ public class MaintenanceController {
 
     @GetMapping("/get/page")
     public Mono<PagedResponse<MaintenanceResponseDTO>> getPage(
-            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String  keyword,
+            @RequestParam(required = false) Integer year,
+            @RequestParam(required = false) String  department,
+            @RequestParam(required = false) String  status,
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
-        return maintenanceService.getPage(keyword, index, size);
+        return maintenanceService.getPage(keyword, year, department, status, index, size);
+    }
+
+    @GetMapping("/filter-options")
+    public Mono<MaintenanceFilterOptionsDTO> getFilterOptions() {
+        return maintenanceService.getFilterOptions();
     }
 
     @GetMapping("/{id}")
@@ -48,8 +56,9 @@ public class MaintenanceController {
     }
 
     @GetMapping("/department-summary")
-    public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummary() {
-        return maintenanceService.getDepartmentSummaryWithRole();
+    public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummary(
+            @RequestParam(required = false) Integer year) {
+        return maintenanceService.getDepartmentSummaryWithRole(year);
     }
 
     @GetMapping("/monthly-summary")

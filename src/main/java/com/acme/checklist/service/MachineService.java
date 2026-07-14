@@ -778,8 +778,6 @@ public class MachineService {
         addIfNotNull(p, "reset_period",            dto.getResetPeriod());
         addIfNotNull(p, "responsible_person_name", dto.getResponsiblePersonName());
         addIfNotNull(p, "work_instruction",        dto.getWorkInstruction());
-        addIfNotNull(p, "image",                   dto.getImage());
-        addIfNotNull(p, "qr_code",                 dto.getQrCode());
         addIfNotNull(p, "register_id",             dto.getRegisterId());
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
@@ -803,6 +801,17 @@ public class MachineService {
         p.put(SqlIdentifier.quoted("responsible_person_id"), dto.getResponsiblePersonId());
         p.put(SqlIdentifier.quoted("supervisor_id"),         dto.getSupervisorId());
         p.put(SqlIdentifier.quoted("manager_id"),            dto.getManagerId());
+
+        // ── FIX: image & work_instruction — ALWAYS write ──────────────────────
+        // ใช้ put โดยตรง (ไม่ใช้ addIfNotNull) เพราะต้องการให้ null/empty ลบค่าเดิมใน DB ได้
+        // frontend ส่ง "" มาเมื่อลบไฟล์ทั้งหมด → แปลงเป็น null ก่อนบันทึก
+        String imageVal = dto.getImage();
+        p.put(SqlIdentifier.quoted("image"),
+                imageVal != null && imageVal.isBlank() ? null : imageVal);
+
+        String wiVal = dto.getWorkInstruction();
+        p.put(SqlIdentifier.quoted("work_instruction"),
+                wiVal != null && wiVal.isBlank() ? null : wiVal);
 
         return Update.from(p);
     }
