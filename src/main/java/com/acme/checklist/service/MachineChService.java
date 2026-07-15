@@ -12,7 +12,6 @@ import com.acme.checklist.payload.machineChecklist.MachineChResponseDTO;
 import com.acme.checklist.payload.machineChecklist.MachineChWithQuestionDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.Sort;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
@@ -36,9 +35,11 @@ public class MachineChService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
 
-    // =========================
-    // CREATE
-    // =========================
+    private static final String ACTIVE_STATUS_IN =
+            "'OPERATIONAL','NON-OPERATIONAL','UNDER MAINTENANCE'";
+
+    // ─── CREATE ───────────────────────────────────────────────────────────────
+
     public Mono<ApiResponse<Void>> create(MachineChDTO dto) {
         return validateData(dto)
                 .flatMap(validated -> {
@@ -49,21 +50,19 @@ public class MachineChService {
                 .onErrorResume(e -> {
                     log.error("Failed to create checklist", e);
                     if (e instanceof ResponseStatusException) return Mono.error(e);
-                    if (e instanceof ThrowException te) {
+                    if (e instanceof ThrowException te)
                         return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, te.getCode()));
-                    }
                     String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                     return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, msg));
                 });
     }
 
-    // =========================
-    // UPDATE
-    // =========================
+    // ─── UPDATE ───────────────────────────────────────────────────────────────
+
     public Mono<ApiResponse<Void>> update(MachineChDTO dto) {
-        if (dto.getId() == null) {
+        if (dto.getId() == null)
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "MC005"));
-        }
+
         return validateData(dto)
                 .flatMap(validated -> {
                     Update update = buildUpdateFromDTO(validated);
@@ -73,32 +72,27 @@ public class MachineChService {
                 .onErrorResume(e -> {
                     log.error("Failed to update checklist", e);
                     if (e instanceof ResponseStatusException) return Mono.error(e);
-                    if (e instanceof ThrowException te) {
+                    if (e instanceof ThrowException te)
                         return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, te.getCode()));
-                    }
                     String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                     return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, msg));
                 });
     }
 
-    // =========================
-    // DELETE
-    // =========================
+    // ─── DELETE ───────────────────────────────────────────────────────────────
+
     public Mono<ApiResponse<Void>> delete(List<Long> ids) {
         return commonService.deleteEntitiesByIds(
                 ids,
                 MachineChecklist.class,
-                "MC006",
-                "MC007",
-                "MC008",
+                "MC006", "MC007", "MC008",
                 MachineChecklist::getMachineCode,
                 names -> Mono.empty()
         );
     }
 
-    // =========================
-    // GET ALL (PAGED)
-    // =========================
+    // ─── GET ALL (PAGED) ──────────────────────────────────────────────────────
+
     public Mono<PagedResponse<MachineChResponseDTO>> getAllWithPage(String keyword, int index, int size) {
         Criteria criteria = Criteria.empty();
         if (StringUtils.hasText(keyword)) {
@@ -108,18 +102,14 @@ public class MachineChService {
                 .with(commonService.pageable(index, size, "created_at"));
         return commonService.executePagedQuery(
                 index, size, query, criteria,
-                MachineChecklist.class, this::convertMachineChListDTOs
-        );
+                MachineChecklist.class, this::convertMachineChListDTOs);
     }
 
-    // =========================
-    // GET BY MACHINE CODE (with questions joined)
-    // =========================
-    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getByMachineCode(String machineCode) {
-        Query query = Query.query(Criteria.where("machine_code").is(machineCode))
-                .sort(Sort.by(Sort.Direction.ASC, "id"));
+    // ─── GET BY MACHINE CODE ──────────────────────────────────────────────────
+    // ดึงเฉพาะ checklist ของ machine ที่ active (กรอง CANCELED ออก)
 
-        return template.select(query, MachineChecklist.class)
+    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getByMachineCode(String machineCode) {
+        return selectActiveOnly(machineCode, "")
                 .collectList()
                 .flatMap(this::enrichWithQuestions)
                 .map(items -> ListResponse.success("MC009", false, items))
@@ -129,16 +119,11 @@ public class MachineChService {
                 });
     }
 
-    // =========================
-    // GET GENERAL CHECKLIST
-    // =========================
-    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getGeneralChecklist(String machineCode) {
-        Query query = Query.query(
-                        Criteria.where("machine_code").is(machineCode)
-                                .and("reset_time").is("0 0 0 * * 1"))
-                .sort(Sort.by(Sort.Direction.ASC, "id"));
+    // ─── GET GENERAL CHECKLIST ────────────────────────────────────────────────
+    // reset_time = "0 0 0 * * 1" คือ weekly reset → แสดงเสมอไม่ขึ้นกับ check_status
 
-        return template.select(query, MachineChecklist.class)
+    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getGeneralChecklist(String machineCode) {
+        return selectActiveOnly(machineCode, "AND mc.reset_time = '0 0 0 * * 1'")
                 .collectList()
                 .flatMap(this::enrichWithQuestions)
                 .map(items -> ListResponse.success("MC009", false, items))
@@ -148,16 +133,11 @@ public class MachineChService {
                 });
     }
 
-    // =========================
-    // GET RESPONSIBLE CHECKLIST
-    // =========================
-    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getResponsibleChecklist(String machineCode) {
-        Query query = Query.query(
-                        Criteria.where("machine_code").is(machineCode)
-                                .and("check_status").is(false))
-                .sort(Sort.by(Sort.Direction.ASC, "id"));
+    // ─── GET RESPONSIBLE CHECKLIST ────────────────────────────────────────────
+    // ดึงเฉพาะ item ที่ยังไม่ได้ check (check_status = false)
 
-        return template.select(query, MachineChecklist.class)
+    public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getResponsibleChecklist(String machineCode) {
+        return selectActiveOnly(machineCode, "AND mc.check_status = false")
                 .collectList()
                 .flatMap(this::enrichWithQuestions)
                 .map(items -> ListResponse.success("MC009", false, items))
@@ -167,18 +147,16 @@ public class MachineChService {
                 });
     }
 
-    // =========================
-    // RESET STATUS
-    // =========================
+    // ─── RESET STATUS ─────────────────────────────────────────────────────────
+
     public Mono<ApiResponse<Void>> resetChecklistStatus(Long id) {
         return template.update(
                         Query.query(Criteria.where("id").is(id)),
                         Update.update("check_status", false),
                         MachineChecklist.class)
                 .flatMap(count -> {
-                    if (count == 0) {
+                    if (count == 0)
                         return Mono.just(ApiResponse.<Void>error("MC010", "Checklist item not found"));
-                    }
                     return Mono.just(ApiResponse.<Void>success("MC011"));
                 })
                 .onErrorResume(e -> {
@@ -187,30 +165,23 @@ public class MachineChService {
                 });
     }
 
-    // =========================
-    // VALIDATION
-    // =========================
+    // ─── VALIDATE ─────────────────────────────────────────────────────────────
+
     public Mono<MachineChDTO> validateData(MachineChDTO dto) {
-        if (!StringUtils.hasText(dto.getMachineCode())) {
-            return Mono.error(new ThrowException("MC003")); // machineCode required
-        }
-        if (dto.getQuestionId() == null) {
-            return Mono.error(new ThrowException("MC004")); // questionId required
-        }
-        if (dto.getIsChoice() == null) {
-            return Mono.error(new ThrowException("MC013")); // isChoice required
-        }
-        if (!StringUtils.hasText(dto.getResetTime())) {
-            return Mono.error(new ThrowException("MC014")); // resetTime required
-        }
+        if (!StringUtils.hasText(dto.getMachineCode()))
+            return Mono.error(new ThrowException("MC003"));
+        if (dto.getQuestionId() == null)
+            return Mono.error(new ThrowException("MC004"));
+        if (dto.getIsChoice() == null)
+            return Mono.error(new ThrowException("MC013"));
+        if (!StringUtils.hasText(dto.getResetTime()))
+            return Mono.error(new ThrowException("MC014"));
         return Mono.just(dto);
     }
 
-    // =========================
-    // MAPPER
-    // =========================
+    // ─── BUILD ────────────────────────────────────────────────────────────────
+
     public MachineChecklist buildFromDTO(MachineChDTO dto) {
-        // ไม่เซ็ต id เพื่อให้ DB sequence จัดการ (create)
         return MachineChecklist.builder()
                 .machineCode(dto.getMachineCode())
                 .questionId(dto.getQuestionId())
@@ -230,9 +201,56 @@ public class MachineChService {
         return Update.from(params);
     }
 
-    // =========================
-    // ENRICH WITH QUESTIONS
-    // =========================
+    // ─── PRIVATE: ACTIVE MACHINE FILTER ──────────────────────────────────────
+    /**
+     * ดึง MachineChecklist เฉพาะของ machine ที่ active (machine_status IN ACTIVE_STATUSES)
+     * กรณีมี machine_code ซ้ำ (เช่น CANCELED + OPERATIONAL) จะได้เฉพาะ rows ของ active machine
+     *
+     * @param machineCode  machine code ที่ต้องการ
+     * @param extraWhere   เงื่อนไขเพิ่มเติม เช่น "AND mc.check_status = false"
+     *                     ต้องขึ้นต้นด้วย AND หรือเป็น "" ถ้าไม่มีเงื่อนไขเพิ่ม
+     */
+    private Flux<MachineChecklist> selectActiveOnly(String machineCode, String extraWhere) {
+        String sql = """
+                SELECT mc.*
+                FROM machine_checklist mc
+                WHERE mc.machine_code = :code
+                  AND mc.id IN (
+                      SELECT mc2.id
+                      FROM machine_checklist mc2
+                      JOIN machine m ON mc2.machine_code = m.machine_code
+                      WHERE mc2.machine_code = :code
+                        AND m.machine_status IN (%s)
+                        AND m.id = (
+                            SELECT id FROM machine
+                            WHERE machine_code = :code
+                              AND machine_status IN (%s)
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                  )
+                %s
+                ORDER BY mc.id ASC
+                """.formatted(ACTIVE_STATUS_IN, ACTIVE_STATUS_IN, extraWhere);
+
+        return template.getDatabaseClient()
+                .sql(sql)
+                .bind("code", machineCode)
+                .map((row, meta) -> {
+                    MachineChecklist mc = new MachineChecklist();
+                    mc.setId(row.get("id", Long.class));
+                    mc.setMachineCode(row.get("machine_code", String.class));
+                    mc.setQuestionId(row.get("question_id", Long.class));
+                    mc.setIsChoice(row.get("is_choice", Boolean.class));
+                    mc.setCheckStatus(row.get("check_status", Boolean.class));
+                    mc.setResetTime(row.get("reset_time", String.class));
+                    return mc;
+                })
+                .all();
+    }
+
+    // ─── ENRICH WITH QUESTIONS ────────────────────────────────────────────────
+
     private Mono<List<MachineChWithQuestionDTO>> enrichWithQuestions(List<MachineChecklist> items) {
         if (items.isEmpty()) return Mono.just(List.of());
 
@@ -242,9 +260,8 @@ public class MachineChService {
                 .distinct()
                 .toList();
 
-        if (questionIds.isEmpty()) {
+        if (questionIds.isEmpty())
             return Mono.just(MachineChWithQuestionDTO.fromList(items, Map.of()));
-        }
 
         return template.select(
                         Query.query(Criteria.where("id").in(questionIds)),
@@ -258,9 +275,8 @@ public class MachineChService {
                 });
     }
 
-    // =========================
-    // CONVERT FOR PAGED
-    // =========================
+    // ─── CONVERT FOR PAGED ────────────────────────────────────────────────────
+
     private Flux<MachineChResponseDTO> convertMachineChListDTOs(List<MachineChecklist> list) {
         if (list.isEmpty()) return Flux.empty();
 
@@ -285,6 +301,8 @@ public class MachineChService {
                             ));
                 });
     }
+
+    // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private void addIfNotNull(Map<SqlIdentifier, Object> params, String field, Object value) {
         if (value != null) params.put(SqlIdentifier.quoted(field), value);
