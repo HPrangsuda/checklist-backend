@@ -6,7 +6,6 @@ import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.PagedResponse;
-import com.acme.checklist.payload.file.FileUploadDTO;
 import com.acme.checklist.payload.maintenance.*;
 import io.r2dbc.spi.Row;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +15,6 @@ import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -35,60 +33,15 @@ public class MaintenanceService {
 
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
-    private final ObjectMapper objectMapper;
-    private final FileStorageService fileStorageService;
 
     // ─── UPDATE ───────────────────────────────────────────────────────────────
 
-    public Mono<ApiResponse<Void>> update(String requestJson, List<FilePart> files) {
-        MaintenanceDTO dto;
-        try {
-            dto = objectMapper.readValue(requestJson, MaintenanceDTO.class);
-        } catch (Exception e) {
-            return Mono.just(ApiResponse.error("MS001", "Invalid request format"));
-        }
-
-        Mono<List<FileUploadDTO>> uploadedDtosMono = (files != null && !files.isEmpty())
-                ? Flux.fromIterable(files)
-                .flatMap(f -> fileStorageService.uploadFile(f, "maintenance"))
-                .collectList()
-                : Mono.just(List.of());
-
-        MaintenanceDTO finalDto = dto;
-        return uploadedDtosMono
-                .flatMap(uploadedDtos -> {
-                    if (!uploadedDtos.isEmpty()) {
-                        String existing = finalDto.getAttachment();
-                        List<String> newObjects = uploadedDtos.stream()
-                                .map(d -> {
-                                    String name = d.getFileName() != null ? d.getFileName().replace("\"", "\\\"") : "";
-                                    String url  = "/api/files/download/" + name;
-                                    String type = d.getFileType() != null ? d.getFileType().replace("\"", "\\\"") : "";
-                                    long   size = d.getFileSize() != null ? d.getFileSize() : 0L;
-                                    return "{\"fileName\":\"" + name + "\"," +
-                                            "\"fileUrl\":\"" + url + "\"," +
-                                            "\"fileType\":\"" + type + "\"," +
-                                            "\"fileSize\":" + size + "," +
-                                            "\"uploadedBy\":null}";
-                                })
-                                .toList();
-                        String extras = String.join(",", newObjects);
-                        if (existing != null && existing.trim().startsWith("[")) {
-                            String merged = existing.trim();
-                            merged = merged.equals("[]")
-                                    ? "[" + extras + "]"
-                                    : merged.substring(0, merged.lastIndexOf(']')) + "," + extras + "]";
-                            finalDto.setAttachment(merged);
-                        } else {
-                            finalDto.setAttachment("[" + extras + "]");
-                        }
-                    }
-                    return validateData(finalDto, true)
-                            .flatMap(validated -> {
-                                Update update = buildUpdateFromDTO(validated);
-                                return commonService.update(finalDto.getId(), update, MaintenanceRecord.class)
-                                        .then(Mono.just(ApiResponse.success("MS001")));
-                            });
+    public Mono<ApiResponse<Void>> update(MaintenanceDTO dto) {
+        return validateData(dto, true)
+                .flatMap(validated -> {
+                    Update update = buildUpdateFromDTO(validated);
+                    return commonService.update(dto.getId(), update, MaintenanceRecord.class)
+                            .then(Mono.just(ApiResponse.<Void>success("MS001")));
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to update the maintenance: {}", e.getMessage());
@@ -570,15 +523,18 @@ public class MaintenanceService {
     }
 
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
-        Update update = Update.update("attachment", dto.getAttachment());
-        if (dto.getDueDate()               != null) update = update.set("due_date",                dto.getDueDate());
-        if (dto.getPlanDate()              != null) update = update.set("plan_date",               dto.getPlanDate());
-        if (dto.getStartDate()             != null) update = update.set("start_date",              dto.getStartDate());
-        if (dto.getActualDate()            != null) update = update.set("actual_date",             dto.getActualDate());
-        if (dto.getStatus()                != null) update = update.set("status",                  dto.getStatus());
-        if (dto.getMaintenanceBy()         != null) update = update.set("maintenance_by",          dto.getMaintenanceBy());
-        if (dto.getNote()                  != null) update = update.set("note",                    dto.getNote());
+        Update update = Update.update("updated_at", java.time.LocalDateTime.now());
+
+        if (dto.getAttachment()             != null) update = update.set("attachment",             dto.getAttachment());
+        if (dto.getDueDate()                != null) update = update.set("due_date",               dto.getDueDate());
+        if (dto.getPlanDate()               != null) update = update.set("plan_date",              dto.getPlanDate());
+        if (dto.getStartDate()              != null) update = update.set("start_date",             dto.getStartDate());
+        if (dto.getActualDate()             != null) update = update.set("actual_date",            dto.getActualDate());
+        if (dto.getStatus()                 != null) update = update.set("status",                 dto.getStatus());
+        if (dto.getMaintenanceBy()          != null) update = update.set("maintenance_by",         dto.getMaintenanceBy());
+        if (dto.getNote()                   != null) update = update.set("note",                   dto.getNote());
         if (dto.getResponsibleMaintenance() != null) update = update.set("responsible_maintenance", dto.getResponsibleMaintenance());
+
         return update;
     }
 

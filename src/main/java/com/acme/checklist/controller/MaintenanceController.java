@@ -6,8 +6,6 @@ import com.acme.checklist.payload.maintenance.*;
 import com.acme.checklist.service.MaintenanceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.MediaType;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -22,11 +20,9 @@ public class MaintenanceController {
 
     private final MaintenanceService maintenanceService;
 
-    @PutMapping(value = "/update", consumes = {MediaType.MULTIPART_FORM_DATA_VALUE, MediaType.APPLICATION_JSON_VALUE})
-    public Mono<ApiResponse<Void>> update(
-            @RequestPart("request") String requestJson,
-            @RequestPart(value = "files", required = false) List<FilePart> files) {
-        return maintenanceService.update(requestJson, files);
+    @PutMapping("/update")
+    public Mono<ApiResponse<Void>> update(@RequestBody MaintenanceDTO dto) {
+        return maintenanceService.update(dto);
     }
 
     @GetMapping("/get/page")
