@@ -61,20 +61,12 @@ public class MachineService {
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
-    /**
-     * Returns true when the given machine_status means the machine is no longer
-     * in active service (CANCELED / TRANSFER / SCRAPPED / NOT FOUND / etc.).
-     */
     private boolean isNonActiveStatus(String status) {
         return status != null && !ACTIVE_STATUSES.contains(status);
     }
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
-    /**
-     * FIX: ส่ง id + machineCode กลับใน data field เพื่อให้ frontend ใช้ sync-to-lark
-     * Controller เปลี่ยน return type เป็น Mono<ApiResponse<Map<String,Object>>> แล้ว
-     */
     public Mono<ApiResponse<Map<String, Object>>> create(MachineDTO dto) {
         dto.setId(null);
         return validateData(dto, false)
@@ -85,7 +77,6 @@ public class MachineService {
                                     .flatMap(savedMachine -> createRelatedRecords(savedMachine, resolvedDTO)
                                             .then(Mono.just(savedMachine)))
                                     .flatMap(savedMachine ->
-                                            // แจ้งเตือน ADMIN ทุกคนที่ ACTIVE — non-blocking (ไม่ block response)
                                             notifyAdminsNewMachine(savedMachine)
                                                     .onErrorResume(e -> {
                                                         log.warn("Lark notify failed (non-blocking): {}", e.getMessage());
@@ -119,9 +110,6 @@ public class MachineService {
             tasks.add(createMaintenanceRecords(machine, dto.getMaintenanceList()).then());
 
         if (machine.getResponsiblePersonId() != null) {
-            // FIX: ตรวจสอบก่อนว่ามี open record อยู่แล้วหรือไม่
-            // แล้วค่อย insert เพื่อป้องกัน DuplicateKeyException
-            // ไม่ว่าจะเกิดจาก double-submit หรือ machine_code ซ้ำกัน
             Mono<Void> insertHistory = template
                     .exists(Query.query(
                                     Criteria.where("machine_code").is(machine.getMachineCode())
@@ -204,7 +192,6 @@ public class MachineService {
                             boolean nonActive     = isNonActiveStatus(newStatus);
                             boolean personChanged = newPersonId != null && !newPersonId.equals(oldPersonId);
 
-                            // ── Non-active status → force check_status = OUT OF SERVICE ──────────
                             if (nonActive) {
                                 v.setCheckStatus("OUT OF SERVICE");
                                 log.info("Machine {} set to non-active status '{}', forcing check_status=OUT OF SERVICE",
@@ -214,7 +201,6 @@ public class MachineService {
                             Mono<Void> updateMachine = commonService
                                     .update(machineDTO.getId(), buildUpdateFromDTO(v), Machine.class).then();
 
-                            // ── No history changes needed ─────────────────────────────────────────
                             if (!personChanged && !nonActive) {
                                 return updateMachine
                                         .then(Mono.just(ApiResponse.<Void>success("MS003")));
@@ -223,14 +209,12 @@ public class MachineService {
                             LocalDate today     = LocalDate.now();
                             LocalDate yesterday = today.minusDays(1);
 
-                            // ── Close the current open responsible history record ─────────────────
                             Mono<Void> closeOld = template.update(
                                     Query.query(Criteria.where("machine_code").is(existing.getMachineCode())
                                             .and("effective_to").isNull()),
                                     Update.update("effective_to", yesterday),
                                     ResponsibleHistory.class).then();
 
-                            // ── Insert new history only when person changes AND status stays active ─
                             Mono<Void> insertNew = Mono.empty();
                             if (personChanged && !nonActive) {
                                 ResponsibleHistory newHistory = ResponsibleHistory.builder()
@@ -242,7 +226,6 @@ public class MachineService {
                                 insertNew = template.insert(newHistory).then();
                             }
 
-                            // ── Recalculate KPI for affected persons ──────────────────────────────
                             Mono<Void> kpiOld = kpiService.recalculateKpiForPerson(oldPersonId);
                             Mono<Void> kpiNew = (personChanged && !nonActive)
                                     ? kpiService.recalculateKpiForPerson(newPersonId)
@@ -347,8 +330,7 @@ public class MachineService {
                                 index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
                     }
 
-                    Criteria baseCriteria = Criteria.where("machine_status")
-                            .in(ACTIVE_STATUSES);
+                    Criteria baseCriteria = Criteria.where("machine_status").in(ACTIVE_STATUSES);
                     baseCriteria = applyExtraFilters(baseCriteria, checkStatus, department, machineStatus, responsiblePersonName);
 
                     if (mine) {
@@ -663,14 +645,15 @@ public class MachineService {
     }
 
     // ─── GET BY MACHINE CODE ──────────────────────────────────────────────────
+    // กรองเฉพาะ OPERATIONAL เท่านั้น — ใช้สำหรับสแกน QR ก่อนบันทึก checklist
 
     public Mono<ApiResponse<Machine>> getByMachineCode(String machineCode) {
         return template.selectOne(
                         Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").in(ACTIVE_STATUSES)),
+                                .and("machine_status").is("OPERATIONAL")),
                         Machine.class)
                 .map(m -> ApiResponse.success("MS017", m))
-                .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Machine not found with machineCode: " + machineCode)))
+                .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Machine not found or not operational: " + machineCode)))
                 .onErrorResume(e -> Mono.just(ApiResponse.error("MS019", e.getMessage() != null ? e.getMessage() : "Unknown error")));
     }
 
@@ -772,7 +755,6 @@ public class MachineService {
         addIfNotNull(p, "department",              dto.getDepartment());
         addIfNotNull(p, "business_unit",           dto.getBusinessUnit());
         addIfNotNull(p, "machine_status",          dto.getMachineStatus());
-        // ── cancel_date & reason_cancel — always write so they can be cleared ──
         p.put(SqlIdentifier.quoted("cancel_date"),   dto.getCancelDate());
         p.put(SqlIdentifier.quoted("reason_cancel"), dto.getReasonCancel());
         addIfNotNull(p, "machine_group_id",        dto.getMachineGroupId());
@@ -786,14 +768,10 @@ public class MachineService {
         addIfNotNull(p, "note",                    dto.getNote());
         addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
 
-        // ── check_status — always write (may be "OUT OF SERVICE" for non-active) ──
-        if (dto.getCheckStatus() != null) {
+        if (dto.getCheckStatus() != null)
             p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
-        }
 
-        // ── updated_at — stamp every update explicitly ──────────────────────────
         p.put(SqlIdentifier.quoted("updated_at"), java.time.LocalDateTime.now());
-
         p.put(SqlIdentifier.quoted("warranty_note"),
                 "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
         p.put(SqlIdentifier.quoted("warranty_expire_date"),
@@ -805,9 +783,6 @@ public class MachineService {
         p.put(SqlIdentifier.quoted("supervisor_id"),         dto.getSupervisorId());
         p.put(SqlIdentifier.quoted("manager_id"),            dto.getManagerId());
 
-        // ── FIX: image & work_instruction — ALWAYS write ──────────────────────
-        // ใช้ put โดยตรง (ไม่ใช้ addIfNotNull) เพราะต้องการให้ null/empty ลบค่าเดิมใน DB ได้
-        // frontend ส่ง "" มาเมื่อลบไฟล์ทั้งหมด → แปลงเป็น null ก่อนบันทึก
         String imageVal = dto.getImage();
         p.put(SqlIdentifier.quoted("image"),
                 imageVal != null && imageVal.isBlank() ? null : imageVal);
@@ -835,9 +810,7 @@ public class MachineService {
 
     private String buildDeptLabel(String deptName, String division) {
         if (deptName == null) return "";
-        if (StringUtils.hasText(division)) {
-            return deptName + " - " + division.trim();
-        }
+        if (StringUtils.hasText(division)) return deptName + " - " + division.trim();
         return deptName;
     }
 
@@ -910,7 +883,6 @@ public class MachineService {
             for (int x = 0; x < qrSize; x++)
                 for (int y = 0; y < qrSize; y++)
                     if (bitMatrix.get(x, y)) g.fillRect(x, y, 1, 1);
-
             Font font = new Font(Font.SANS_SERIF, Font.BOLD, 12);
             g.setFont(font);
             FontMetrics fm = g.getFontMetrics();
@@ -929,10 +901,6 @@ public class MachineService {
         if (value != null) params.put(SqlIdentifier.quoted(fieldName), value);
     }
 
-    /**
-     * ดึง ADMIN ที่ ACTIVE ทุกคน → หา open_id จาก mobile → ส่ง Lark card แจ้งเตือน
-     * เครื่องจักรใหม่ พร้อม machine_code, machine_name, responsible_name
-     */
     private Mono<Void> notifyAdminsNewMachine(Machine machine) {
         return template.select(
                         Query.query(
@@ -945,18 +913,13 @@ public class MachineService {
                         log.info("No active ADMIN found, skip Lark notification");
                         return Mono.empty();
                     }
-
-                    // รวม responsible person เข้าไปด้วย (ถ้ายังไม่อยู่ใน admins)
                     List<Member> targets = new ArrayList<>(admins);
-
-                    // เก็บเฉพาะ member ที่มี mobiles
                     List<String> mobiles = targets.stream()
                             .map(Member::getMobiles)
                             .filter(m -> m != null && !m.isBlank())
                             .distinct()
                             .toList();
 
-                    // ดึง responsible person แยก (เพิ่มเข้า mobiles ถ้ายังไม่มี)
                     Mono<List<String>> mobilesMono = machine.getResponsiblePersonId() == null
                             ? Mono.just(mobiles)
                             : template.selectOne(
@@ -978,19 +941,16 @@ public class MachineService {
                             return Mono.empty();
                         }
                         return larkService.batchGetOpenIdsByMobile(allMobiles)
-                                .flatMap(openIdMap -> {
-                                    return Flux.fromIterable(openIdMap.values())
-                                            .flatMap(openId -> larkService.sendMachineNotification(openId, machine)
-                                                    .onErrorResume(e -> {
-                                                        log.warn("Failed to notify openId={}: {}", openId, e.getMessage());
-                                                        return Mono.empty();
-                                                    }))
-                                            .then();
-                                });
+                                .flatMap(openIdMap -> Flux.fromIterable(openIdMap.values())
+                                        .flatMap(openId -> larkService.sendMachineNotification(openId, machine)
+                                                .onErrorResume(e -> {
+                                                    log.warn("Failed to notify openId={}: {}", openId, e.getMessage());
+                                                    return Mono.empty();
+                                                }))
+                                        .then());
                     });
                 });
     }
-
 
     private Mono<Void> postDeleteTask(List<String> names, Long memberId, Long departmentId) {
         return Mono.empty();
