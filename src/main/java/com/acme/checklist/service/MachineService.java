@@ -665,7 +665,10 @@ public class MachineService {
     // ─── GET BY MACHINE CODE ──────────────────────────────────────────────────
 
     public Mono<ApiResponse<Machine>> getByMachineCode(String machineCode) {
-        return template.selectOne(Query.query(Criteria.where("machine_code").is(machineCode)), Machine.class)
+        return template.selectOne(
+                        Query.query(Criteria.where("machine_code").is(machineCode)
+                                .and("machine_status").in(ACTIVE_STATUSES)),
+                        Machine.class)
                 .map(m -> ApiResponse.success("MS017", m))
                 .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Machine not found with machineCode: " + machineCode)))
                 .onErrorResume(e -> Mono.just(ApiResponse.error("MS019", e.getMessage() != null ? e.getMessage() : "Unknown error")));
