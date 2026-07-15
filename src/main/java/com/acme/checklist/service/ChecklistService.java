@@ -53,6 +53,7 @@ public class ChecklistService {
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Void>> create(String requestJson, FilePart file) {
+        log.info("create — requestJson: {}", requestJson); // เพิ่มบรรทัดนี้
         ChecklistDTO dto;
         try {
             dto = objectMapper.readValue(requestJson, ChecklistDTO.class);
