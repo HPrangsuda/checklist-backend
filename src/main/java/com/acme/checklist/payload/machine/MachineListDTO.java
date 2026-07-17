@@ -17,6 +17,8 @@ public class MachineListDTO {
     private String checkStatus;
     private String responsiblePersonName;
     private String qrCode;
+    private String image;
+    private String hasWarranty;
 
     public static MachineListDTO from(Machine machine, String deptName) {
         return MachineListDTO.builder()
@@ -29,6 +31,8 @@ public class MachineListDTO {
                 .checkStatus(machine.getCheckStatus())
                 .responsiblePersonName(machine.getResponsiblePersonName())
                 .qrCode(machine.getQrCode())
+                .image(machine.getImage())
+                .hasWarranty(machine.getHasWarranty())
                 .build();
     }
 }
