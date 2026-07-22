@@ -56,7 +56,6 @@ public class MachineService {
     private final KpiService kpiService;
     private final LarkService larkService;
 
-    // Active statuses — machines still in service
     private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
@@ -308,8 +307,6 @@ public class MachineService {
                 });
     }
 
-    // ─── GET WITH ROLE ────────────────────────────────────────────────────────
-
     public Mono<PagedResponse<MachineListDTO>> getByRole(
             String keyword, int index, int size, boolean mine,
             String checkStatus, String department,
@@ -321,37 +318,86 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    if (role.equals("ADMIN")) {
-                        Criteria criteria = buildKeywordCriteria(keyword);
-                        criteria = applyExtraFilters(criteria, checkStatus, department, machineStatus, responsiblePersonName);
-                        Query query = Query.query(criteria)
-                                .with(commonService.pageable(index, size, "created_at"));
-                        return commonService.executePagedQuery(
-                                index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
-                    }
+                    // 1. สร้าง base criteria ตาม role
+                    Criteria base = buildRoleBaseCriteria(role, memberId, mine);
 
-                    Criteria baseCriteria = Criteria.where("machine_status").in(ACTIVE_STATUSES);
-                    baseCriteria = applyExtraFilters(baseCriteria, checkStatus, department, machineStatus, responsiblePersonName);
+                    // 2. ต่อ keyword + filters เข้ากับ base criteria เดิม
+                    Criteria finalCriteria = applyKeywordAndFilters(
+                            base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
 
-                    if (mine) {
-                        return fetchWithRoleAndKeyword(
-                                baseCriteria.and(Criteria.where("responsible_person_id").is(memberId)),
-                                keyword, index, size);
-                    }
+                    Query query = Query.query(finalCriteria)
+                            .with(commonService.pageable(index, size, "created_at"));
 
-                    Criteria roleCriteria = switch (role) {
-                        case "MANAGER" -> baseCriteria.and(
-                                Criteria.where("responsible_person_id").is(memberId)
-                                        .or("manager_id").is(memberId));
-                        case "SUPERVISOR" -> baseCriteria.and(
-                                Criteria.where("responsible_person_id").is(memberId)
-                                        .or("supervisor_id").is(memberId));
-                        default -> baseCriteria.and(
-                                Criteria.where("responsible_person_id").is(memberId));
-                    };
-
-                    return fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
+                    return commonService.executePagedQuery(
+                            index, size, query, finalCriteria, Machine.class, this::convertMachineListDTOs);
                 });
+    }
+
+    // ─── BASE CRITERIA ตาม role ───────────────────────────────────────────────
+
+    private Criteria buildRoleBaseCriteria(String role, Long memberId, boolean mine) {
+        return switch (role) {
+            // ADMIN: เห็นทุก record ไม่กรอง status
+            case "ADMIN" -> Criteria.empty();
+
+            // MANAGER: กรอง active status + สิทธิตาม mine
+            case "MANAGER" -> {
+                Criteria active = Criteria.where("machine_status").in(ACTIVE_STATUSES);
+                yield mine
+                        ? active.and(Criteria.where("responsible_person_id").is(memberId))
+                        : active.and(
+                        Criteria.where("responsible_person_id").is(memberId)
+                                .or("manager_id").is(memberId));
+            }
+
+            // SUPERVISOR: กรอง active status + สิทธิตาม mine
+            case "SUPERVISOR" -> {
+                Criteria active = Criteria.where("machine_status").in(ACTIVE_STATUSES);
+                yield mine
+                        ? active.and(Criteria.where("responsible_person_id").is(memberId))
+                        : active.and(
+                        Criteria.where("responsible_person_id").is(memberId)
+                                .or("supervisor_id").is(memberId));
+            }
+
+            // USER (default): เห็นเฉพาะของตัวเอง + active status เสมอ
+            default -> Criteria.where("machine_status").in(ACTIVE_STATUSES)
+                    .and(Criteria.where("responsible_person_id").is(memberId));
+        };
+    }
+
+    // ─── ต่อ keyword + filters เข้ากับ criteria ──────────────────────────────
+
+    private Criteria applyKeywordAndFilters(
+            Criteria base,
+            String keyword,
+            String checkStatus,
+            String department,
+            String machineStatus,
+            String responsiblePersonName) {
+
+        Criteria criteria = base;
+
+        // keyword: ค้นหาใน machine_name, machine_code, responsible_person_name
+        if (StringUtils.hasText(keyword)) {
+            String kw = "%" + keyword.trim() + "%";
+            criteria = criteria.and(
+                    Criteria.where("machine_name").like(kw).ignoreCase(true)
+                            .or("machine_code").like(kw).ignoreCase(true)
+                            .or("responsible_person_name").like(kw).ignoreCase(true));
+        }
+
+        // filters: ต่อทีละตัว ไม่สร้าง criteria ใหม่
+        if (StringUtils.hasText(department))
+            criteria = criteria.and(Criteria.where("department").is(department));
+        if (StringUtils.hasText(machineStatus))
+            criteria = criteria.and(Criteria.where("machine_status").is(machineStatus));
+        if (StringUtils.hasText(checkStatus))
+            criteria = criteria.and(Criteria.where("check_status").is(checkStatus));
+        if (StringUtils.hasText(responsiblePersonName))
+            criteria = criteria.and(Criteria.where("responsible_person_name").is(responsiblePersonName));
+
+        return criteria;
     }
 
     // ─── FILTER OPTIONS ───────────────────────────────────────────────────────
@@ -438,41 +484,6 @@ public class MachineService {
                     log.error("Failed to fetch filter options: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS041", e.getMessage()));
                 });
-    }
-
-    // ─── APPLY EXTRA FILTERS ──────────────────────────────────────────────────
-
-    private Criteria applyExtraFilters(
-            Criteria criteria,
-            String checkStatus,
-            String department,
-            String machineStatus,
-            String responsiblePersonName) {
-
-        if (StringUtils.hasText(department))
-            criteria = criteria.and(Criteria.where("department").is(department));
-        if (StringUtils.hasText(machineStatus))
-            criteria = criteria.and(Criteria.where("machine_status").is(machineStatus));
-        if (StringUtils.hasText(checkStatus))
-            criteria = criteria.and(Criteria.where("check_status").is(checkStatus));
-        if (StringUtils.hasText(responsiblePersonName))
-            criteria = criteria.and(Criteria.where("responsible_person_name").is(responsiblePersonName));
-
-        return criteria;
-    }
-
-    private Mono<PagedResponse<MachineListDTO>> fetchWithRoleAndKeyword(
-            Criteria roleCriteria, String keyword, int index, int size) {
-        Criteria criteria = roleCriteria;
-        if (StringUtils.hasText(keyword)) {
-            String kw = "%" + keyword + "%";
-            criteria = roleCriteria.and(
-                    Criteria.where("machine_name").like(kw).ignoreCase(true)
-                            .or("machine_code").like(kw).ignoreCase(true)
-                            .or("responsible_person_name").like(kw).ignoreCase(true));
-        }
-        Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
-        return commonService.executePagedQuery(index, size, query, criteria, Machine.class, this::convertMachineListDTOs);
     }
 
     // ─── DEPARTMENT SUMMARY WITH ROLE ─────────────────────────────────────────
@@ -645,7 +656,6 @@ public class MachineService {
     }
 
     // ─── GET BY MACHINE CODE ──────────────────────────────────────────────────
-    // กรองเฉพาะ OPERATIONAL เท่านั้น — ใช้สำหรับสแกน QR ก่อนบันทึก checklist
 
     public Mono<ApiResponse<Machine>> getByMachineCode(String machineCode) {
         return template.selectOne(
@@ -830,16 +840,6 @@ public class MachineService {
                 .defaultIfEmpty(dto);
     }
 
-    private Criteria buildKeywordCriteria(String keyword) {
-        if (StringUtils.hasText(keyword)) {
-            String kw = "%" + keyword + "%";
-            return Criteria.where("machine_name").like(kw).ignoreCase(true)
-                    .or("machine_code").like(kw).ignoreCase(true)
-                    .or("responsible_person_name").like(kw).ignoreCase(true);
-        }
-        return Criteria.empty();
-    }
-
     private Flux<MachineListDTO> convertMachineListDTOs(List<Machine> machines) {
         List<String> codes = machines.stream()
                 .map(Machine::getDepartment)
@@ -855,10 +855,13 @@ public class MachineService {
         return template.select(
                         Query.query(Criteria.where("department_code").in(codes)),
                         Department.class)
-                .collectMap(Department::getDepartmentCode, dept -> buildDeptLabel(dept.getDepartment(), dept.getDivision()))
+                .collectMap(Department::getDepartmentCode,
+                        dept -> buildDeptLabel(dept.getDepartment(), dept.getDivision()))
                 .flatMapMany(deptMap -> Flux.fromIterable(machines)
                         .map(machine -> {
-                            String label = deptMap.getOrDefault(machine.getDepartment(), machine.getDepartment() != null ? machine.getDepartment() : "");
+                            String label = deptMap.getOrDefault(
+                                    machine.getDepartment(),
+                                    machine.getDepartment() != null ? machine.getDepartment() : "");
                             return MachineListDTO.from(machine, label);
                         }));
     }
@@ -875,7 +878,7 @@ public class MachineService {
             BitMatrix bitMatrix = new QRCodeWriter().encode(qrContent, BarcodeFormat.QR_CODE, qrSize, qrSize);
             BufferedImage img = new BufferedImage(qrSize, totalHeight, BufferedImage.TYPE_INT_RGB);
             Graphics2D g = img.createGraphics();
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,      RenderingHints.VALUE_ANTIALIAS_ON);
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
             g.setColor(Color.WHITE);
             g.fillRect(0, 0, qrSize, totalHeight);
@@ -886,7 +889,8 @@ public class MachineService {
             Font font = new Font(Font.SANS_SERIF, Font.BOLD, 12);
             g.setFont(font);
             FontMetrics fm = g.getFontMetrics();
-            g.drawString(machineCode, (qrSize - fm.stringWidth(machineCode)) / 2,
+            g.drawString(machineCode,
+                    (qrSize - fm.stringWidth(machineCode)) / 2,
                     qrSize + (textAreaHeight / 2) + (fm.getAscent() / 2));
             g.dispose();
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -959,8 +963,8 @@ public class MachineService {
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object v = row.get(columnName);
         return switch (v) {
-            case Long l    -> l;
-            case Number n  -> n.longValue();
+            case Long l   -> l;
+            case Number n -> n.longValue();
             case null, default -> 0L;
         };
     }
