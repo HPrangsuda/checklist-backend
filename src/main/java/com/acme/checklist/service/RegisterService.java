@@ -263,27 +263,28 @@ public class RegisterService {
     // ─── LARK NOTIFICATION ────────────────────────────────────────────────────
 
     private Mono<Void> sendLarkNotificationToMember(RegisterRequest saved) {
-        List<Long> targetMemberIds = List.of(1L, 3L, 99L);
-
-        String inClause = targetMemberIds.stream()
-                .map(String::valueOf)
-                .collect(Collectors.joining(", "));
-
-        return template.getDatabaseClient()
-                .sql("SELECT id, first_name, last_name, mobiles FROM member WHERE id IN (" + inClause + ")")
-                .fetch().all()
+        return template.select(
+                        Query.query(
+                                Criteria.where("role_type").is("ADMIN")
+                                        .and("status").is("ACTIVE")),
+                        Member.class)
                 .collectList()
-                .flatMap(rows -> {
-                    List<String> rawMobiles = rows.stream()
-                            .map(row -> row.get("mobiles"))
-                            .filter(v -> v != null && !v.toString().isBlank())
-                            .map(Object::toString)
+                .flatMap(admins -> {
+                    if (admins.isEmpty()) {
+                        log.warn("No active ADMIN found, skip Lark notification");
+                        return Mono.<Void>empty();
+                    }
+
+                    List<String> rawMobiles = admins.stream()
+                            .map(Member::getMobiles)
+                            .filter(m -> m != null && !m.isBlank())
+                            .distinct()
                             .toList();
 
-                    log.info("Raw mobiles for ids={}: {}", targetMemberIds, rawMobiles);
+                    log.info("Raw mobiles for ADMIN role: {}", rawMobiles);
 
                     if (rawMobiles.isEmpty()) {
-                        log.warn("No mobile found for member ids={}", targetMemberIds);
+                        log.warn("No mobile found for ADMIN members");
                         return Mono.<Void>empty();
                     }
 
