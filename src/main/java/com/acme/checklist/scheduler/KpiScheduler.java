@@ -30,7 +30,6 @@ public class KpiScheduler {
     private final KpiService           kpiService;
 
     private static final ZoneId   BKK         = ZoneId.of("Asia/Bangkok");
-    private static final String   WEEKLY_CRON = "0 0 0 * * 1";
 
     // =========================================================================
     //  1. สร้าง KPI ต้นเดือน
@@ -82,7 +81,7 @@ public class KpiScheduler {
 
                                     return template.selectOne(
                                                     Query.query(Criteria.where("id").is(memberId)
-                                                            .and("status").not("INACTIVE")),
+                                                            .and("status").is("ACTIVE")),
                                                     Member.class)
                                             .doOnSuccess(m -> {
                                                 if (m == null)

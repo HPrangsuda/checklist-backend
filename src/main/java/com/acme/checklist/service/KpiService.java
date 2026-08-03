@@ -31,7 +31,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.Objects;
 
 // ─── KpiService.java ──────────────────────────────────────────────────────────
@@ -78,14 +77,6 @@ public class KpiService {
     //  RECALCULATE KPI FOR PERSON  (trigger ทันทีหลัง submit checklist)
     // =========================================================================
 
-    /**
-     * Recalculate ทั้ง check_all และ checked สำหรับ member คนเดียว
-     *
-     * check_all  = จำนวนครั้งที่ควร submit ในเดือนนี้ (คำนวณจาก responsible_history + friday count)
-     * checked    = จำนวนครั้งที่ submit จริง (นับจาก checklist_record recheck=true)
-     *
-     * เรียกจาก ChecklistService.saveAsResponsiblePending() ทันทีหลัง save record สำเร็จ
-     */
     public Mono<Void> recalculateKpiForPerson(Long memberId) {
         if (memberId == null) return Mono.empty();
 
@@ -190,8 +181,6 @@ public class KpiService {
                                 return template.update(kpi).then();
                             })
                             .switchIfEmpty(Mono.defer(() -> {
-                                // ยังไม่มี row → insert ใหม่
-                                // (ปกติ scheduler วันที่ 1 จะสร้างให้แล้ว แต่ป้องกันกรณี edge case)
                                 if (newCheckAll == 0) {
                                     log.warn("[KPI] Skip insert for memberId={} — checkAll=0", memberId);
                                     return Mono.empty();
@@ -278,9 +267,8 @@ public class KpiService {
                     LocalDate lastFriday  = getLastFridayOfMonth(ym);
                     LocalDate start       = firstFriday.with(DayOfWeek.MONDAY);
 
-                    // ใช้ BKK timezone ให้ตรงกับ timezone ที่ระบบใช้ทั่วไป
                     Instant startInstant = start.atStartOfDay(BKK).toInstant();
-                    Instant endInstant   = lastFriday.atTime(23, 59, 59).atZone(BKK).toInstant();
+                    Instant endInstant = lastFriday.atTime(15, 0, 0).atZone(BKK).toInstant();
 
                     Criteria criteria = Criteria
                             .where("created_by").is(kpi.getMemberId())
