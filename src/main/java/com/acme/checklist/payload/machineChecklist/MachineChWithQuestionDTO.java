@@ -34,7 +34,7 @@ public class MachineChWithQuestionDTO {
         return MachineChWithQuestionDTO.builder()
                 .id(item.getId())
                 .machineCode(item.getMachineCode())
-                .isChoice(item.getIsChoice())
+                .isChoice(q != null ? q.getIsChoice() : null)
                 .checkStatus(item.getCheckStatus())
                 .resetTime(item.getResetTime())
                 .question(q != null ? QuestionSummaryDTO.from(q) : null)

@@ -22,9 +22,6 @@ public class MachineChecklist extends DataAudit {
     @Column("question_id")
     private Long questionId;
 
-    @Column("is_choice")
-    private Boolean isChoice;
-
     @Column("check_status")
     private Boolean checkStatus;
 

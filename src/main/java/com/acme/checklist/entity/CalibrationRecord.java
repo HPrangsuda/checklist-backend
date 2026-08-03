@@ -86,4 +86,10 @@ public class CalibrationRecord extends DataAudit {
 
     @Column("reason_not_pass")
     private String reasonNotPass;
+
+    @Column("is_canceled")
+    private Boolean isCanceled = false;
+
+    @Column("canceled_at")
+    private LocalDate canceledAt;
 }

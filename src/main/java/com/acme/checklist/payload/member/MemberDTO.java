@@ -5,9 +5,9 @@ import lombok.Data;
 
 @Data
 public class MemberDTO {
+
     private Long id;
     private String employeeId;
-    private String departmentId;
     private String firstName;
     private String lastName;
     private String avatarKey;
@@ -15,6 +15,7 @@ public class MemberDTO {
     private String mobiles;
     private String userName;
     private String password;
+    private String departmentId;
     private RoleType roleType;
     private Long supervisor;
     private Long manager;

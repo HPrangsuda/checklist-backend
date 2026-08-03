@@ -165,6 +165,38 @@ public class LarkService {
                 machineCode, machineName, responsibleName);
     }
 
+    // update machine
+    public Mono<Void> sendMachineUpdateNotification(String openId, Machine machine) {
+        String cardJson = buildMachineUpdateCardJson(machine);
+        return sendCardMessage(openId, cardJson);
+    }
+
+    private String buildMachineUpdateCardJson(Machine machine) {
+        String machineCode     = machine.getMachineCode()           != null ? machine.getMachineCode()           : "-";
+        String machineName     = machine.getMachineName()           != null ? machine.getMachineName()           : "-";
+        String machineStatus   = machine.getMachineStatus()         != null ? machine.getMachineStatus()         : "-";
+        String responsibleName = machine.getResponsiblePersonName() != null ? machine.getResponsiblePersonName() : "-";
+
+        return String.format(
+                "{"
+                        + "\"config\":{\"wide_screen_mode\":true},"
+                        + "\"header\":{"
+                        +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"อัปเดตข้อมูลเครื่องจักร\"},"
+                        +   "\"template\":\"orange\""
+                        + "},"
+                        + "\"elements\":["
+                        +   "{\"tag\":\"div\",\"fields\":["
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n%s\"}},"
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n%s\"}}"
+                        +   "]},"
+                        +   "{\"tag\":\"div\",\"fields\":["
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**สถานะเครื่องจักร**\\n%s\"}},"
+                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n%s\"}}"
+                        +   "]}"
+                        + "]}",
+                machineCode, machineName, machineStatus, responsibleName);
+    }
+
     // ==================== Machine Bitable ====================
 
     public void updateRecord(String recordId, Map<String, Object> fields) throws Exception {

@@ -75,7 +75,7 @@ public class ChecklistScheduler {
 
     // ─── AUTO SAVE WEEKLY ─────────────────────────────────────────────────────
 
-    @Scheduled(cron = "0 59 23 * * FRI", zone = "Asia/Bangkok")
+    @Scheduled(cron = "0 0 15 * * FRI", zone = "Asia/Bangkok")
     public void autoSaveWeeklyChecklistRecords() {
         LocalDate today  = LocalDate.now(ZONE);
         LocalDate monday = today.with(DayOfWeek.MONDAY);
@@ -83,8 +83,6 @@ public class ChecklistScheduler {
 
         Instant startOfWeek = monday.atStartOfDay(ZONE).toInstant();
         Instant endOfWeek   = friday.atTime(LocalTime.MAX).atZone(ZONE).toInstant();
-
-        log.info("[CHECKLIST-AUTO] Weekly run — week {} ~ {}", monday, friday);
 
         template.select(
                         Query.query(

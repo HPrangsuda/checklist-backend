@@ -50,15 +50,18 @@ public class ChecklistService {
 
     private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
 
-    // ─── CREATE ───────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  CREATE
+    // =========================================================================
 
     public Mono<ApiResponse<Void>> create(String requestJson, FilePart file) {
-        log.info("create — requestJson: {}", requestJson); // เพิ่มบรรทัดนี้
+        log.info("[CHECKLIST] create — requestJson: {}", requestJson);
+
         ChecklistDTO dto;
         try {
             dto = objectMapper.readValue(requestJson, ChecklistDTO.class);
         } catch (Exception e) {
-            log.error("Parse error: {}", e.getMessage());
+            log.error("[CHECKLIST] Parse error: {}", e.getMessage());
             return Mono.just(ApiResponse.error("MS002", "Invalid request format"));
         }
 
@@ -71,14 +74,17 @@ public class ChecklistService {
             if (!imageName.isEmpty()) finalDto.setImage(imageName);
             return validateData(finalDto).flatMap(this::processSave);
         }).onErrorResume(e -> {
-            log.error("Failed to create the checklist: {}", e.getMessage(), e);
+            log.error("[CHECKLIST] Failed to create: {}", e.getMessage(), e);
             return Mono.just(ApiResponse.error("MS002", e.getMessage()));
         });
     }
 
+    // ─── PROCESS SAVE ─────────────────────────────────────────────────────────
+
     private Mono<ApiResponse<Void>> processSave(ChecklistDTO dto) {
         dto.setCheckType("GENERAL");
 
+        // ── ค้นหา Machine ด้วย id หรือ code ──────────────────────────────────
         Mono<Machine> machineMono = (dto.getMachineId() != null)
                 ? template.selectOne(
                 Query.query(Criteria.where("id").is(dto.getMachineId())
@@ -94,6 +100,7 @@ public class ChecklistService {
                         + (dto.getMachineId() != null ? dto.getMachineId() : dto.getMachineCode()))))
                 .flatMap(machine -> {
                     dto.setMachineId(machine.getId());
+
                     return ReactiveSecurityContextHolder.getContext()
                             .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                             .flatMap(principal -> {
@@ -103,100 +110,104 @@ public class ChecklistService {
                                 boolean isResponsible = Objects.equals(principal.memberId(), machine.getResponsiblePersonId());
                                 boolean isPending     = "PENDING".equals(machine.getCheckStatus());
 
-                                log.info("isWeekend: {}, isResponsible: {}, isPending: {}", isWeekend, isResponsible, isPending);
-                                log.info("principal.memberId: {}, machine.getResponsiblePersonId: {}",
+                                log.info("[CHECKLIST] isWeekend={} isResponsible={} isPending={}", isWeekend, isResponsible, isPending);
+                                log.info("[CHECKLIST] principal.memberId={} machine.responsiblePersonId={}",
                                         principal.memberId(), machine.getResponsiblePersonId());
-                                log.info("machine.getCheckStatus: {}", machine.getCheckStatus());
+                                log.info("[CHECKLIST] machine.checkStatus={}", machine.getCheckStatus());
 
                                 ChecklistRecord record = buildFromDTO(dto);
 
                                 if (isResponsible && isPending && !isWeekend) {
-                                    // ── Responsible person submitting on a weekday with PENDING status ──
-                                    if (machine.getSupervisorId() != null) {
-                                        record.setChecklistStatus("PENDING SUPERVISOR");
-                                    } else {
-                                        record.setChecklistStatus("PENDING MANAGER");
-                                    }
-                                    record.setRecheck(true);
-
-                                    List<Long> checklistIds = parseChecklistIds(dto.getMachineChecklist());
-
-                                    // Set true เฉพาะ row ที่ reset_time != "0 0 0 * * 1"
-                                    Mono<Void> updateChecklistItems = template.select(
-                                                    Query.query(Criteria.where("id").in(checklistIds)
-                                                            .and("reset_time").not("0 0 0 * * 1")),
-                                                    MachineChecklist.class)
-                                            .map(MachineChecklist::getId)
-                                            .collectList()
-                                            .flatMap(filteredIds -> {
-                                                if (filteredIds.isEmpty()) return Mono.<Void>empty();
-                                                return Flux.fromIterable(filteredIds)
-                                                        .flatMap(id -> template.update(MachineChecklist.class)
-                                                                .matching(Query.query(Criteria.where("id").is(id)))
-                                                                .apply(Update.update("check_status", true)))
-                                                        .then();
-                                            });
-
-                                    Mono<Void> updateMachine = template.update(Machine.class)
-                                            .matching(Query.query(Criteria.where("id").is(machine.getId())))
-                                            .apply(Update.update("check_status", record.getChecklistStatus())
-                                                    .set("machine_status", dto.getMachineStatus()))
-                                            .then();
-
-                                    return updateChecklistItems
-                                            .then(commonService.save(record, ChecklistRecord.class))
-                                            .flatMap(saved -> updateMachine
-                                                    .then(updateKpi(principal.memberId()))
-                                                    .then(Mono.just(ApiResponse.<Void>success("MS001"))));
-
+                                    // ── Responsible person ส่งในวันทำงาน สถานะ PENDING ──────────
+                                    return saveAsResponsiblePending(dto, machine, record, principal.memberId());
                                 } else {
-                                    // ── Non-responsible, already checked, or weekend ──
-                                    record.setChecklistStatus("COMPLETED");
-                                    record.setRecheck(false);
-
-                                    Mono<Void> updateMachine;
-                                    if (!isResponsible) {
-                                        // ไม่ใช่ responsible → อัปเดตแค่ machine_status ไม่แตะ check_status
-                                        updateMachine = template.update(Machine.class)
-                                                .matching(Query.query(Criteria.where("id").is(machine.getId())))
-                                                .apply(Update.update("machine_status", dto.getMachineStatus()))
-                                                .then();
-                                    } else {
-                                        // isWeekend หรือ !isPending → อัปเดตทั้งคู่
-                                        updateMachine = template.update(Machine.class)
-                                                .matching(Query.query(Criteria.where("id").is(machine.getId())))
-                                                .apply(Update.update("machine_status", dto.getMachineStatus())
-                                                        .set("check_status", record.getChecklistStatus()))
-                                                .then();
-                                    }
-
-                                    return commonService.save(record, ChecklistRecord.class)
-                                            .then(updateMachine)
-                                            .then(Mono.just(ApiResponse.<Void>success("MS001")));
+                                    // ── กรณีอื่น (ไม่ใช่ responsible / weekend / ไม่ได้ pending) ──
+                                    return saveAsCompleted(dto, machine, record, isResponsible);
                                 }
                             });
                 });
     }
 
-    private List<Long> parseChecklistIds(String machineChecklist) {
-        try {
-            var node = objectMapper.readTree(machineChecklist);
-            List<Long> ids = new ArrayList<>();
-            if (node.isArray()) {
-                for (var item : node) {
-                    if (item.has("id") && !item.get("id").isNull()) {
-                        ids.add(item.get("id").asLong());
-                    }
-                }
-            }
-            return ids;
-        } catch (Exception e) {
-            log.error("Failed to parse machineChecklist: {}", e.getMessage());
-            return List.of();
-        }
+    /**
+     * Branch: responsible person ส่ง checklist ในวันทำงาน + machine PENDING
+     * → สร้าง record recheck=true → รอ supervisor/manager อนุมัติ → recalculate KPI
+     */
+    private Mono<ApiResponse<Void>> saveAsResponsiblePending(
+            ChecklistDTO dto, Machine machine, ChecklistRecord record, Long memberId) {
+
+        record.setChecklistStatus(
+                machine.getSupervisorId() != null ? "PENDING SUPERVISOR" : "PENDING MANAGER"
+        );
+        record.setRecheck(true);
+
+        List<Long> checklistIds = parseChecklistIds(dto.getMachineChecklist());
+
+        // อัปเดต check_status=true เฉพาะ checklist ที่ reset_time ไม่ใช่ weekly cron
+        Mono<Void> updateChecklistItems = template.select(
+                        Query.query(Criteria.where("id").in(checklistIds)
+                                .and("reset_time").not("0 0 0 * * 1")),
+                        MachineChecklist.class)
+                .map(MachineChecklist::getId)
+                .collectList()
+                .flatMap(filteredIds -> {
+                    if (filteredIds.isEmpty()) return Mono.<Void>empty();
+                    return Flux.fromIterable(filteredIds)
+                            .flatMap(id -> template.update(MachineChecklist.class)
+                                    .matching(Query.query(Criteria.where("id").is(id)))
+                                    .apply(Update.update("check_status", true)))
+                            .then();
+                });
+
+        Mono<Void> updateMachine = template.update(Machine.class)
+                .matching(Query.query(Criteria.where("id").is(machine.getId())))
+                .apply(Update.update("check_status", record.getChecklistStatus())
+                        .set("machine_status", dto.getMachineStatus()))
+                .then();
+
+        return updateChecklistItems
+                .then(commonService.save(record, ChecklistRecord.class))
+                .flatMap(saved ->
+                        updateMachine
+                                // ── Recalculate KPI ทันทีหลัง save + update machine ──
+                                .then(kpiService.recalculateKpiForPerson(memberId))
+                                .then(Mono.just(ApiResponse.<Void>success("MS001")))
+                );
     }
 
-    // ─── UPDATE ───────────────────────────────────────────────────────────────
+    /**
+     * Branch: non-responsible / weekend / !isPending
+     * → สร้าง record recheck=false, COMPLETED → ไม่ต้อง recalculate KPI
+     */
+    private Mono<ApiResponse<Void>> saveAsCompleted(
+            ChecklistDTO dto, Machine machine, ChecklistRecord record, boolean isResponsible) {
+
+        record.setChecklistStatus("COMPLETED");
+        record.setRecheck(false);
+
+        Mono<Void> updateMachine;
+        if (!isResponsible) {
+            // ไม่ใช่ responsible → อัปเดตแค่ machine_status ไม่แตะ check_status
+            updateMachine = template.update(Machine.class)
+                    .matching(Query.query(Criteria.where("id").is(machine.getId())))
+                    .apply(Update.update("machine_status", dto.getMachineStatus()))
+                    .then();
+        } else {
+            // isWeekend หรือ !isPending → อัปเดตทั้งคู่
+            updateMachine = template.update(Machine.class)
+                    .matching(Query.query(Criteria.where("id").is(machine.getId())))
+                    .apply(Update.update("machine_status", dto.getMachineStatus())
+                            .set("check_status", record.getChecklistStatus()))
+                    .then();
+        }
+
+        return commonService.save(record, ChecklistRecord.class)
+                .then(updateMachine)
+                .then(Mono.just(ApiResponse.<Void>success("MS001")));
+    }
+
+    // =========================================================================
+    //  UPDATE (Supervisor / Manager อนุมัติ)
+    // =========================================================================
 
     public Mono<ApiResponse<Void>> update(ChecklistDTO checklistDTO) {
         return template.selectOne(
@@ -216,12 +227,14 @@ public class ChecklistService {
                             .then(Mono.just(ApiResponse.<Void>success("RG")));
                 })
                 .onErrorResume(e -> {
-                    log.error("Failed to update the checklist: {}", e.getMessage());
+                    log.error("[CHECKLIST] Failed to update: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS004", e.getMessage()));
                 });
     }
 
-    // ─── DELETE ───────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  DELETE
+    // =========================================================================
 
     public Mono<ApiResponse<Void>> delete(List<Long> ids) {
         return commonService.auditContext()
@@ -236,7 +249,9 @@ public class ChecklistService {
                 });
     }
 
-    // ─── GET PAGE ─────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  GET PAGE
+    // =========================================================================
 
     public Mono<PagedResponse<ChecklistListDTO>> getAllWithPage(String keyword, int index, int size) {
         Criteria criteria = Criteria.empty();
@@ -259,7 +274,9 @@ public class ChecklistService {
         return commonService.executePagedQuery(index, size, query, criteria, ChecklistRecord.class, this::convertChecklistListDTOs);
     }
 
-    // ─── GET BY ID ────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  GET BY ID
+    // =========================================================================
 
     public Mono<ApiResponse<ChecklistResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), ChecklistRecord.class)
@@ -301,8 +318,8 @@ public class ChecklistService {
                                         && auditMap.get(record.getUpdatedBy()) != null
                                         ? AuditMemberDTO.from(auditMap.get(record.getUpdatedBy())) : null;
 
-                                MemberDTO supervisorDTO = (supervisor.getId() != null) ? supervisor : null;
-                                MemberDTO managerDTO    = (manager.getId()    != null) ? manager    : null;
+                                MemberDTO supervisorDTO = supervisor.getId() != null ? supervisor : null;
+                                MemberDTO managerDTO    = manager.getId()    != null ? manager    : null;
 
                                 return ApiResponse.success("MS017",
                                         ChecklistResponseDTO.from(record, createdByDTO, updatedByDTO, supervisorDTO, managerDTO));
@@ -310,7 +327,7 @@ public class ChecklistService {
                 })
                 .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Checklist not found")))
                 .onErrorResume(e -> {
-                    log.error("Failed to fetch checklist: {}", e.getMessage(), e);
+                    log.error("[CHECKLIST] Failed to fetch by id: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.error("MS019", e.getMessage()));
                 });
     }
@@ -327,7 +344,9 @@ public class ChecklistService {
         return dto;
     }
 
-    // ─── GET WITH ROLE ────────────────────────────────────────────────────────
+    // =========================================================================
+    //  GET WITH ROLE
+    // =========================================================================
 
     public Mono<PagedResponse<ChecklistListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
@@ -335,7 +354,7 @@ public class ChecklistService {
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
-                    log.info("getWithRole — role: {}, memberId: {}", role, memberId);
+                    log.info("[CHECKLIST] getWithRole — role={} memberId={}", role, memberId);
 
                     if ("ADMIN".equals(role)) {
                         Criteria criteria = buildKeywordCriteria(keyword);
@@ -352,7 +371,7 @@ public class ChecklistService {
                             .map(Machine::getMachineCode)
                             .collectList()
                             .flatMap(machineCodes -> {
-                                log.info("getWithRole machineCodes: {}", machineCodes);
+                                log.info("[CHECKLIST] getWithRole machineCodes={}", machineCodes);
 
                                 Criteria baseCriteria = Criteria.where("created_by").is(memberId)
                                         .or("supervisor").is(memberId)
@@ -381,7 +400,9 @@ public class ChecklistService {
                 });
     }
 
-    // ─── GET PENDING APPROVALS ────────────────────────────────────────────────
+    // =========================================================================
+    //  GET PENDING APPROVALS
+    // =========================================================================
 
     public Mono<ListResponse<List<ChecklistListDTO>>> getPendingApprovals() {
         return ReactiveSecurityContextHolder.getContext()
@@ -390,7 +411,7 @@ public class ChecklistService {
                     Long   memberId = principal.memberId();
                     String role     = principal.role();
 
-                    log.info("getPendingApprovals — role: {}, memberId: {}", role, memberId);
+                    log.info("[CHECKLIST] getPendingApprovals — role={} memberId={}", role, memberId);
 
                     if (!role.equals("SUPERVISOR") && !role.equals("MANAGER")) {
                         return Mono.just(ListResponse.success("MS022", false, List.<ChecklistListDTO>of()));
@@ -400,32 +421,31 @@ public class ChecklistService {
                             .where("checklist_status").is("PENDING SUPERVISOR").and("supervisor").is(memberId)
                             .or(Criteria.where("checklist_status").is("PENDING MANAGER").and("manager").is(memberId));
 
-                    log.info("getPendingApprovals — memberId: {}", memberId);
-
                     Query query = Query.query(criteria)
                             .with(commonService.pageable(0, 100, "created_at"));
 
                     return template.select(query, ChecklistRecord.class)
                             .map(ChecklistListDTO::from)
                             .collectList()
-                            .doOnNext(list -> log.info("getPendingApprovals — found: {} items", list.size()))
+                            .doOnNext(list -> log.info("[CHECKLIST] getPendingApprovals found={} items", list.size()))
                             .map(list -> ListResponse.success("MS022", false, list));
                 })
                 .onErrorResume(e -> {
-                    log.error("Failed to fetch pending approvals: {}", e.getMessage(), e);
+                    log.error("[CHECKLIST] Failed to fetch pending approvals: {}", e.getMessage(), e);
                     return Mono.just(ListResponse.error("MS022"));
                 });
     }
 
-    // ─── STATS ────────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  STATS
+    // =========================================================================
 
     public Mono<List<ChecklistStatsDTO>> getChecklistStats(Integer year, String department) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
                     int    targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
-                    String roleFilter = getString(principal);
-
+                    String roleFilter = buildRoleFilter(principal);
                     String deptFilter = StringUtils.hasText(department)
                             ? "AND d.department_code = :department" : "";
 
@@ -443,9 +463,9 @@ public class ChecklistService {
                 });
     }
 
-    private static String getString(MemberPrincipal principal) {
-        String role       = principal.role();
-        Long   memberId   = principal.memberId();
+    private static String buildRoleFilter(MemberPrincipal principal) {
+        String role     = principal.role();
+        Long   memberId = principal.memberId();
 
         return switch (role) {
             case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
@@ -457,7 +477,9 @@ public class ChecklistService {
         };
     }
 
-    // ─── VALIDATE ─────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  VALIDATE
+    // =========================================================================
 
     public Mono<ChecklistDTO> validateData(ChecklistDTO dto) {
         if (dto.getMachineId() == null && !StringUtils.hasText(dto.getMachineCode())) {
@@ -470,13 +492,13 @@ public class ChecklistService {
 
         String mc = dto.getMachineChecklist();
         if (!StringUtils.hasText(mc) || "[]".equals(mc.trim())) {
-            log.warn("validateData — machineChecklist is empty for machineId: {}", dto.getMachineId());
+            log.warn("[CHECKLIST] validateData — machineChecklist empty for machineId={}", dto.getMachineId());
             return Mono.error(new ThrowException("MS_CHECKLIST_EMPTY"));
         }
 
         List<Long> ids = parseChecklistIds(mc);
         if (ids.isEmpty()) {
-            log.warn("validateData — machineChecklist has no valid ids for machineId: {}", dto.getMachineId());
+            log.warn("[CHECKLIST] validateData — machineChecklist has no valid ids for machineId={}", dto.getMachineId());
             return Mono.error(new ThrowException("MS_CHECKLIST_EMPTY"));
         }
 
@@ -495,7 +517,7 @@ public class ChecklistService {
                     String  status   = dto.getChecklistStatus();
                     Instant now      = Instant.now();
 
-                    log.info("validateDataUpdate — memberId: {}, status: {}, supervisor: {}, manager: {}",
+                    log.info("[CHECKLIST] validateDataUpdate memberId={} status={} supervisor={} manager={}",
                             memberId, status, dto.getSupervisor(), dto.getManager());
 
                     if ("PENDING SUPERVISOR".equals(status)) {
@@ -520,7 +542,9 @@ public class ChecklistService {
                 });
     }
 
-    // ─── BUILD ────────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  BUILD
+    // =========================================================================
 
     public ChecklistRecord buildFromDTO(ChecklistDTO dto) {
         return ChecklistRecord.builder()
@@ -581,14 +605,27 @@ public class ChecklistService {
         """.formatted(roleFilter, deptFilter);
     }
 
-    // ─── KPI ──────────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  HELPERS
+    // =========================================================================
 
-    private Mono<Void> updateKpi(Long memberId) {
-        log.info("Updating KPI for memberId: {}", memberId);
-        return kpiService.recalculateKpiForPerson(memberId);
+    private List<Long> parseChecklistIds(String machineChecklist) {
+        try {
+            var node = objectMapper.readTree(machineChecklist);
+            List<Long> ids = new ArrayList<>();
+            if (node.isArray()) {
+                for (var item : node) {
+                    if (item.has("id") && !item.get("id").isNull()) {
+                        ids.add(item.get("id").asLong());
+                    }
+                }
+            }
+            return ids;
+        } catch (Exception e) {
+            log.error("[CHECKLIST] Failed to parse machineChecklist: {}", e.getMessage());
+            return List.of();
+        }
     }
-
-    // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private Criteria buildKeywordCriteria(String keyword) {
         if (StringUtils.hasText(keyword)) {
@@ -610,12 +647,9 @@ public class ChecklistService {
         return Mono.empty();
     }
 
-    @SuppressWarnings("unused")
-    private Flux<ChecklistStatsDTO> executeStatsQuery(String sql, int year, String department) {
-        var spec = template.getDatabaseClient().sql(sql).bind("year", year);
-        if (StringUtils.hasText(department)) spec = spec.bind("department", department);
-        return spec.map((row, metadata) -> mapRowToStatsDTO(row)).all();
-    }
+    // =========================================================================
+    //  STATS MAPPING
+    // =========================================================================
 
     private ChecklistStatsDTO mapRowToStatsDTO(io.r2dbc.spi.Row row) {
         Long done        = row.get("weekly_check_done",         Long.class);

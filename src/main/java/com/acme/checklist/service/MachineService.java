@@ -1,6 +1,7 @@
 package com.acme.checklist.service;
 
 import com.acme.checklist.entity.*;
+import com.acme.checklist.entity.enums.MachineStatus;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.ListResponse;
@@ -56,12 +57,16 @@ public class MachineService {
     private final KpiService kpiService;
     private final LarkService larkService;
 
-    private static final List<String> ACTIVE_STATUSES = List.of("OPERATIONAL", "NON-OPERATIONAL", "UNDER MAINTENANCE");
+    private static final List<String> ACTIVE_STATUSES = MachineStatus.activeDbValues();
 
     // ─── HELPERS ──────────────────────────────────────────────────────────────
 
     private boolean isNonActiveStatus(String status) {
         return status != null && !ACTIVE_STATUSES.contains(status);
+    }
+
+    private String nullSafe(String value) {
+        return value != null ? value : "-";
     }
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
@@ -197,11 +202,37 @@ public class MachineService {
                                         existing.getMachineCode(), newStatus);
                             }
 
+                            // snapshot ก่อน mutate สำหรับ diff notify
+                            Machine snapshot = Machine.builder()
+                                    .machineCode(existing.getMachineCode())
+                                    .machineName(existing.getMachineName())
+                                    .machineStatus(existing.getMachineStatus())
+                                    .responsiblePersonName(existing.getResponsiblePersonName())
+                                    .checkStatus(existing.getCheckStatus())
+                                    .department(existing.getDepartment())
+                                    .brand(existing.getBrand())
+                                    .model(existing.getModel())
+                                    .serialNumber(existing.getSerialNumber())
+                                    .note(existing.getNote())
+                                    .build();
+
                             Mono<Void> updateMachine = commonService
                                     .update(machineDTO.getId(), buildUpdateFromDTO(v), Machine.class).then();
 
+                            Mono<Void> cancelRecords = nonActive
+                                    ? cancelActiveRecords(existing.getMachineCode())
+                                    : Mono.empty();
+
+                            Mono<Void> notify = notifyMachineUpdate(snapshot, v, personChanged, newPersonId)
+                                    .onErrorResume(e -> {
+                                        log.warn("Notify update failed (non-blocking): {}", e.getMessage());
+                                        return Mono.empty();
+                                    });
+
                             if (!personChanged && !nonActive) {
                                 return updateMachine
+                                        .then(cancelRecords)
+                                        .then(notify)
                                         .then(Mono.just(ApiResponse.<Void>success("MS003")));
                             }
 
@@ -231,10 +262,12 @@ public class MachineService {
                                     : Mono.empty();
 
                             return updateMachine
+                                    .then(cancelRecords)
                                     .then(closeOld)
                                     .then(insertNew)
                                     .then(kpiOld)
                                     .then(kpiNew)
+                                    .then(notify)
                                     .then(Mono.just(ApiResponse.<Void>success("MS003")));
                         }))
                 .onErrorResume(ThrowException.class, e -> {
@@ -245,6 +278,163 @@ public class MachineService {
                     log.error("Failed to update the machine: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.<Void>error("MS004", e.getMessage()));
                 });
+    }
+
+    // ─── CANCEL ACTIVE RECORDS ────────────────────────────────────────────────
+
+    private Mono<Void> cancelActiveRecords(String machineCode) {
+        LocalDate today = LocalDate.now();
+
+        Mono<Void> cancelCal = template.getDatabaseClient()
+                .sql("""
+                    UPDATE calibration_record
+                    SET is_canceled = TRUE,
+                        canceled_at = $1
+                    WHERE machine_code     = $2
+                      AND certificate_date IS NULL
+                      AND (is_canceled = FALSE OR is_canceled IS NULL)
+                """)
+                .bind(0, today)
+                .bind(1, machineCode)
+                .then();
+
+        Mono<Void> cancelMaint = template.getDatabaseClient()
+                .sql("""
+                    UPDATE maintenance_record
+                    SET is_canceled = TRUE,
+                        canceled_at = $1
+                    WHERE machine_code = $2
+                      AND actual_date  IS NULL
+                      AND (is_canceled = FALSE OR is_canceled IS NULL)
+                """)
+                .bind(0, today)
+                .bind(1, machineCode)
+                .then();
+
+        return cancelCal.then(cancelMaint)
+                .doOnSuccess(v -> log.info("Canceled active records for machine: {}", machineCode))
+                .doOnError(e -> log.error("Failed to cancel records for machine {}: {}", machineCode, e.getMessage()));
+    }
+
+    // ─── NOTIFY MACHINE UPDATE (DIFF) ─────────────────────────────────────────
+
+    private Mono<Void> notifyMachineUpdate(
+            Machine before, MachineDTO after,
+            boolean personChanged, Long newPersonId) {
+
+        List<String> changes = new ArrayList<>();
+
+        if (!Objects.equals(before.getMachineStatus(), after.getMachineStatus()))
+            changes.add("**สถานะเครื่องจักร**\\n"
+                    + nullSafe(before.getMachineStatus()) + " → " + nullSafe(after.getMachineStatus()));
+
+        if (!Objects.equals(before.getResponsiblePersonName(), after.getResponsiblePersonName()))
+            changes.add("**ผู้รับผิดชอบ**\\n"
+                    + nullSafe(before.getResponsiblePersonName()) + " → " + nullSafe(after.getResponsiblePersonName()));
+
+        if (!Objects.equals(before.getDepartment(), after.getDepartment()))
+            changes.add("**แผนก**\\n"
+                    + nullSafe(before.getDepartment()) + " → " + nullSafe(after.getDepartment()));
+
+        if (!Objects.equals(before.getBrand(), after.getBrand()))
+            changes.add("**แบรนด์**\\n"
+                    + nullSafe(before.getBrand()) + " → " + nullSafe(after.getBrand()));
+
+        if (!Objects.equals(before.getModel(), after.getModel()))
+            changes.add("**รุ่น**\\n"
+                    + nullSafe(before.getModel()) + " → " + nullSafe(after.getModel()));
+
+        if (!Objects.equals(before.getSerialNumber(), after.getSerialNumber()))
+            changes.add("**หมายเลขซีเรียล**\\n"
+                    + nullSafe(before.getSerialNumber()) + " → " + nullSafe(after.getSerialNumber()));
+
+        if (!Objects.equals(before.getNote(), after.getNote()))
+            changes.add("**หมายเหตุ**\\nมีการเปลี่ยนแปลง");
+
+        if (changes.isEmpty()) {
+            log.info("No changes detected for machine {}, skip notification", before.getMachineCode());
+            return Mono.empty();
+        }
+
+        Mono<List<String>> adminMobilesMono = template.select(
+                        Query.query(
+                                Criteria.where("role_type").is("ADMIN")
+                                        .and("status").is("ACTIVE")),
+                        Member.class)
+                .map(Member::getMobiles)
+                .filter(m -> m != null && !m.isBlank())
+                .distinct()
+                .collectList();
+
+        Mono<String> newResponsibleMobileMono = (personChanged && newPersonId != null)
+                ? template.selectOne(
+                        Query.query(Criteria.where("id").is(newPersonId)),
+                        Member.class)
+                .map(m -> m.getMobiles() != null ? m.getMobiles() : "")
+                .defaultIfEmpty("")
+                : Mono.just("");
+
+        return Mono.zip(adminMobilesMono, newResponsibleMobileMono)
+                .flatMap(tuple -> {
+                    List<String> mobiles       = new ArrayList<>(tuple.getT1());
+                    String       newRespMobile = tuple.getT2();
+
+                    if (!newRespMobile.isBlank() && !mobiles.contains(newRespMobile))
+                        mobiles.add(newRespMobile);
+
+                    if (mobiles.isEmpty()) {
+                        log.info("No mobile numbers found for machine update notification, skip");
+                        return Mono.<Void>empty();
+                    }
+
+                    String cardJson = buildMachineUpdateDiffCardJson(before, changes);
+
+                    return larkService.batchGetOpenIdsByMobile(mobiles)
+                            .flatMap(openIdMap -> Flux.fromIterable(openIdMap.values())
+                                    .flatMap(openId -> larkService.sendCardMessage(openId, cardJson)
+                                            .onErrorResume(e -> {
+                                                log.warn("Failed to notify update openId={}: {}", openId, e.getMessage());
+                                                return Mono.empty();
+                                            }))
+                                    .then());
+                })
+                .onErrorResume(e -> {
+                    log.warn("Machine update notification failed (non-blocking): {}", e.getMessage());
+                    return Mono.empty();
+                });
+    }
+
+    private String buildMachineUpdateDiffCardJson(Machine before, List<String> changes) {
+        StringBuilder elements = new StringBuilder();
+
+        elements.append(String.format(
+                "{\"tag\":\"div\",\"fields\":["
+                        + "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n%s\"}},"
+                        + "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n%s\"}}"
+                        + "]},"
+                        + "{\"tag\":\"hr\"},"
+                        + "{\"tag\":\"div\",\"text\":{\"tag\":\"lark_md\",\"content\":\"**รายการที่เปลี่ยนแปลง**\"}},",
+                nullSafe(before.getMachineCode()),
+                nullSafe(before.getMachineName())
+        ));
+
+        for (int i = 0; i < changes.size(); i++) {
+            elements.append(String.format(
+                    "{\"tag\":\"div\",\"text\":{\"tag\":\"lark_md\",\"content\":\"%s\"}}",
+                    changes.get(i)
+            ));
+            if (i < changes.size() - 1) elements.append(",");
+        }
+
+        return String.format(
+                "{"
+                        + "\"config\":{\"wide_screen_mode\":true},"
+                        + "\"header\":{"
+                        +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"อัปเดตข้อมูลเครื่องจักร\"},"
+                        +   "\"template\":\"orange\""
+                        + "},"
+                        + "\"elements\":[%s]}",
+                elements);
     }
 
     // ─── DELETE ───────────────────────────────────────────────────────────────
@@ -307,6 +497,8 @@ public class MachineService {
                 });
     }
 
+    // ─── GET BY ROLE ──────────────────────────────────────────────────────────
+
     public Mono<PagedResponse<MachineListDTO>> getByRole(
             String keyword, int index, int size, boolean mine,
             String checkStatus, String department,
@@ -318,10 +510,8 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // 1. สร้าง base criteria ตาม role
                     Criteria base = buildRoleBaseCriteria(role, memberId, mine);
 
-                    // 2. ต่อ keyword + filters เข้ากับ base criteria เดิม
                     Criteria finalCriteria = applyKeywordAndFilters(
                             base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
 
@@ -337,10 +527,7 @@ public class MachineService {
 
     private Criteria buildRoleBaseCriteria(String role, Long memberId, boolean mine) {
         return switch (role) {
-            // ADMIN: เห็นทุก record ไม่กรอง status
             case "ADMIN" -> Criteria.empty();
-
-            // MANAGER: กรอง active status + สิทธิตาม mine
             case "MANAGER" -> {
                 Criteria active = Criteria.where("machine_status").in(ACTIVE_STATUSES);
                 yield mine
@@ -349,8 +536,6 @@ public class MachineService {
                         Criteria.where("responsible_person_id").is(memberId)
                                 .or("manager_id").is(memberId));
             }
-
-            // SUPERVISOR: กรอง active status + สิทธิตาม mine
             case "SUPERVISOR" -> {
                 Criteria active = Criteria.where("machine_status").in(ACTIVE_STATUSES);
                 yield mine
@@ -359,14 +544,12 @@ public class MachineService {
                         Criteria.where("responsible_person_id").is(memberId)
                                 .or("supervisor_id").is(memberId));
             }
-
-            // USER (default): เห็นเฉพาะของตัวเอง + active status เสมอ
             default -> Criteria.where("machine_status").in(ACTIVE_STATUSES)
                     .and(Criteria.where("responsible_person_id").is(memberId));
         };
     }
 
-    // ─── ต่อ keyword + filters เข้ากับ criteria ──────────────────────────────
+    // ─── ต่อ keyword + filters ────────────────────────────────────────────────
 
     private Criteria applyKeywordAndFilters(
             Criteria base,
@@ -378,7 +561,6 @@ public class MachineService {
 
         Criteria criteria = base;
 
-        // keyword: ค้นหาใน machine_name, machine_code, responsible_person_name
         if (StringUtils.hasText(keyword)) {
             String kw = "%" + keyword.trim() + "%";
             criteria = criteria.and(
@@ -387,7 +569,6 @@ public class MachineService {
                             .or("responsible_person_name").like(kw).ignoreCase(true));
         }
 
-        // filters: ต่อทีละตัว ไม่สร้าง criteria ใหม่
         if (StringUtils.hasText(department))
             criteria = criteria.and(Criteria.where("department").is(department));
         if (StringUtils.hasText(machineStatus))
@@ -418,6 +599,8 @@ public class MachineService {
                         default           -> "AND m.responsible_person_id = " + memberId;
                     };
 
+                    String activeInClause = MachineStatus.sqlInClause();
+
                     String sql = """
                             SELECT DISTINCT
                                 m.department,
@@ -428,10 +611,10 @@ public class MachineService {
                                 m.responsible_person_name
                             FROM machine m
                             LEFT JOIN department d ON m.department = d.department_code
-                            WHERE m.machine_status IN ('OPERATIONAL','NON-OPERATIONAL','UNDER MAINTENANCE')
+                            WHERE m.machine_status IN (%s)
                             %s
                             ORDER BY m.department, m.machine_status, m.check_status, m.responsible_person_name
-                            """.formatted(roleFilter);
+                            """.formatted(activeInClause, roleFilter);
 
                     return template.getDatabaseClient()
                             .sql(sql)
@@ -660,7 +843,7 @@ public class MachineService {
     public Mono<ApiResponse<Machine>> getByMachineCode(String machineCode) {
         return template.selectOne(
                         Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").is("OPERATIONAL")),
+                                .and("machine_status").is(MachineStatus.OPERATIONAL.getDbValue())),
                         Machine.class)
                 .map(m -> ApiResponse.success("MS017", m))
                 .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Machine not found or not operational: " + machineCode)))
@@ -917,8 +1100,7 @@ public class MachineService {
                         log.info("No active ADMIN found, skip Lark notification");
                         return Mono.empty();
                     }
-                    List<Member> targets = new ArrayList<>(admins);
-                    List<String> mobiles = targets.stream()
+                    List<String> mobiles = admins.stream()
                             .map(Member::getMobiles)
                             .filter(m -> m != null && !m.isBlank())
                             .distinct()

@@ -21,4 +21,7 @@ public class Question extends DataAudit {
 
     @Column("description")
     private String description;
+
+    @Column("is_choice")
+    private Boolean isChoice;
 }

@@ -1,6 +1,7 @@
 package com.acme.checklist.payload.machineChecklist;
 
 import com.acme.checklist.entity.MachineChecklist;
+import com.acme.checklist.entity.Question;
 import com.acme.checklist.payload.audit.AuditMemberDTO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -21,15 +22,18 @@ public class MachineChResponseDTO {
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
 
-    public static MachineChResponseDTO from(MachineChecklist machineChecklist, AuditMemberDTO createdBy, AuditMemberDTO updatedBy) {
-        if (machineChecklist == null) {
-            return null;
-        }
+    public static MachineChResponseDTO from(
+            MachineChecklist machineChecklist,
+            Question question,
+            AuditMemberDTO createdBy,
+            AuditMemberDTO updatedBy) {
+
+        if (machineChecklist == null) return null;
 
         return MachineChResponseDTO.builder()
                 .machineCode(machineChecklist.getMachineCode())
                 .questionId(machineChecklist.getQuestionId())
-                .isChoice(machineChecklist.getIsChoice())
+                .isChoice(question != null ? question.getIsChoice() : null)
                 .checkStatus(machineChecklist.getCheckStatus())
                 .resetTime(machineChecklist.getResetTime())
                 .createdBy(createdBy)

@@ -1,8 +1,10 @@
 package com.acme.checklist.scheduler;
 
-import com.acme.checklist.entity.*;
+import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.Member;
 import com.acme.checklist.entity.ResponsibleHistory;
 import com.acme.checklist.entity.enums.MachineStatus;
+import com.acme.checklist.service.KpiService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -18,7 +20,6 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneId;
-import java.util.List;
 
 @Slf4j
 @Component
@@ -26,27 +27,34 @@ import java.util.List;
 public class KpiScheduler {
 
     private final R2dbcEntityTemplate template;
+    private final KpiService           kpiService;
 
-    private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
+    private static final ZoneId   BKK         = ZoneId.of("Asia/Bangkok");
+    private static final String   WEEKLY_CRON = "0 0 0 * * 1";
 
-    // ─── 1. สร้าง KPI ต้นเดือน ─────────────────────────────────────────────────
-    // check_all = (เครื่อง non-MONTHLY × จำนวน Friday ทั้งเดือน) + (เครื่อง MONTHLY × 1)
+    // =========================================================================
+    //  1. สร้าง KPI ต้นเดือน
+    //     check_all = (เครื่อง non-MONTHLY × จำนวน Friday) + (เครื่อง MONTHLY × 1)
+    // =========================================================================
+
     @Scheduled(cron = "0 0 0 1 * ?", zone = "Asia/Bangkok")
     public void createKpiRecords() {
-        log.info("createKpiRecords started");
-        LocalDate today = LocalDate.now(BKK);
-        String year  = String.valueOf(today.getYear());
-        String month = String.format("%02d", today.getMonthValue());
-        YearMonth ym = YearMonth.from(today);
+        log.info("[KPI-SCHEDULER] createKpiRecords started");
 
+        LocalDate today       = LocalDate.now(BKK);
+        String    year        = String.valueOf(today.getYear());
+        String    month       = String.format("%02d", today.getMonthValue());
+        YearMonth ym          = YearMonth.from(today);
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
 
-        log.info("createKpiRecords year={} month={} kpiStart={} kpiEnd={}", year, month, kpiStart, lastFriday);
+        log.info("[KPI-SCHEDULER] createKpiRecords year={} month={} kpiStart={} kpiEnd={}",
+                year, month, kpiStart, lastFriday);
 
         fetchHistory(kpiStart, lastFriday)
-                .doOnNext(h -> log.info("History found: machineCode={} responsiblePersonId={}", h.getMachineCode(), h.getResponsiblePersonId()))
+                .doOnNext(h -> log.info("[KPI-SCHEDULER] History machineCode={} responsiblePersonId={}",
+                        h.getMachineCode(), h.getResponsiblePersonId()))
                 .flatMap(h -> findActiveMachine(h.getMachineCode())
                         .map(machine -> {
                             LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
@@ -54,168 +62,91 @@ public class KpiScheduler {
                             long contribution = "MONTHLY".equals(machine.getResetPeriod())
                                     ? 1L
                                     : countFridaysInRange(cs, ce);
-                            log.info("Machine {} resetPeriod={} contribution={}", h.getMachineCode(), machine.getResetPeriod(), contribution);
+                            log.info("[KPI-SCHEDULER] Machine {} resetPeriod={} contribution={}",
+                                    h.getMachineCode(), machine.getResetPeriod(), contribution);
                             return new MemberContribution(h.getResponsiblePersonId(), contribution);
                         })
                         .doOnSuccess(mc -> {
                             if (mc == null)
-                                log.info("Machine {} is not active, skipping", h.getMachineCode());
+                                log.info("[KPI-SCHEDULER] Machine {} inactive, skipping", h.getMachineCode());
                         })
                 )
                 .collectMultimap(MemberContribution::memberId, MemberContribution::contribution)
-                .doOnNext(map -> log.info("Total members from history: {}", map.size()))
-                .flatMap(contributionMap -> Flux.fromIterable(contributionMap.entrySet())
-                        .flatMapSequential(entry -> {
-                            Long memberId = entry.getKey();
-                            long checkAll = entry.getValue().stream().mapToLong(Long::longValue).sum();
-                            log.info("createKpiRecords memberId={} checkAll={}", memberId, checkAll);
+                .doOnNext(map -> log.info("[KPI-SCHEDULER] Total members from history: {}", map.size()))
+                .flatMap(contributionMap ->
+                        Flux.fromIterable(contributionMap.entrySet())
+                                .flatMapSequential(entry -> {
+                                    Long memberId = entry.getKey();
+                                    long checkAll = entry.getValue().stream().mapToLong(Long::longValue).sum();
+                                    log.info("[KPI-SCHEDULER] createKpiRecords memberId={} checkAll={}", memberId, checkAll);
 
-                            return template.selectOne(
-                                            Query.query(Criteria.where("id").is(memberId)
-                                                    .and("status").not("INACTIVE")),
-                                            Member.class)
-                                    .doOnSuccess(m -> {
-                                        if (m == null) log.warn("Member NOT found or INACTIVE for memberId={}", memberId);
-                                        else log.info("Member found memberId={} name={}", memberId, m.getFirstName());
-                                    })
-                                    .flatMap(member -> insertKpiIfAbsent(
-                                            memberId,
-                                            member.getFirstName() + " " + member.getLastName(),
-                                            year, month, checkAll,
-                                            member.getManager(),
-                                            member.getSupervisor()
-                                    ))
-                                    .onErrorResume(e -> {
-                                        log.error("Failed memberId={}: {} - {}", memberId, e.getClass().getSimpleName(), e.getMessage(), e);
-                                        return Mono.empty();
-                                    });
-                        }).then()
+                                    return template.selectOne(
+                                                    Query.query(Criteria.where("id").is(memberId)
+                                                            .and("status").not("INACTIVE")),
+                                                    Member.class)
+                                            .doOnSuccess(m -> {
+                                                if (m == null)
+                                                    log.warn("[KPI-SCHEDULER] Member NOT found or INACTIVE memberId={}", memberId);
+                                                else
+                                                    log.info("[KPI-SCHEDULER] Member found memberId={} name={}", memberId, m.getFirstName());
+                                            })
+                                            .flatMap(member -> insertKpiIfAbsent(
+                                                    memberId,
+                                                    member.getFirstName() + " " + member.getLastName(),
+                                                    year, month, checkAll,
+                                                    member.getManager(),
+                                                    member.getSupervisor()
+                                            ))
+                                            .onErrorResume(e -> {
+                                                log.error("[KPI-SCHEDULER] Failed memberId={}: {} - {}",
+                                                        memberId, e.getClass().getSimpleName(), e.getMessage(), e);
+                                                return Mono.empty();
+                                            });
+                                }).then()
                 )
-                .doOnError(e -> log.error("Pipeline error: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e))
-                .subscribe(null, e -> log.error("createKpiRecords failed: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e));
+                .doOnError(e -> log.error("[KPI-SCHEDULER] createKpiRecords pipeline error: {} - {}",
+                        e.getClass().getSimpleName(), e.getMessage(), e))
+                .subscribe(
+                        null,
+                        e -> log.error("[KPI-SCHEDULER] createKpiRecords failed: {} - {}",
+                                e.getClass().getSimpleName(), e.getMessage(), e),
+                        () -> log.info("[KPI-SCHEDULER] createKpiRecords completed")
+                );
     }
 
-    // ─── 2. Recalculate checked รายวัน (ไม่แตะ check_all) ─────────────────────
     @Scheduled(cron = "0 5 0 * * *", zone = "Asia/Bangkok")
     public void recalculateCurrentMonthKpi() {
+        log.info("[KPI-SCHEDULER] recalculateCurrentMonthKpi started");
+
         LocalDate today = LocalDate.now(BKK);
-        String year  = String.valueOf(today.getYear());
-        String month = String.format("%02d", today.getMonthValue());
-        YearMonth ym = YearMonth.from(today);
+        String    year  = String.valueOf(today.getYear());
+        String    month = String.format("%02d", today.getMonthValue());
 
-        LocalDate firstFriday = getFirstFridayOfMonth(ym);
-        LocalDate lastFriday  = getLastFridayOfMonth(ym);
-        LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        LocalDate checkedEnd  = today.isAfter(lastFriday) ? lastFriday : today;
-
-        log.info("recalculateCurrentMonthKpi year={} month={} kpiStart={} checkedEnd={}", year, month, kpiStart, checkedEnd);
-
-        template.select(
-                        Query.query(Criteria.where("years").is(year).and("months").is(month)),
-                        Kpi.class)
-                .doOnNext(kpi -> log.info("Processing KPI memberId={}", kpi.getMemberId()))
-                .flatMapSequential(kpi -> {
-                    Long memberId = kpi.getMemberId();
-
-                    Mono<Long> checkedMono = template.getDatabaseClient()
-                            .sql("""
-                                SELECT COUNT(*) FROM checklist_record cr
-                                JOIN machine m ON cr.machine_code = m.machine_code
-                                JOIN responsible_history rh
-                                    ON rh.machine_code = cr.machine_code
-                                    AND rh.responsible_person_id = $1
-                                    AND DATE(cr.created_at AT TIME ZONE 'Asia/Bangkok') >= rh.effective_from
-                                    AND (rh.effective_to IS NULL OR DATE(cr.created_at AT TIME ZONE 'Asia/Bangkok') <= rh.effective_to)
-                                WHERE cr.created_by = $2
-                                  AND cr.recheck = true
-                                  AND cr.check_type = 'GENERAL'
-                                  AND m.machine_status IN (%s)
-                                  AND cr.created_at >= $3
-                                  AND cr.created_at <= $4
-                                  AND (
-                                      cr.machine_note IS NULL
-                                      OR cr.machine_note != 'Automatic recording'
-                                      OR cr.reason_not_checked IS NULL
-                                      OR UPPER(cr.reason_not_checked) NOT IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
-                                  )
-                                """.formatted(MachineStatus.sqlInClause()))
-                            .bind(0, memberId)
-                            .bind(1, memberId)
-                            .bind(2, kpiStart.atStartOfDay(BKK).toInstant())
-                            .bind(3, checkedEnd.atTime(23, 59, 59).atZone(BKK).toInstant())
-                            .map((row, meta) -> row.get(0, Long.class))
-                            .one()
-                            .defaultIfEmpty(0L)
-                            .doOnSuccess(c -> log.info("checked memberId={} → {}", memberId, c));
-
-                    return checkedMono
-                            .flatMap(checkedCount -> {
-                                kpi.setChecked(checkedCount);
-                                return template.update(kpi)
-                                        .doOnSuccess(v -> log.info("Updated checked memberId={} → {}", memberId, checkedCount))
-                                        .then();
-                            })
-                            .onErrorResume(e -> {
-                                log.error("Failed to recalculate checked for memberId={}: {} - {}", memberId, e.getClass().getSimpleName(), e.getMessage(), e);
-                                return Mono.empty();
-                            });
-                })
+        // ดึง memberId ทุกคนที่มี KPI เดือนนี้ แล้ว delegate ไปที่ KpiService
+        template.getDatabaseClient()
+                .sql("SELECT member_id FROM kpi WHERE years = $1 AND months = $2")
+                .bind(0, year)
+                .bind(1, month)
+                .map((row, meta) -> row.get("member_id", Long.class))
+                .all()
+                .doOnNext(memberId -> log.debug("[KPI-SCHEDULER] Recalculating memberId={}", memberId))
+                .flatMapSequential(memberId ->
+                        kpiService.recalculateKpiForPerson(memberId)
+                                .onErrorResume(e -> {
+                                    log.error("[KPI-SCHEDULER] recalculate failed memberId={}: {}",
+                                            memberId, e.getMessage(), e);
+                                    return Mono.empty();
+                                })
+                )
                 .then()
-                .doOnSuccess(v -> log.info("recalculateCurrentMonthKpi completed"))
-                .doOnError(e -> log.error("recalculateCurrentMonthKpi pipeline error: {}", e.getMessage(), e))
-                .subscribe(null, e -> log.error("recalculateCurrentMonthKpi failed: {}", e.getMessage(), e));
+                .doOnError(e -> log.error("[KPI-SCHEDULER] recalculateCurrentMonthKpi error: {}", e.getMessage(), e))
+                .subscribe(
+                        null,
+                        e -> log.error("[KPI-SCHEDULER] recalculateCurrentMonthKpi failed: {}", e.getMessage(), e),
+                        () -> log.info("[KPI-SCHEDULER] recalculateCurrentMonthKpi completed")
+                );
     }
 
-    // ─── 3. Recalculate check_all เมื่อมีการเปลี่ยนผู้รับผิดชอบ ────────────────
-    public Mono<Void> recalculateCheckAll(Long memberId) {
-        LocalDate today = LocalDate.now(BKK);
-        String year  = String.valueOf(today.getYear());
-        String month = String.format("%02d", today.getMonthValue());
-        YearMonth ym = YearMonth.from(today);
-
-        LocalDate firstDay    = ym.atDay(1);
-        LocalDate lastDay     = ym.atEndOfMonth();
-        LocalDate firstFriday = getFirstFridayOfMonth(ym);
-        LocalDate lastFriday  = getLastFridayOfMonth(ym);
-        LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-
-        log.info("recalculateCheckAll memberId={} year={} month={} kpiStart={} kpiEnd={}", memberId, year, month, kpiStart, lastFriday);
-
-        Mono<Long> checkAllMono = fetchHistoryForMember(memberId, firstDay, lastDay)
-                .flatMap(h -> findActiveMachine(h.getMachineCode())
-                        .map(machine -> {
-                            LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
-                            LocalDate ce = clampEnd(h.getEffectiveTo(), lastFriday);
-                            long contribution = "MONTHLY".equals(machine.getResetPeriod())
-                                    ? 1L
-                                    : countFridaysInRange(cs, ce);
-                            log.info("recalculateCheckAll machine={} resetPeriod={} contribution={}", h.getMachineCode(), machine.getResetPeriod(), contribution);
-                            return contribution;
-                        })
-                        .defaultIfEmpty(0L)
-                )
-                .reduce(0L, Long::sum)
-                .doOnSuccess(total -> log.info("recalculateCheckAll memberId={} newCheckAll={}", memberId, total));
-
-        return checkAllMono
-                .flatMap(newCheckAll -> template.getDatabaseClient()
-                        .sql("""
-                            UPDATE kpi SET check_all = $1
-                            WHERE member_id = $2 AND years = $3 AND months = $4
-                            """)
-                        .bind(0, newCheckAll)
-                        .bind(1, memberId)
-                        .bind(2, year)
-                        .bind(3, month)
-                        .fetch()
-                        .rowsUpdated()
-                        .doOnSuccess(rows -> log.info("Updated check_all memberId={} → {} (rows={})", memberId, newCheckAll, rows))
-                        .then()
-                )
-                .doOnError(e -> log.error("recalculateCheckAll failed memberId={}: {}", memberId, e.getMessage(), e));
-    }
-
-    // ─── INSERT with upsert (null-safe) ────────────────────────────────────────
     private Mono<Void> insertKpiIfAbsent(Long memberId, String employeeName,
                                          String year, String month,
                                          long checkAll,
@@ -237,44 +168,30 @@ public class KpiScheduler {
                 .bind(4, checkAll)
                 .bind(5, 0L);
 
-        spec = managerId != null
-                ? spec.bind(6, managerId)
-                : spec.bindNull(6, Long.class);
-
-        spec = supervisorId != null
-                ? spec.bind(7, supervisorId)
-                : spec.bindNull(7, Long.class);
+        spec = managerId    != null ? spec.bind(6, managerId)    : spec.bindNull(6, Long.class);
+        spec = supervisorId != null ? spec.bind(7, supervisorId) : spec.bindNull(7, Long.class);
 
         return spec.fetch()
                 .rowsUpdated()
                 .doOnSuccess(rows -> {
                     if (rows > 0)
-                        log.info("✓ Created KPI for memberId={} {}-{}", memberId, year, month);
+                        log.info("[KPI-SCHEDULER] ✓ Upserted KPI memberId={} {}-{} checkAll={}",
+                                memberId, year, month, checkAll);
                     else
-                        log.info("KPI already exists for memberId={} {}-{}", memberId, year, month);
+                        log.info("[KPI-SCHEDULER] KPI unchanged memberId={} {}-{}", memberId, year, month);
                 })
-                .doOnError(e -> log.error("✗ Insert KPI failed for memberId={}: {}", memberId, e.getMessage()))
+                .doOnError(e -> log.error("[KPI-SCHEDULER] ✗ Insert KPI failed memberId={}: {}", memberId, e.getMessage()))
                 .then();
-    }
-
-    // ─── HELPERS ───────────────────────────────────────────────────────────────
-
-    private Mono<Machine> findActiveMachine(String machineCode) {
-        return template.select(
-                        Query.query(Criteria.where("machine_code").is(machineCode)
-                                .and("machine_status").in(MachineStatus.activeDbValues())),
-                        Machine.class)
-                .next();
     }
 
     private Flux<ResponsibleHistory> fetchHistory(LocalDate kpiStart, LocalDate kpiEnd) {
         return template.getDatabaseClient()
                 .sql("""
-                        SELECT machine_code, responsible_person_id, effective_from, effective_to
-                        FROM responsible_history
-                        WHERE effective_from <= $1
-                        AND (effective_to IS NULL OR effective_to >= $2)
-                        """)
+                    SELECT machine_code, responsible_person_id, effective_from, effective_to
+                    FROM responsible_history
+                    WHERE effective_from <= $1
+                      AND (effective_to IS NULL OR effective_to >= $2)
+                    """)
                 .bind(0, kpiEnd)
                 .bind(1, kpiStart)
                 .map((row, meta) -> ResponsibleHistory.builder()
@@ -286,28 +203,14 @@ public class KpiScheduler {
                 .all();
     }
 
-    private Flux<ResponsibleHistory> fetchHistoryForMember(Long memberId, LocalDate firstDay, LocalDate lastDay) {
-        return template.getDatabaseClient()
-                .sql("""
-                        SELECT machine_code, responsible_person_id, effective_from, effective_to
-                        FROM responsible_history
-                        WHERE responsible_person_id = $1
-                        AND effective_from <= $2
-                        AND (effective_to IS NULL OR effective_to >= $3)
-                        """)
-                .bind(0, memberId)
-                .bind(1, lastDay)
-                .bind(2, firstDay)
-                .map((row, meta) -> ResponsibleHistory.builder()
-                        .machineCode(row.get("machine_code", String.class))
-                        .responsiblePersonId(row.get("responsible_person_id", Long.class))
-                        .effectiveFrom(row.get("effective_from", LocalDate.class))
-                        .effectiveTo(row.get("effective_to", LocalDate.class))
-                        .build())
-                .all();
+    private Mono<Machine> findActiveMachine(String machineCode) {
+        return template.select(
+                        Query.query(Criteria.where("machine_code").is(machineCode)
+                                .and("machine_status").in(MachineStatus.activeDbValues())),
+                        Machine.class)
+                .next();
     }
 
-    /** นับจำนวนวันศุกร์ในช่วง from→to (inclusive) */
     private long countFridaysInRange(LocalDate from, LocalDate to) {
         if (from.isAfter(to)) return 0;
         long count = 0;
@@ -339,6 +242,5 @@ public class KpiScheduler {
         return d;
     }
 
-    // ─── Inner record ──────────────────────────────────────────────────────────
     private record MemberContribution(Long memberId, Long contribution) {}
 }

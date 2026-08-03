@@ -123,8 +123,10 @@ public class QuestionService {
         if (!StringUtils.hasText(dto.getDetail())) {
             return Mono.error(new ThrowException("QB003")); // detail required
         }
+        if (dto.getIsChoice() == null) {
+            return Mono.error(new ThrowException("QB010")); // is_choice required
+        }
 
-        // เช็ค detail ซ้ำ (ยกเว้น id ตัวเอง ตอน update)
         Criteria criteria = Criteria.where("detail").is(dto.getDetail().trim());
         if (excludeId != null) {
             criteria = criteria.and("id").not(excludeId);
@@ -145,6 +147,7 @@ public class QuestionService {
         return Question.builder()
                 .detail(dto.getDetail().trim())
                 .description(dto.getDescription())
+                .isChoice(dto.getIsChoice())
                 .build();
     }
 
@@ -152,6 +155,7 @@ public class QuestionService {
         Map<SqlIdentifier, Object> params = new HashMap<>();
         addIfNotNull(params, "detail",      dto.getDetail());
         addIfNotNull(params, "description", dto.getDescription());
+        addIfNotNull(params, "is_choice",   dto.getIsChoice());
         return Update.from(params);
     }
 
@@ -160,6 +164,7 @@ public class QuestionService {
         dto.setId(q.getId());
         dto.setDetail(q.getDetail());
         dto.setDescription(q.getDescription());
+        dto.setIsChoice(q.getIsChoice());
         return dto;
     }
 

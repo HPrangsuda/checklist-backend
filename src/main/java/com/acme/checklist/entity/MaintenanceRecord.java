@@ -63,4 +63,10 @@ public class MaintenanceRecord extends DataAudit {
 
     @Column("checklist_record_id")
     private Long checklistRecordId;
+
+    @Column("is_canceled")
+    private Boolean isCanceled = false;
+
+    @Column("canceled_at")
+    private LocalDate canceledAt;
 }

@@ -13,13 +13,16 @@ import com.acme.checklist.payload.maintenance.MaintenanceSaveDTO;
 import com.acme.checklist.payload.question.QuestionDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
@@ -36,7 +39,7 @@ public class MaintenanceChService {
     private final R2dbcEntityTemplate template;
     private final CommonService        commonService;
     private final FileStorageService   fileStorageService;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper         objectMapper;
 
     // =========================
     // CREATE ITEM
@@ -45,7 +48,7 @@ public class MaintenanceChService {
         MaintenanceChecklist entity = MaintenanceChecklist.builder()
                 .machineCode(dto.getMachineCode())
                 .questionId(dto.getQuestionId())
-                .isChoice(dto.getIsChoice())
+                // isChoice ลบออกแล้ว — ดึงจาก Question entity แทน
                 .checkStatus(dto.getCheckStatus() != null ? dto.getCheckStatus() : false)
                 .resetTime(dto.getResetTime())
                 .build();
@@ -54,8 +57,7 @@ public class MaintenanceChService {
                 .onErrorResume(e -> {
                     log.error("Failed to create maintenance checklist item", e);
                     String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                    return Mono.error(new org.springframework.web.server.ResponseStatusException(
-                            org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR, msg));
+                    return Mono.error(new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, msg));
                 });
     }
 
@@ -77,26 +79,19 @@ public class MaintenanceChService {
     // =========================
     // GET BY MACHINE CODE
     // =========================
-
-    /**
-     * ดึง MaintenanceChecklist ทั้งหมดของ machine พร้อม join question
-     * ใช้แสดงในแท็บ maintenance ของ machine view
-     */
     public Mono<List<MaintenanceChDTO>> getByMachineCode(String machineCode) {
         return template.select(
-                        Query.query(
-                                Criteria.where("machine_code").is(machineCode)
-                        ).sort(org.springframework.data.domain.Sort.by(
-                                org.springframework.data.domain.Sort.Direction.ASC, "id")),
+                        Query.query(Criteria.where("machine_code").is(machineCode))
+                                .sort(Sort.by(Sort.Direction.ASC, "id")),
                         MaintenanceChecklist.class)
                 .collectList()
                 .flatMap(items -> {
-                    if (items.isEmpty()) return Mono.just(java.util.List.<MaintenanceChDTO>of());
+                    if (items.isEmpty()) return Mono.just(List.<MaintenanceChDTO>of());
 
                     List<Long> questionIds = items.stream()
                             .map(MaintenanceChecklist::getQuestionId)
                             .distinct()
-                            .collect(java.util.stream.Collectors.toList());
+                            .collect(Collectors.toList());
 
                     return template.select(
                                     Query.query(Criteria.where("id").in(questionIds)),
@@ -104,19 +99,19 @@ public class MaintenanceChService {
                             .collectList()
                             .map(questions -> {
                                 Map<Long, Question> qMap = questions.stream()
-                                        .collect(java.util.stream.Collectors.toMap(
-                                                Question::getId, q -> q));
+                                        .collect(Collectors.toMap(Question::getId, q -> q));
+
                                 return items.stream().map(item -> {
                                     Question q = qMap.get(item.getQuestionId());
                                     return MaintenanceChDTO.builder()
                                             .id(item.getId())
                                             .machineCode(item.getMachineCode())
-                                            .isChoice(item.getIsChoice())
+                                            .isChoice(q != null ? q.getIsChoice() : null)
                                             .checkStatus(item.getCheckStatus())
                                             .resetTime(item.getResetTime())
-                                            .question(q != null ? new QuestionDTO().from(q) : null)
+                                            .question(QuestionDTO.from(q))
                                             .build();
-                                }).collect(java.util.stream.Collectors.toList());
+                                }).collect(Collectors.toList());
                             });
                 });
     }
@@ -124,12 +119,6 @@ public class MaintenanceChService {
     // =========================
     // GET BY MAINTENANCE ID
     // =========================
-
-    /**
-     * ดึง MaintenanceRecord ตาม id
-     * แล้ว query MaintenanceChecklist ตาม machineCode
-     * แล้ว join กับ Question เพื่อเอา detail/description
-     */
     public Mono<ApiResponse<MaintenanceDTO>> getById(Long id) {
         return template.selectOne(
                         Query.query(Criteria.where("id").is(id)),
@@ -137,10 +126,8 @@ public class MaintenanceChService {
                 .switchIfEmpty(Mono.error(new RuntimeException("Maintenance record not found: " + id)))
                 .flatMap(record ->
                         template.select(
-                                        Query.query(
-                                                Criteria.where("machine_code").is(record.getMachineCode())
-                                        ).sort(org.springframework.data.domain.Sort.by(
-                                                org.springframework.data.domain.Sort.Direction.ASC, "id")),
+                                        Query.query(Criteria.where("machine_code").is(record.getMachineCode()))
+                                                .sort(Sort.by(Sort.Direction.ASC, "id")),
                                         MaintenanceChecklist.class)
                                 .collectList()
                                 .flatMap(items -> enrichWithQuestions(items, record))
@@ -155,7 +142,6 @@ public class MaintenanceChService {
     // =========================
     // ENRICH WITH QUESTIONS
     // =========================
-
     private Mono<MaintenanceDTO> enrichWithQuestions(
             List<MaintenanceChecklist> items,
             MaintenanceRecord record
@@ -183,10 +169,10 @@ public class MaintenanceChService {
                                 return MaintenanceChDTO.builder()
                                         .id(item.getId())
                                         .machineCode(item.getMachineCode())
-                                        .isChoice(item.getIsChoice())
+                                        .isChoice(q != null ? q.getIsChoice() : null) // ดึงจาก Question
                                         .checkStatus(item.getCheckStatus())
                                         .resetTime(item.getResetTime())
-                                        .question(q != null ? new QuestionDTO().from(q) : null)
+                                        .question(QuestionDTO.from(q))               // static call
                                         .build();
                             })
                             .collect(Collectors.toList());
@@ -198,7 +184,6 @@ public class MaintenanceChService {
     // =========================
     // BUILD DTO
     // =========================
-
     private MaintenanceDTO buildDetailDTO(MaintenanceRecord record, List<MaintenanceChDTO> items) {
         return MaintenanceDTO.builder()
                 .id(record.getId())
@@ -224,7 +209,6 @@ public class MaintenanceChService {
     // =========================
     // SAVE (checklist submit)
     // =========================
-
     public Mono<ApiResponse<Void>> save(String requestJson, FilePart file) {
         MaintenanceSaveDTO dto;
         try {
@@ -253,7 +237,6 @@ public class MaintenanceChService {
     // =========================
     // PROCESS SAVE
     // =========================
-
     private Mono<ApiResponse<Void>> processSave(MaintenanceSaveDTO dto) {
         log.info("processSave dto: maintenanceRecordId={}, machineCode={}, machineStatus={}, responsibleMaintenance={}, maintenanceBy={}",
                 dto.getMaintenanceRecordId(), dto.getMachineCode(), dto.getMachineStatus(),
@@ -269,8 +252,8 @@ public class MaintenanceChService {
                 .image(dto.getImage())
                 .userId(dto.getUserId())
                 .userName(dto.getUserName())
-                .supervisor(parseLong(dto.getSupervisor()))   // ✅ safe parse
-                .manager(parseLong(dto.getManager()))         // ✅ safe parse
+                .supervisor(parseLong(dto.getSupervisor()))
+                .manager(parseLong(dto.getManager()))
                 .jobDetail(dto.getJobDetail())
                 .checklistStatus("COMPLETED")
                 .recheck(false)
@@ -291,7 +274,7 @@ public class MaintenanceChService {
                                 maintenance.setActualDate(actualDate);
                                 maintenance.setStatus(status);
                                 maintenance.setMaintenanceBy(dto.getMaintenanceBy());
-                                maintenance.setResponsibleMaintenance(parseLong(dto.getResponsibleMaintenance())); // ✅
+                                maintenance.setResponsibleMaintenance(parseLong(dto.getResponsibleMaintenance()));
                                 maintenance.setAttachment(dto.getImage());
                                 maintenance.setNote(dto.getMachineNote());
                                 maintenance.setChecklistRecordId(savedRecord.getId());
@@ -313,7 +296,9 @@ public class MaintenanceChService {
                 });
     }
 
-    // ✅ เพิ่ม helper
+    // =========================
+    // HELPER
+    // =========================
     private Long parseLong(String value) {
         if (value == null || value.isBlank()) return null;
         try { return Long.valueOf(value); }

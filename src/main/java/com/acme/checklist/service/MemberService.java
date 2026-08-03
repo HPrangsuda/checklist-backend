@@ -117,9 +117,7 @@ public class MemberService {
     // =========================
     // GET LIST
     // =========================
-    public Mono<ListResponse<List<MemberListDTO>>> getList(
-            String keyword, List<Long> ids, int index, int size
-    ) {
+    public Mono<ListResponse<List<MemberListDTO>>> getList( String keyword, List<Long> ids, int index, int size ) {
         Pageable pageable = PageRequest.of(index, size, Sort.by(Sort.Direction.DESC, "id"));
         boolean hasIds = ids != null && !ids.isEmpty();
 
@@ -264,6 +262,8 @@ public class MemberService {
         member.setUserName(dto.getUserName());
         member.setPassword(passwordEncoder.encode(dto.getPassword()));
         member.setRoleType(dto.getRoleType());
+        member.setSupervisor(dto.getSupervisor());
+        member.setManager(dto.getManager());
         member.setLanguages(dto.getLanguages());
         return member;
     }
@@ -278,6 +278,8 @@ public class MemberService {
         addIfNotNull(params, "mobiles",       dto.getMobiles());
         addIfNotNull(params, "department_id", dto.getDepartmentId());
         addIfNotNull(params, "role_type",     dto.getRoleType());
+        addIfNotNull(params, "supervisor",    dto.getSupervisor());
+        addIfNotNull(params, "manager",       dto.getManager());
         addIfNotNull(params, "languages",     dto.getLanguages());
         if (StringUtils.hasText(dto.getPassword())) {
             params.put(SqlIdentifier.quoted("password"), passwordEncoder.encode(dto.getPassword()));

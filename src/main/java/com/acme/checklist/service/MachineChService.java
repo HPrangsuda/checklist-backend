@@ -2,6 +2,7 @@ package com.acme.checklist.service;
 
 import com.acme.checklist.entity.MachineChecklist;
 import com.acme.checklist.entity.Member;
+import com.acme.checklist.entity.Question;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.ListResponse;
@@ -106,8 +107,6 @@ public class MachineChService {
     }
 
     // ─── GET BY MACHINE CODE ──────────────────────────────────────────────────
-    // ดึงเฉพาะ checklist ของ machine ที่ active (กรอง CANCELED ออก)
-
     public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getByMachineCode(String machineCode) {
         return selectActiveOnly(machineCode, "")
                 .collectList()
@@ -120,8 +119,6 @@ public class MachineChService {
     }
 
     // ─── GET GENERAL CHECKLIST ────────────────────────────────────────────────
-    // reset_time = "0 0 0 * * 1" คือ weekly reset → แสดงเสมอไม่ขึ้นกับ check_status
-
     public Mono<ListResponse<List<MachineChWithQuestionDTO>>> getGeneralChecklist(String machineCode) {
         return selectActiveOnly(machineCode, "AND mc.reset_time = '0 0 0 * * 1'")
                 .collectList()
@@ -172,8 +169,6 @@ public class MachineChService {
             return Mono.error(new ThrowException("MC003"));
         if (dto.getQuestionId() == null)
             return Mono.error(new ThrowException("MC004"));
-        if (dto.getIsChoice() == null)
-            return Mono.error(new ThrowException("MC013"));
         if (!StringUtils.hasText(dto.getResetTime()))
             return Mono.error(new ThrowException("MC014"));
         return Mono.just(dto);
@@ -185,7 +180,6 @@ public class MachineChService {
         return MachineChecklist.builder()
                 .machineCode(dto.getMachineCode())
                 .questionId(dto.getQuestionId())
-                .isChoice(dto.getIsChoice())
                 .checkStatus(dto.getCheckStatus())
                 .resetTime(dto.getResetTime())
                 .build();
@@ -197,19 +191,10 @@ public class MachineChService {
         addIfNotNull(params, "machine_code", dto.getMachineCode());
         addIfNotNull(params, "question_id",  dto.getQuestionId());
         addIfNotNull(params, "reset_time",   dto.getResetTime());
-        addIfNotNull(params, "is_choice",    dto.getIsChoice());
         return Update.from(params);
     }
 
     // ─── PRIVATE: ACTIVE MACHINE FILTER ──────────────────────────────────────
-    /**
-     * ดึง MachineChecklist เฉพาะของ machine ที่ active (machine_status IN ACTIVE_STATUSES)
-     * กรณีมี machine_code ซ้ำ (เช่น CANCELED + OPERATIONAL) จะได้เฉพาะ rows ของ active machine
-     *
-     * @param machineCode  machine code ที่ต้องการ
-     * @param extraWhere   เงื่อนไขเพิ่มเติม เช่น "AND mc.check_status = false"
-     *                     ต้องขึ้นต้นด้วย AND หรือเป็น "" ถ้าไม่มีเงื่อนไขเพิ่ม
-     */
     private Flux<MachineChecklist> selectActiveOnly(String machineCode, String extraWhere) {
         String sql = """
                 SELECT mc.*
@@ -241,7 +226,6 @@ public class MachineChService {
                     mc.setId(row.get("id", Long.class));
                     mc.setMachineCode(row.get("machine_code", String.class));
                     mc.setQuestionId(row.get("question_id", Long.class));
-                    mc.setIsChoice(row.get("is_choice", Boolean.class));
                     mc.setCheckStatus(row.get("check_status", Boolean.class));
                     mc.setResetTime(row.get("reset_time", String.class));
                     return mc;
@@ -280,22 +264,24 @@ public class MachineChService {
     private Flux<MachineChResponseDTO> convertMachineChListDTOs(List<MachineChecklist> list) {
         if (list.isEmpty()) return Flux.empty();
 
-        List<Long> createdByIds = list.stream()
-                .map(MachineChecklist::getCreatedBy)
-                .filter(Objects::nonNull).distinct().toList();
-        List<Long> updatedByIds = list.stream()
-                .map(MachineChecklist::getUpdatedBy)
-                .filter(Objects::nonNull).distinct().toList();
+        List<Long> questionIds   = list.stream().map(MachineChecklist::getQuestionId).filter(Objects::nonNull).distinct().toList();
+        List<Long> createdByIds  = list.stream().map(MachineChecklist::getCreatedBy).filter(Objects::nonNull).distinct().toList();
+        List<Long> updatedByIds  = list.stream().map(MachineChecklist::getUpdatedBy).filter(Objects::nonNull).distinct().toList();
 
         return Mono.zip(
+                        template.select(Query.query(Criteria.where("id").in(questionIds)), Question.class).collectList(),
                         commonService.fetchMembersByIds(createdByIds),
                         commonService.fetchMembersByIds(updatedByIds))
                 .flatMapMany(tuple -> {
-                    Map<Long, Member> createdByMap = tuple.getT1();
-                    Map<Long, Member> updatedByMap = tuple.getT2();
+                    Map<Long, Question> questionMap = tuple.getT1().stream()
+                            .collect(Collectors.toMap(Question::getId, q -> q));
+                    Map<Long, Member> createdByMap  = tuple.getT2();
+                    Map<Long, Member> updatedByMap  = tuple.getT3();
+
                     return Flux.fromIterable(list)
                             .map(c -> MachineChResponseDTO.from(
                                     c,
+                                    questionMap.get(c.getQuestionId()),   // ส่ง question เข้าไป
                                     AuditMemberDTO.from(createdByMap.get(c.getCreatedBy())),
                                     AuditMemberDTO.from(updatedByMap.get(c.getUpdatedBy()))
                             ));

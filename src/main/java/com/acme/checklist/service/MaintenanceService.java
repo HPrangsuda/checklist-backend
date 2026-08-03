@@ -82,8 +82,13 @@ public class MaintenanceService {
                     String deptFragment = hasDept ? "AND m.department = :department" : "";
                     String stFragment   = hasSt   ? "AND mr.status = :status"        : "";
 
-                    String where = "WHERE 1=1 " + roleFragment + " " + kwFragment
-                            + " " + yearFragment + " " + deptFragment + " " + stFragment;
+                    String where = "WHERE 1=1 "
+                            + "AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL) "
+                            + roleFragment  + " "
+                            + kwFragment    + " "
+                            + yearFragment  + " "
+                            + deptFragment  + " "
+                            + stFragment;
 
                     String countSql = """
                             SELECT COUNT(*)

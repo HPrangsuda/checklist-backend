@@ -86,6 +86,7 @@ public class CalibrationService {
                     String calFragment  = hasCal   ? "AND c.calibration_status = :calibrationStatus" : "";
 
                     String where = "WHERE 1=1 "
+                            + "AND (c.is_canceled = FALSE OR c.is_canceled IS NULL) "
                             + roleFragment  + " "
                             + kwFragment    + " "
                             + yearFragment  + " "

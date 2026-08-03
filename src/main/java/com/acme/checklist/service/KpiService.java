@@ -30,8 +30,21 @@ import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Objects;
+
+// ─── KpiService.java ──────────────────────────────────────────────────────────
+//
+//  recalculateKpiForPerson(memberId)
+//  ──────────────────────────────────
+//  เดิม: recalculate แค่ check_all
+//  ใหม่: recalculate ทั้ง check_all + checked ในคราวเดียวกัน
+//
+//  เหตุผล: เมื่อ responsible person submit checklist (recheck=true) ใน ChecklistService
+//  ต้อง reflect ใน checked ของ KPI ทันที ไม่รอ scheduler รายวัน 00:05
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Slf4j
 @Service
@@ -41,7 +54,11 @@ public class KpiService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
 
-    // ─── CREATE ───────────────────────────────────────────────────────────────
+    private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
+
+    // =========================================================================
+    //  CREATE
+    // =========================================================================
 
     @Transactional
     public Mono<ApiResponse<Void>> create(KpiDTO dto) {
@@ -52,25 +69,42 @@ public class KpiService {
                             .then(Mono.just(ApiResponse.success("KP001")));
                 })
                 .onErrorResume(e -> {
-                    log.error("Failed to create the kpi: {}", e.getMessage());
+                    log.error("[KPI] Failed to create: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("KP002", e.getMessage()));
                 });
     }
 
-    // ─── RECALCULATE KPI FOR PERSON ───────────────────────────────────────────
+    // =========================================================================
+    //  RECALCULATE KPI FOR PERSON  (trigger ทันทีหลัง submit checklist)
+    // =========================================================================
+
+    /**
+     * Recalculate ทั้ง check_all และ checked สำหรับ member คนเดียว
+     *
+     * check_all  = จำนวนครั้งที่ควร submit ในเดือนนี้ (คำนวณจาก responsible_history + friday count)
+     * checked    = จำนวนครั้งที่ submit จริง (นับจาก checklist_record recheck=true)
+     *
+     * เรียกจาก ChecklistService.saveAsResponsiblePending() ทันทีหลัง save record สำเร็จ
+     */
     public Mono<Void> recalculateKpiForPerson(Long memberId) {
         if (memberId == null) return Mono.empty();
 
-        LocalDate today       = LocalDate.now();
+        LocalDate today       = LocalDate.now(BKK);
         YearMonth ym          = YearMonth.from(today);
-        String year           = String.valueOf(today.getYear());
-        String month          = String.format("%02d", today.getMonthValue());
+        String    year        = String.valueOf(today.getYear());
+        String    month       = String.format("%02d", today.getMonthValue());
         LocalDate firstDay    = ym.atDay(1);
         LocalDate lastDay     = ym.atEndOfMonth();
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
+        // checked นับถึงวันนี้ แต่ไม่เกิน lastFriday ของเดือน
+        LocalDate checkedEnd  = today.isAfter(lastFriday) ? lastFriday : today;
 
+        log.info("[KPI] recalculateKpiForPerson memberId={} year={} month={} kpiStart={} checkedEnd={}",
+                memberId, year, month, kpiStart, checkedEnd);
+
+        // ── 1. คำนวณ check_all ────────────────────────────────────────────────
         Criteria historyCriteria = Criteria
                 .where("responsible_person_id").is(memberId)
                 .and("effective_from").lessThanOrEquals(lastDay)
@@ -83,21 +117,64 @@ public class KpiService {
                         .map(machine -> {
                             LocalDate cs = clampStart(h.getEffectiveFrom(), kpiStart);
                             LocalDate ce = clampEnd(h.getEffectiveTo(), lastFriday);
-                            // แยก MONTHLY = 1L เหมือน KpiScheduler
-                            return "MONTHLY".equals(machine.getResetPeriod())
+                            long contribution = "MONTHLY".equals(machine.getResetPeriod())
                                     ? 1L
                                     : countFridaysInRange(cs, ce);
+                            log.debug("[KPI] checkAll machine={} contribution={}", h.getMachineCode(), contribution);
+                            return contribution;
                         })
                         .defaultIfEmpty(0L))
-                .reduce(0L, Long::sum);
+                .reduce(0L, Long::sum)
+                .doOnSuccess(v -> log.info("[KPI] checkAll for memberId={} → {}", memberId, v));
 
+        // ── 2. นับ checked จาก checklist_record ───────────────────────────────
+        //       SQL เดียวกับ KpiScheduler.recalculateCurrentMonthKpi()
+        //       แต่ใช้ BKK timezone และกรอง auto record ออก
+        Mono<Long> checkedMono = template.getDatabaseClient()
+                .sql("""
+                    SELECT COUNT(*) FROM checklist_record cr
+                    JOIN machine m ON cr.machine_code = m.machine_code
+                    JOIN responsible_history rh
+                        ON rh.machine_code = cr.machine_code
+                        AND rh.responsible_person_id = $1
+                        AND DATE(cr.created_at AT TIME ZONE 'Asia/Bangkok') >= rh.effective_from
+                        AND (rh.effective_to IS NULL
+                             OR DATE(cr.created_at AT TIME ZONE 'Asia/Bangkok') <= rh.effective_to)
+                    WHERE cr.created_by = $2
+                      AND cr.recheck = true
+                      AND cr.check_type = 'GENERAL'
+                      AND m.machine_status IN (%s)
+                      AND cr.created_at >= $3
+                      AND cr.created_at <= $4
+                      AND (
+                          cr.machine_note IS NULL
+                          OR cr.machine_note != 'Automatic recording'
+                          OR cr.reason_not_checked IS NULL
+                          OR UPPER(cr.reason_not_checked)
+                             NOT IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
+                      )
+                    """.formatted(MachineStatus.sqlInClause()))
+                .bind(0, memberId)
+                .bind(1, memberId)
+                .bind(2, kpiStart.atStartOfDay(BKK).toInstant())
+                .bind(3, checkedEnd.atTime(23, 59, 59).atZone(BKK).toInstant())
+                .map((row, meta) -> row.get(0, Long.class))
+                .one()
+                .defaultIfEmpty(0L)
+                .doOnSuccess(v -> log.info("[KPI] checked for memberId={} → {}", memberId, v));
+
+        // ── 3. ดึง member ─────────────────────────────────────────────────────
         Mono<Member> memberMono = template.selectOne(
                 Query.query(Criteria.where("id").is(memberId)), Member.class);
 
-        return Mono.zip(checkAllMono, memberMono)
+        // ── 4. zip แล้ว upsert KPI row ────────────────────────────────────────
+        return Mono.zip(checkAllMono, checkedMono, memberMono)
                 .flatMap(tuple -> {
                     long   newCheckAll = tuple.getT1();
-                    Member member      = tuple.getT2();
+                    long   newChecked  = tuple.getT2();
+                    Member member      = tuple.getT3();
+
+                    log.info("[KPI] upsert memberId={} checkAll={} checked={}", memberId, newCheckAll, newChecked);
 
                     return template.selectOne(
                                     Query.query(Criteria.where("member_id").is(memberId)
@@ -105,35 +182,42 @@ public class KpiService {
                                             .and("months").is(month)),
                                     Kpi.class)
                             .flatMap(kpi -> {
-                                if (newCheckAll == 0) return Mono.empty();
+                                // อัปเดต row ที่มีอยู่แล้ว
                                 kpi.setCheckAll(newCheckAll);
+                                kpi.setChecked(newChecked);
                                 kpi.setManagerId(member.getManager());
                                 kpi.setSupervisorId(member.getSupervisor());
                                 return template.update(kpi).then();
                             })
                             .switchIfEmpty(Mono.defer(() -> {
-                                if (newCheckAll == 0) return Mono.empty();
+                                // ยังไม่มี row → insert ใหม่
+                                // (ปกติ scheduler วันที่ 1 จะสร้างให้แล้ว แต่ป้องกันกรณี edge case)
+                                if (newCheckAll == 0) {
+                                    log.warn("[KPI] Skip insert for memberId={} — checkAll=0", memberId);
+                                    return Mono.empty();
+                                }
                                 Kpi newKpi = Kpi.builder()
                                         .memberId(memberId)
                                         .employeeName(member.getFirstName() + " " + member.getLastName())
                                         .years(year)
                                         .months(month)
                                         .checkAll(newCheckAll)
-                                        .checked(0L)
+                                        .checked(newChecked)
                                         .managerId(member.getManager())
                                         .supervisorId(member.getSupervisor())
                                         .build();
                                 return template.insert(newKpi).then();
                             }));
                 })
-                .doOnSuccess(v -> log.info("Recalculated KPI for memberId={}", memberId))
-                .onErrorResume(e -> {
-                    log.error("Failed to recalculate KPI for memberId={}: {}", memberId, e.getMessage());
-                    return Mono.empty();
-                });
+                .doOnSuccess(v -> log.info("[KPI] recalculateKpiForPerson done memberId={}", memberId))
+                .doOnError(e -> log.error("[KPI] recalculateKpiForPerson failed memberId={}: {} - {}",
+                        memberId, e.getClass().getSimpleName(), e.getMessage(), e))
+                .onErrorResume(e -> Mono.empty());
     }
 
-    // ─── GET LIST ─────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  GET LIST
+    // =========================================================================
 
     public Mono<PagedResponse<KpiResponseDTO>> getKpiByYearAndMonth(
             String year, String month, String keyword, int index, int size) {
@@ -174,10 +258,12 @@ public class KpiService {
                             Kpi.class,
                             records -> Flux.fromIterable(records).map(KpiResponseDTO::from));
                 })
-                .doOnError(e -> log.error("Failed to fetch KPI: {}", e.getMessage()));
+                .doOnError(e -> log.error("[KPI] Failed to fetch list: {}", e.getMessage()));
     }
 
-    // ─── GET BY ID ────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  GET BY ID
+    // =========================================================================
 
     public Mono<ApiResponse<KpiResponseDTO>> getById(Long id) {
         return template.selectOne(
@@ -192,8 +278,9 @@ public class KpiService {
                     LocalDate lastFriday  = getLastFridayOfMonth(ym);
                     LocalDate start       = firstFriday.with(DayOfWeek.MONDAY);
 
-                    Instant startInstant = start.atStartOfDay(ZoneOffset.UTC).toInstant();
-                    Instant endInstant   = lastFriday.atTime(23, 59, 59).atZone(ZoneOffset.UTC).toInstant();
+                    // ใช้ BKK timezone ให้ตรงกับ timezone ที่ระบบใช้ทั่วไป
+                    Instant startInstant = start.atStartOfDay(BKK).toInstant();
+                    Instant endInstant   = lastFriday.atTime(23, 59, 59).atZone(BKK).toInstant();
 
                     Criteria criteria = Criteria
                             .where("created_by").is(kpi.getMemberId())
@@ -211,12 +298,14 @@ public class KpiService {
                                     KpiResponseDTO.from(kpi, checklists)));
                 })
                 .onErrorResume(e -> {
-                    log.error("Failed to fetch KPI by id: {}", e.getMessage(), e);
+                    log.error("[KPI] Failed to fetch by id: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.error("KP010", e.getMessage()));
                 });
     }
 
-    // ─── VALIDATE ─────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  VALIDATE
+    // =========================================================================
 
     public Mono<KpiDTO> validateData(KpiDTO kpiDTO) {
         if (kpiDTO.getMemberId() == null)
@@ -232,7 +321,9 @@ public class KpiService {
         return Mono.just(kpiDTO);
     }
 
-    // ─── BUILD ────────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  BUILD
+    // =========================================================================
 
     public Kpi buildFromDTO(KpiDTO kpiDTO) {
         return Kpi.builder()
@@ -248,7 +339,9 @@ public class KpiService {
                 .build();
     }
 
-    // ─── HELPERS ──────────────────────────────────────────────────────────────
+    // =========================================================================
+    //  HELPERS
+    // =========================================================================
 
     private Mono<Machine> findActiveMachine(String machineCode) {
         return template.select(

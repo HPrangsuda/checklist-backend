@@ -13,7 +13,6 @@ public class MachineChDTO {
     private Long id;
     private String machineCode;
     private Long questionId;
-    private Boolean isChoice;
     private Boolean checkStatus;
     private String resetTime;
 

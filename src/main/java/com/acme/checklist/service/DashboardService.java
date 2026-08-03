@@ -1,5 +1,6 @@
 package com.acme.checklist.service;
 
+import com.acme.checklist.entity.enums.MachineStatus;
 import com.acme.checklist.payload.ListResponse;
 import com.acme.checklist.payload.MemberPrincipal;
 import com.acme.checklist.payload.dashboard.CalibrationStatsDTO;
@@ -16,6 +17,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Objects;
 
 @Slf4j
 @Service
@@ -25,10 +27,8 @@ public class DashboardService {
 
     private Mono<MemberPrincipal> getPrincipal() {
         return ReactiveSecurityContextHolder.getContext()
-                .map(ctx -> (MemberPrincipal) ctx.getAuthentication().getPrincipal());
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal());
     }
-
-    // ── Machine filter clause ─────────────────────────────────────────────────
 
     private record MachineFilter(String clause, Long memberId) {}
 
@@ -48,8 +48,6 @@ public class DashboardService {
         };
     }
 
-    // ── getSummary ────────────────────────────────────────────────────────────
-
     public Mono<SummaryDTO> getSummary() {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
@@ -58,25 +56,29 @@ public class DashboardService {
                     ? "WHERE " + f.clause().replace("m.", "mc.")
                     : "";
 
+            String operationalValue = MachineStatus.OPERATIONAL.getDbValue();
+
             String sql = """
                 SELECT
                     COUNT(DISTINCT m.id) AS total,
-                    COUNT(DISTINCT CASE WHEN m.machine_status = 'OPERATIONAL' THEN m.id END) AS total_available,
+                    COUNT(DISTINCT CASE WHEN m.machine_status = '%s' THEN m.id END) AS total_available,
                     (SELECT COUNT(DISTINCT cr.id)
                      FROM calibration_record cr
                      JOIN machine mc ON cr.machine_code = mc.machine_code
                      %s
                      AND cr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                     AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
                     ) AS total_calibration,
                     (SELECT COUNT(DISTINCT mr.id)
                      FROM maintenance_record mr
                      JOIN machine mc ON mr.machine_code = mc.machine_code
                      %s
                      AND mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                     AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
                     ) AS total_maintenance
                 FROM machine m
                 %s
-            """.formatted(subWhere, subWhere, machineWhere);
+            """.formatted(operationalValue, subWhere, subWhere, machineWhere);
 
             var spec = template.getDatabaseClient().sql(sql);
             if (f.memberId() != null) spec = spec.bind(0, f.memberId());
@@ -105,8 +107,6 @@ public class DashboardService {
         });
     }
 
-    // ── getSoon ───────────────────────────────────────────────────────────────
-
     public Mono<ListResponse<List<SoonDTO>>> getSoon() {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
@@ -121,6 +121,7 @@ public class DashboardService {
                 FROM calibration_record cr
                 JOIN machine m ON cr.machine_code = m.machine_code
                 WHERE cr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                  AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
                 %s
                 ORDER BY cr.id, cr.due_date ASC
             """.formatted(joinWhere);
@@ -134,6 +135,7 @@ public class DashboardService {
                 FROM maintenance_record mr
                 JOIN machine m ON mr.machine_code = m.machine_code
                 WHERE mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                  AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
                 %s
                 ORDER BY mr.id, mr.due_date ASC
             """.formatted(joinWhere);
@@ -164,8 +166,6 @@ public class DashboardService {
         });
     }
 
-    // ── getMaintenanceStats ───────────────────────────────────────────────────
-
     public Mono<ListResponse<List<MaintenanceStatsDTO>>> getMaintenanceStats() {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
@@ -186,6 +186,7 @@ public class DashboardService {
                     FROM maintenance_record mr
                     %s
                     WHERE mr.years = $1
+                      AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
                     GROUP BY EXTRACT(MONTH FROM mr.due_date)
                 )
                 SELECT m.month_num,
@@ -221,8 +222,6 @@ public class DashboardService {
         });
     }
 
-    // ── getCalibrationStats ───────────────────────────────────────────────────
-
     public Mono<ListResponse<List<CalibrationStatsDTO>>> getCalibrationStats() {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
@@ -243,6 +242,7 @@ public class DashboardService {
                     FROM calibration_record cr
                     %s
                     WHERE cr.years = $1
+                      AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
                     GROUP BY EXTRACT(MONTH FROM cr.due_date)
                 )
                 SELECT m.month_num,
@@ -277,8 +277,6 @@ public class DashboardService {
                     });
         });
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private SoonDTO mapToSoonDTO(io.r2dbc.spi.Row row) {
         try {
