@@ -158,6 +158,16 @@ public class MachineService {
         cal.setCalibrationRange(dto.getCalibrationRange());
         cal.setCalibrationStatus(dto.getCalibrationStatus());
         cal.setAttachment(dto.getAttachment());
+        cal.setNote(dto.getNote());
+        cal.setPermissibleCapacity(dto.getPermissibleCapacity());
+        cal.setComment(dto.getComment());
+        cal.setResolution(dto.getResolution());
+        cal.setMaxUncertainty(dto.getMaxUncertainty());
+        cal.setMpe(dto.getMpe());
+        cal.setCheckMpe(dto.getCheckMpe());
+        cal.setCheckResolution(dto.getCheckResolution());
+        cal.setCheckResult(dto.getCheckResult());
+        cal.setReasonNotPass(dto.getReasonNotPass());
         return commonService.save(cal, CalibrationRecord.class).then();
     }
 
@@ -223,6 +233,15 @@ public class MachineService {
                                     ? cancelActiveRecords(existing.getMachineCode())
                                     : Mono.empty();
 
+                            // ─── NEW: อัปเดต maintenance และ calibration ────────────────
+                            Mono<Void> updateMaint = nonActive
+                                    ? Mono.empty()  // ถ้า non-active ไม่ต้องอัปเดต เพราะ cancelActiveRecords จัดการแล้ว
+                                    : updateMaintenanceRecords(existing.getMachineCode(), v);
+
+                            Mono<Void> updateCal = nonActive
+                                    ? Mono.empty()
+                                    : updateCalibrationRecord(existing.getMachineCode(), v);
+
                             Mono<Void> notify = notifyMachineUpdate(snapshot, v, personChanged, newPersonId)
                                     .onErrorResume(e -> {
                                         log.warn("Notify update failed (non-blocking): {}", e.getMessage());
@@ -231,6 +250,8 @@ public class MachineService {
 
                             if (!personChanged && !nonActive) {
                                 return updateMachine
+                                        .then(updateMaint)
+                                        .then(updateCal)
                                         .then(cancelRecords)
                                         .then(notify)
                                         .then(Mono.just(ApiResponse.<Void>success("MS003")));
@@ -262,6 +283,8 @@ public class MachineService {
                                     : Mono.empty();
 
                             return updateMachine
+                                    .then(updateMaint)
+                                    .then(updateCal)
                                     .then(cancelRecords)
                                     .then(closeOld)
                                     .then(insertNew)
@@ -277,6 +300,133 @@ public class MachineService {
                 .onErrorResume(e -> {
                     log.error("Failed to update the machine: {}", e.getMessage(), e);
                     return Mono.just(ApiResponse.<Void>error("MS004", e.getMessage()));
+                });
+    }
+
+    // ─── UPDATE MAINTENANCE RECORDS ───────────────────────────────────────────
+
+    /**
+     * อัปเดต maintenance records:
+     * - ลบ records ที่ยังไม่มี actual_date (ยังไม่ได้ทำจริง) และยังไม่ถูก cancel
+     * - Insert ใหม่จาก DTO
+     * - Records ที่ actual_date != null (ทำไปแล้ว) จะถูกสงวนไว้ไม่แตะ
+     */
+    private Mono<Void> updateMaintenanceRecords(String machineCode, MachineDTO dto) {
+        if (dto.getMaintenanceList() == null || dto.getMaintenanceList().isEmpty()) {
+            log.debug("No maintenanceList in DTO for machine={}, skipping maintenance update", machineCode);
+            return Mono.empty();
+        }
+
+        log.info("Updating maintenance records for machine={}, count={}", machineCode, dto.getMaintenanceList().size());
+
+        // ลบเฉพาะ records ที่ยังไม่ได้ทำจริง (actual_date IS NULL) และยังไม่ถูก cancel
+        Criteria deleteCriteria = Criteria.where("machine_code").is(machineCode)
+                .and("actual_date").isNull()
+                .and(Criteria.where("is_canceled").isNull()
+                        .or("is_canceled").is(false));
+
+        Machine machineRef = Machine.builder()
+                .machineCode(machineCode)
+                .machineName(dto.getMachineName())
+                .build();
+
+        return template.delete(Query.query(deleteCriteria), MaintenanceRecord.class)
+                .doOnSuccess(count -> log.info("Deleted {} pending maintenance records for machine={}", count, machineCode))
+                .then(createMaintenanceRecords(machineRef, dto.getMaintenanceList()))
+                .doOnSuccess(v -> log.info("Re-inserted maintenance records for machine={}", machineCode))
+                .onErrorResume(e -> {
+                    log.error("Failed to update maintenance records for machine={}: {}", machineCode, e.getMessage(), e);
+                    return Mono.empty(); // non-blocking — ไม่ให้ล้ม machine update
+                });
+    }
+
+    // ─── UPDATE CALIBRATION RECORD ────────────────────────────────────────────
+
+    /**
+     * อัปเดต calibration record:
+     * - ถ้า DTO มี id → UPDATE record นั้นตรงๆ
+     * - ถ้าไม่มี id → หา record ล่าสุดของ machine แล้ว UPDATE หรือ INSERT ใหม่ถ้าไม่เจอ
+     */
+    private Mono<Void> updateCalibrationRecord(String machineCode, MachineDTO dto) {
+        if (dto.getCalibration() == null || dto.getCalibration().getDueDate() == null) {
+            log.debug("No calibration in DTO for machine={}, skipping calibration update", machineCode);
+            return Mono.empty();
+        }
+
+        CalibrationDTO cal = dto.getCalibration();
+        log.info("Updating calibration record for machine={}, calId={}", machineCode, cal.getId());
+
+        // ─── Case 1: มี id → UPDATE ตรงๆ ────────────────────────────────────
+        if (cal.getId() != null) {
+            var spec = template.getDatabaseClient()
+                    .sql("""
+                        UPDATE calibration_record SET
+                            due_date           = $1,
+                            certificate_date   = $2,
+                            results            = $3,
+                            criteria           = $4,
+                            measuring_range    = $5,
+                            accuracy           = $6,
+                            calibration_range  = $7,
+                            calibration_status = $8,
+                            note               = $9,
+                            years              = $10
+                        WHERE id           = $11
+                          AND machine_code  = $12
+                    """)
+                    .bind(0, cal.getDueDate());
+            spec = cal.getCertificateDate()   != null ? spec.bind(1, cal.getCertificateDate())   : spec.bindNull(1, LocalDate.class);
+            spec = cal.getResults()           != null ? spec.bind(2, cal.getResults())           : spec.bindNull(2, String.class);
+            spec = cal.getCriteria()          != null ? spec.bind(3, cal.getCriteria())          : spec.bindNull(3, String.class);
+            spec = cal.getMeasuringRange()    != null ? spec.bind(4, cal.getMeasuringRange())    : spec.bindNull(4, String.class);
+            spec = cal.getAccuracy()          != null ? spec.bind(5, cal.getAccuracy())          : spec.bindNull(5, String.class);
+            spec = cal.getCalibrationRange()  != null ? spec.bind(6, cal.getCalibrationRange())  : spec.bindNull(6, String.class);
+            spec = cal.getCalibrationStatus() != null ? spec.bind(7, cal.getCalibrationStatus()) : spec.bindNull(7, String.class);
+            spec = cal.getNote()              != null ? spec.bind(8, cal.getNote())              : spec.bindNull(8, String.class);
+            return spec
+                    .bind(9,  String.valueOf(cal.getDueDate().getYear()))
+                    .bind(10, cal.getId())
+                    .bind(11, machineCode)
+                    .then()
+                    .doOnSuccess(v -> log.info("Updated calibration id={} for machine={}", cal.getId(), machineCode))
+                    .onErrorResume(e -> {
+                        log.error("Failed to update calibration id={} for machine={}: {}", cal.getId(), machineCode, e.getMessage(), e);
+                        return Mono.empty();
+                    });
+        }
+
+        // ─── Case 2: ไม่มี id → หา record ล่าสุด แล้ว UPDATE หรือ INSERT ──
+        Machine machineRef = Machine.builder()
+                .machineCode(machineCode)
+                .machineName(dto.getMachineName())
+                .build();
+
+        return template.selectOne(
+                        Query.query(Criteria.where("machine_code").is(machineCode))
+                                .sort(Sort.by(Sort.Direction.DESC, "id")),
+                        CalibrationRecord.class)
+                .flatMap(existing -> {
+                    log.info("Updating existing calibration id={} for machine={}", existing.getId(), machineCode);
+                    existing.setDueDate(cal.getDueDate());
+                    existing.setCertificateDate(cal.getCertificateDate());
+                    existing.setResults(cal.getResults());
+                    existing.setCriteria(cal.getCriteria());
+                    existing.setMeasuringRange(cal.getMeasuringRange());
+                    existing.setAccuracy(cal.getAccuracy());
+                    existing.setCalibrationRange(cal.getCalibrationRange());
+                    existing.setCalibrationStatus(cal.getCalibrationStatus());
+                    existing.setNote(cal.getNote());
+                    existing.setYears(String.valueOf(cal.getDueDate().getYear()));
+                    return template.update(existing).then();
+                })
+                .switchIfEmpty(
+                        // ไม่มี record เดิมเลย → insert ใหม่
+                        createCalibrationRecord(machineRef, cal)
+                                .doOnSuccess(v -> log.info("Inserted new calibration record for machine={}", machineCode))
+                )
+                .onErrorResume(e -> {
+                    log.error("Failed to upsert calibration for machine={}: {}", machineCode, e.getMessage(), e);
+                    return Mono.empty();
                 });
     }
 
@@ -769,10 +919,14 @@ public class MachineService {
                         return Mono.just(ApiResponse.<MachineResponseDTO>error("MS020", "QR code data is missing"));
 
                     Mono<List<CalibrationRecord>> calibMono = template
-                            .select(Query.query(Criteria.where("machine_code").is(machineCode)), CalibrationRecord.class)
+                            .select(Query.query(Criteria.where("machine_code").is(machineCode))
+                                            .sort(Sort.by(Sort.Direction.DESC, "id")),
+                                    CalibrationRecord.class)
                             .collectList();
                     Mono<List<MaintenanceRecord>> maintMono = template
-                            .select(Query.query(Criteria.where("machine_code").is(machineCode)), MaintenanceRecord.class)
+                            .select(Query.query(Criteria.where("machine_code").is(machineCode))
+                                            .sort(Sort.by(Sort.Direction.ASC, "round")),
+                                    MaintenanceRecord.class)
                             .collectList();
 
                     List<Long> auditIds = new ArrayList<>();
