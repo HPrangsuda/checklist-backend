@@ -4,5 +4,6 @@ public enum RoleType {
     MEMBER,
     SUPERVISOR,
     MANAGER,
+    DEPARTMENT_ADMIN,
     ADMIN
 }

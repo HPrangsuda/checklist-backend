@@ -69,6 +69,20 @@ public class MachineService {
         return value != null ? value : "-";
     }
 
+    // ─── RESOLVE DEPARTMENT CODE FROM MEMBER ──────────────────────────────────
+
+    /**
+     * ดึง department_code จาก member.department_id
+     * ใช้สำหรับ DEPARTMENT_ADMIN เพื่อ filter ข้อมูลเฉพาะ department ตัวเอง
+     */
+    private Mono<String> resolveDepartmentCodeByMemberId(Long memberId) {
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(memberId)),
+                        Member.class)
+                .map(Member::getDepartmentId)
+                .defaultIfEmpty("");
+    }
+
     // ─── CREATE ───────────────────────────────────────────────────────────────
 
     public Mono<ApiResponse<Map<String, Object>>> create(MachineDTO dto) {
@@ -212,7 +226,6 @@ public class MachineService {
                                         existing.getMachineCode(), newStatus);
                             }
 
-                            // snapshot ก่อน mutate สำหรับ diff notify
                             Machine snapshot = Machine.builder()
                                     .machineCode(existing.getMachineCode())
                                     .machineName(existing.getMachineName())
@@ -233,9 +246,8 @@ public class MachineService {
                                     ? cancelActiveRecords(existing.getMachineCode())
                                     : Mono.empty();
 
-                            // ─── NEW: อัปเดต maintenance และ calibration ────────────────
                             Mono<Void> updateMaint = nonActive
-                                    ? Mono.empty()  // ถ้า non-active ไม่ต้องอัปเดต เพราะ cancelActiveRecords จัดการแล้ว
+                                    ? Mono.empty()
                                     : updateMaintenanceRecords(existing.getMachineCode(), v);
 
                             Mono<Void> updateCal = nonActive
@@ -305,12 +317,6 @@ public class MachineService {
 
     // ─── UPDATE MAINTENANCE RECORDS ───────────────────────────────────────────
 
-    /**
-     * อัปเดต maintenance records:
-     * - ลบ records ที่ยังไม่มี actual_date (ยังไม่ได้ทำจริง) และยังไม่ถูก cancel
-     * - Insert ใหม่จาก DTO
-     * - Records ที่ actual_date != null (ทำไปแล้ว) จะถูกสงวนไว้ไม่แตะ
-     */
     private Mono<Void> updateMaintenanceRecords(String machineCode, MachineDTO dto) {
         if (dto.getMaintenanceList() == null || dto.getMaintenanceList().isEmpty()) {
             log.debug("No maintenanceList in DTO for machine={}, skipping maintenance update", machineCode);
@@ -319,7 +325,6 @@ public class MachineService {
 
         log.info("Updating maintenance records for machine={}, count={}", machineCode, dto.getMaintenanceList().size());
 
-        // ลบเฉพาะ records ที่ยังไม่ได้ทำจริง (actual_date IS NULL) และยังไม่ถูก cancel
         Criteria deleteCriteria = Criteria.where("machine_code").is(machineCode)
                 .and("actual_date").isNull()
                 .and(Criteria.where("is_canceled").isNull()
@@ -336,17 +341,12 @@ public class MachineService {
                 .doOnSuccess(v -> log.info("Re-inserted maintenance records for machine={}", machineCode))
                 .onErrorResume(e -> {
                     log.error("Failed to update maintenance records for machine={}: {}", machineCode, e.getMessage(), e);
-                    return Mono.empty(); // non-blocking — ไม่ให้ล้ม machine update
+                    return Mono.empty();
                 });
     }
 
     // ─── UPDATE CALIBRATION RECORD ────────────────────────────────────────────
 
-    /**
-     * อัปเดต calibration record:
-     * - ถ้า DTO มี id → UPDATE record นั้นตรงๆ
-     * - ถ้าไม่มี id → หา record ล่าสุดของ machine แล้ว UPDATE หรือ INSERT ใหม่ถ้าไม่เจอ
-     */
     private Mono<Void> updateCalibrationRecord(String machineCode, MachineDTO dto) {
         if (dto.getCalibration() == null || dto.getCalibration().getDueDate() == null) {
             log.debug("No calibration in DTO for machine={}, skipping calibration update", machineCode);
@@ -356,7 +356,6 @@ public class MachineService {
         CalibrationDTO cal = dto.getCalibration();
         log.info("Updating calibration record for machine={}, calId={}", machineCode, cal.getId());
 
-        // ─── Case 1: มี id → UPDATE ตรงๆ ────────────────────────────────────
         if (cal.getId() != null) {
             var spec = template.getDatabaseClient()
                     .sql("""
@@ -395,7 +394,6 @@ public class MachineService {
                     });
         }
 
-        // ─── Case 2: ไม่มี id → หา record ล่าสุด แล้ว UPDATE หรือ INSERT ──
         Machine machineRef = Machine.builder()
                 .machineCode(machineCode)
                 .machineName(dto.getMachineName())
@@ -420,7 +418,6 @@ public class MachineService {
                     return template.update(existing).then();
                 })
                 .switchIfEmpty(
-                        // ไม่มี record เดิมเลย → insert ใหม่
                         createCalibrationRecord(machineRef, cal)
                                 .doOnSuccess(v -> log.info("Inserted new calibration record for machine={}", machineCode))
                 )
@@ -660,20 +657,44 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    Criteria base = buildRoleBaseCriteria(role, memberId, mine);
+                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน แล้วค่อย build criteria
+                    if ("DEPARTMENT_ADMIN".equals(role)) {
+                        return resolveDepartmentCodeByMemberId(memberId)
+                                .flatMap(deptCode -> {
+                                    Criteria base = buildDepartmentAdminCriteria(deptCode);
+                                    Criteria finalCriteria = applyKeywordAndFilters(
+                                            base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
+                                    Query query = Query.query(finalCriteria)
+                                            .with(commonService.pageable(index, size, "created_at"));
+                                    return commonService.executePagedQuery(
+                                            index, size, query, finalCriteria, Machine.class, this::convertMachineListDTOs);
+                                });
+                    }
 
+                    Criteria base = buildRoleBaseCriteria(role, memberId, mine);
                     Criteria finalCriteria = applyKeywordAndFilters(
                             base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
-
                     Query query = Query.query(finalCriteria)
                             .with(commonService.pageable(index, size, "created_at"));
-
                     return commonService.executePagedQuery(
                             index, size, query, finalCriteria, Machine.class, this::convertMachineListDTOs);
                 });
     }
 
     // ─── BASE CRITERIA ตาม role ───────────────────────────────────────────────
+
+    /**
+     * DEPARTMENT_ADMIN: เห็นเฉพาะ machine ที่อยู่ใน department เดียวกับตัวเอง
+     * ใช้ department_code ที่ได้จาก member.department_id
+     */
+    private Criteria buildDepartmentAdminCriteria(String departmentCode) {
+        if (!StringUtils.hasText(departmentCode)) {
+            // ถ้าหา department ไม่เจอ ให้ไม่เห็นข้อมูลใดเลย (safe default)
+            log.warn("DEPARTMENT_ADMIN has no department_code, returning empty criteria");
+            return Criteria.where("department").is("__NO_MATCH__");
+        }
+        return Criteria.where("department").is(departmentCode);
+    }
 
     private Criteria buildRoleBaseCriteria(String role, Long memberId, boolean mine) {
         return switch (role) {
@@ -694,6 +715,7 @@ public class MachineService {
                         Criteria.where("responsible_person_id").is(memberId)
                                 .or("supervisor_id").is(memberId));
             }
+            // MEMBER และ role อื่นที่ไม่รู้จัก: เห็นเฉพาะของตัวเอง
             default -> Criteria.where("machine_status").in(ACTIVE_STATUSES)
                     .and(Criteria.where("responsible_person_id").is(memberId));
         };
@@ -740,6 +762,13 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
+                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน
+                    if ("DEPARTMENT_ADMIN".equals(role)) {
+                        return resolveDepartmentCodeByMemberId(memberId)
+                                .flatMap(deptCode -> buildFilterOptions(
+                                        "AND m.department = '" + deptCode + "'"));
+                    }
+
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
                         case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId +
@@ -749,73 +778,80 @@ public class MachineService {
                         default           -> "AND m.responsible_person_id = " + memberId;
                     };
 
-                    String activeInClause = MachineStatus.sqlInClause();
-
-                    String sql = """
-                            SELECT DISTINCT
-                                m.department,
-                                d.department       AS department_name,
-                                d.division         AS division,
-                                m.machine_status,
-                                m.check_status,
-                                m.responsible_person_name
-                            FROM machine m
-                            LEFT JOIN department d ON m.department = d.department_code
-                            WHERE m.machine_status IN (%s)
-                            %s
-                            ORDER BY m.department, m.machine_status, m.check_status, m.responsible_person_name
-                            """.formatted(activeInClause, roleFilter);
-
-                    return template.getDatabaseClient()
-                            .sql(sql)
-                            .map((row, meta) -> new Object[]{
-                                    row.get("department",              String.class),
-                                    row.get("department_name",         String.class),
-                                    row.get("division",                String.class),
-                                    row.get("machine_status",          String.class),
-                                    row.get("check_status",            String.class),
-                                    row.get("responsible_person_name", String.class)
-                            })
-                            .all()
-                            .collectList()
-                            .map(rows -> {
-                                Map<String, String> deptMap            = new LinkedHashMap<>();
-                                Set<String>         machineStatuses    = new LinkedHashSet<>();
-                                Set<String>         checkStatuses      = new LinkedHashSet<>();
-                                Set<String>         responsiblePersons = new LinkedHashSet<>();
-
-                                for (Object[] row : rows) {
-                                    String deptCode = (String) row[0];
-                                    String deptName = (String) row[1];
-                                    String division = (String) row[2];
-                                    String mStatus  = (String) row[3];
-                                    String cStatus  = (String) row[4];
-                                    String person   = (String) row[5];
-
-                                    if (deptCode != null && deptName != null) {
-                                        String label = buildDeptLabel(deptName, division);
-                                        deptMap.putIfAbsent(deptCode, label);
-                                    }
-                                    if (StringUtils.hasText(mStatus)) machineStatuses.add(mStatus);
-                                    if (StringUtils.hasText(cStatus)) checkStatuses.add(cStatus);
-                                    if (StringUtils.hasText(person))  responsiblePersons.add(person);
-                                }
-
-                                List<Map<String, String>> departments = deptMap.entrySet().stream()
-                                        .map(e -> Map.of("code", e.getKey(), "name", e.getValue()))
-                                        .toList();
-
-                                FilterOptionsDTO dto = new FilterOptionsDTO();
-                                dto.setDepartments(departments);
-                                dto.setMachineStatuses(new ArrayList<>(machineStatuses));
-                                dto.setCheckStatuses(new ArrayList<>(checkStatuses));
-                                dto.setResponsiblePersons(new ArrayList<>(responsiblePersons));
-                                return ApiResponse.success("MS040", dto);
-                            });
+                    return buildFilterOptions(roleFilter);
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to fetch filter options: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS041", e.getMessage()));
+                });
+    }
+
+    /**
+     * แยก logic การ query filter options ออกมาเพื่อ reuse ระหว่าง role ต่างๆ
+     */
+    private Mono<ApiResponse<FilterOptionsDTO>> buildFilterOptions(String roleFilter) {
+        String activeInClause = MachineStatus.sqlInClause();
+
+        String sql = """
+                SELECT DISTINCT
+                    m.department,
+                    d.department       AS department_name,
+                    d.division         AS division,
+                    m.machine_status,
+                    m.check_status,
+                    m.responsible_person_name
+                FROM machine m
+                LEFT JOIN department d ON m.department = d.department_code
+                WHERE m.machine_status IN (%s)
+                %s
+                ORDER BY m.department, m.machine_status, m.check_status, m.responsible_person_name
+                """.formatted(activeInClause, roleFilter);
+
+        return template.getDatabaseClient()
+                .sql(sql)
+                .map((row, meta) -> new Object[]{
+                        row.get("department",              String.class),
+                        row.get("department_name",         String.class),
+                        row.get("division",                String.class),
+                        row.get("machine_status",          String.class),
+                        row.get("check_status",            String.class),
+                        row.get("responsible_person_name", String.class)
+                })
+                .all()
+                .collectList()
+                .map(rows -> {
+                    Map<String, String> deptMap            = new LinkedHashMap<>();
+                    Set<String>         machineStatuses    = new LinkedHashSet<>();
+                    Set<String>         checkStatuses      = new LinkedHashSet<>();
+                    Set<String>         responsiblePersons = new LinkedHashSet<>();
+
+                    for (Object[] row : rows) {
+                        String deptCode = (String) row[0];
+                        String deptName = (String) row[1];
+                        String division = (String) row[2];
+                        String mStatus  = (String) row[3];
+                        String cStatus  = (String) row[4];
+                        String person   = (String) row[5];
+
+                        if (deptCode != null && deptName != null) {
+                            String label = buildDeptLabel(deptName, division);
+                            deptMap.putIfAbsent(deptCode, label);
+                        }
+                        if (StringUtils.hasText(mStatus)) machineStatuses.add(mStatus);
+                        if (StringUtils.hasText(cStatus)) checkStatuses.add(cStatus);
+                        if (StringUtils.hasText(person))  responsiblePersons.add(person);
+                    }
+
+                    List<Map<String, String>> departments = deptMap.entrySet().stream()
+                            .map(e -> Map.of("code", e.getKey(), "name", e.getValue()))
+                            .toList();
+
+                    FilterOptionsDTO dto = new FilterOptionsDTO();
+                    dto.setDepartments(departments);
+                    dto.setMachineStatuses(new ArrayList<>(machineStatuses));
+                    dto.setCheckStatuses(new ArrayList<>(checkStatuses));
+                    dto.setResponsiblePersons(new ArrayList<>(responsiblePersons));
+                    return ApiResponse.success("MS040", dto);
                 });
     }
 
@@ -828,6 +864,13 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
+                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน แล้วค่อย query summary
+                    if ("DEPARTMENT_ADMIN".equals(role)) {
+                        return resolveDepartmentCodeByMemberId(memberId)
+                                .flatMapMany(deptCode ->
+                                        buildDepartmentSummary("AND m.department = '" + deptCode + "'"));
+                    }
+
                     String roleFilter = switch (role) {
                         case "ADMIN"      -> "";
                         case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId + " OR m.manager_id = " + memberId + ")";
@@ -835,54 +878,61 @@ public class MachineService {
                         default           -> "AND m.responsible_person_id = " + memberId;
                     };
 
-                    String sql = """
-                            SELECT
-                                d.department_code,
-                                d.department as department_name,
-                                COUNT(m.id) as total,
-                                COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
-                                COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
-                                COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
-                                COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
-                                COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
-                                COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
-                            FROM machine m
-                            JOIN department d ON m.department = d.department_code
-                            WHERE 1=1 %s
-                            GROUP BY d.department_code, d.department
-                            ORDER BY d.department
-                            """.formatted(roleFilter);
+                    return buildDepartmentSummary(roleFilter);
+                });
+    }
 
-                    return template.getDatabaseClient()
-                            .sql(sql)
-                            .map((row, metadata) -> {
-                                long total      = getLongValue(row, "total");
-                                long readyToUse = getLongValue(row, "total_ready_to_use");
-                                long repair     = getLongValue(row, "total_repair");
-                                long notInUse   = getLongValue(row, "total_not_in_use");
-                                long completed  = getLongValue(row, "total_completed");
-                                long pending    = getLongValue(row, "total_pending");
-                                long approve    = getLongValue(row, "total_approve");
-                                return MachineSummaryDTO.builder()
-                                        .department(row.get("department_code", String.class))
-                                        .departmentName(row.get("department_name", String.class))
-                                        .total(total)
-                                        .totalReadyToUse(readyToUse)
-                                        .totalRepair(repair)
-                                        .totalNotInUse(notInUse)
-                                        .totalCompleted(completed)
-                                        .totalPending(pending)
-                                        .totalApprove(approve)
-                                        .readyRate(total > 0 ? (readyToUse * 100.0) / total : 0)
-                                        .completedRate(total > 0 ? (completed * 100.0) / total : 0)
-                                        .approveRate(total > 0 ? (approve * 100.0) / total : 0)
-                                        .build();
-                            })
-                            .all()
-                            .onErrorResume(e -> {
-                                log.error("Error fetching machine department summary with role", e);
-                                return Flux.empty();
-                            });
+    /**
+     * แยก logic การ query department summary ออกมาเพื่อ reuse ระหว่าง role ต่างๆ
+     */
+    private Flux<MachineSummaryDTO> buildDepartmentSummary(String roleFilter) {
+        String sql = """
+                SELECT
+                    d.department_code,
+                    d.department as department_name,
+                    COUNT(m.id) as total,
+                    COUNT(CASE WHEN UPPER(m.machine_status) = 'READY TO USE' THEN 1 END) as total_ready_to_use,
+                    COUNT(CASE WHEN UPPER(m.machine_status) = 'REPAIR'       THEN 1 END) as total_repair,
+                    COUNT(CASE WHEN UPPER(m.machine_status) = 'NOT IN USE'   THEN 1 END) as total_not_in_use,
+                    COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
+                    COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
+                    COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
+                FROM machine m
+                JOIN department d ON m.department = d.department_code
+                WHERE 1=1 %s
+                GROUP BY d.department_code, d.department
+                ORDER BY d.department
+                """.formatted(roleFilter);
+
+        return template.getDatabaseClient()
+                .sql(sql)
+                .map((row, metadata) -> {
+                    long total      = getLongValue(row, "total");
+                    long readyToUse = getLongValue(row, "total_ready_to_use");
+                    long repair     = getLongValue(row, "total_repair");
+                    long notInUse   = getLongValue(row, "total_not_in_use");
+                    long completed  = getLongValue(row, "total_completed");
+                    long pending    = getLongValue(row, "total_pending");
+                    long approve    = getLongValue(row, "total_approve");
+                    return MachineSummaryDTO.builder()
+                            .department(row.get("department_code", String.class))
+                            .departmentName(row.get("department_name", String.class))
+                            .total(total)
+                            .totalReadyToUse(readyToUse)
+                            .totalRepair(repair)
+                            .totalNotInUse(notInUse)
+                            .totalCompleted(completed)
+                            .totalPending(pending)
+                            .totalApprove(approve)
+                            .readyRate(total > 0 ? (readyToUse * 100.0) / total : 0)
+                            .completedRate(total > 0 ? (completed * 100.0) / total : 0)
+                            .approveRate(total > 0 ? (approve * 100.0) / total : 0)
+                            .build();
+                })
+                .all()
+                .onErrorResume(e -> {
+                    log.error("Error fetching machine department summary with role", e);
+                    return Flux.empty();
                 });
     }
 

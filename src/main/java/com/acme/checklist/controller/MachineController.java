@@ -31,7 +31,6 @@ public class MachineController {
     private final MachineService machineService;
     private final LarkService larkService;
 
-    // FIX: เปลี่ยน Void → Map<String, Object> ให้ตรงกับ MachineService.create()
     @PostMapping("/create")
     public Mono<ApiResponse<Map<String, Object>>> create(@RequestBody MachineDTO dto) {
         return machineService.create(dto);
