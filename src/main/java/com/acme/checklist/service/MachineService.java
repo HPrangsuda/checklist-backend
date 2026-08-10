@@ -73,7 +73,12 @@ public class MachineService {
 
     /**
      * ดึง department_code จาก member.department_id
+     * member.department_id เป็น String เช่น "110" ซึ่งตรงกับ department.department_code
      * ใช้สำหรับ DEPARTMENT_ADMIN เพื่อ filter ข้อมูลเฉพาะ department ตัวเอง
+     *
+     * หมายเหตุ: MemberPrincipal.departmentId() เป็น Long (parse จาก JWT)
+     * แต่ member.department_id ใน DB เป็น String
+     * จึงต้อง query DB แล้ว map getDepartmentId() (String) มาใช้
      */
     private Mono<String> resolveDepartmentCodeByMemberId(Long memberId) {
         return template.selectOne(
@@ -657,11 +662,17 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน แล้วค่อย build criteria
+                    log.info(">>> getByRole role='{}' memberId={}", role, memberId);
+
+                    // ─── DEPARTMENT_ADMIN ──────────────────────────────────────────────
+                    // filter เฉพาะ machine ที่อยู่ใน department ของตัวเอง
+                    // ถ้า mine=true → filter เพิ่มเติมเฉพาะที่ตัวเองรับผิดชอบด้วย
                     if ("DEPARTMENT_ADMIN".equals(role)) {
                         return resolveDepartmentCodeByMemberId(memberId)
                                 .flatMap(deptCode -> {
-                                    Criteria base = buildDepartmentAdminCriteria(deptCode);
+                                    log.info(">>> DEPARTMENT_ADMIN deptCode='{}' mine={}", deptCode, mine);
+
+                                    Criteria base = buildDepartmentAdminCriteria(deptCode, memberId, mine);
                                     Criteria finalCriteria = applyKeywordAndFilters(
                                             base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
                                     Query query = Query.query(finalCriteria)
@@ -671,6 +682,7 @@ public class MachineService {
                                 });
                     }
 
+                    // ─── roles อื่น ────────────────────────────────────────────────────
                     Criteria base = buildRoleBaseCriteria(role, memberId, mine);
                     Criteria finalCriteria = applyKeywordAndFilters(
                             base, keyword, checkStatus, department, machineStatus, responsiblePersonName);
@@ -684,16 +696,25 @@ public class MachineService {
     // ─── BASE CRITERIA ตาม role ───────────────────────────────────────────────
 
     /**
-     * DEPARTMENT_ADMIN: เห็นเฉพาะ machine ที่อยู่ใน department เดียวกับตัวเอง
-     * ใช้ department_code ที่ได้จาก member.department_id
+     * DEPARTMENT_ADMIN:
+     * - overview (mine=false) → เห็นทุก machine ใน department ตัวเอง
+     * - mine     (mine=true)  → เห็นเฉพาะ machine ที่ตัวเองรับผิดชอบใน department ตัวเอง
      */
-    private Criteria buildDepartmentAdminCriteria(String departmentCode) {
+    private Criteria buildDepartmentAdminCriteria(String departmentCode, Long memberId, boolean mine) {
         if (!StringUtils.hasText(departmentCode)) {
-            // ถ้าหา department ไม่เจอ ให้ไม่เห็นข้อมูลใดเลย (safe default)
-            log.warn("DEPARTMENT_ADMIN has no department_code, returning empty criteria");
+            log.warn("DEPARTMENT_ADMIN has no departmentCode, returning no-match criteria");
             return Criteria.where("department").is("__NO_MATCH__");
         }
-        return Criteria.where("department").is(departmentCode);
+
+        Criteria deptCriteria = Criteria.where("department").is(departmentCode);
+
+        if (mine) {
+            // เห็นเฉพาะที่ตัวเองรับผิดชอบใน department ตัวเอง
+            return deptCriteria.and(Criteria.where("responsible_person_id").is(memberId));
+        }
+
+        // overview: เห็นทุก machine ใน department ตัวเอง
+        return deptCriteria;
     }
 
     private Criteria buildRoleBaseCriteria(String role, Long memberId, boolean mine) {
@@ -715,7 +736,6 @@ public class MachineService {
                         Criteria.where("responsible_person_id").is(memberId)
                                 .or("supervisor_id").is(memberId));
             }
-            // MEMBER และ role อื่นที่ไม่รู้จัก: เห็นเฉพาะของตัวเอง
             default -> Criteria.where("machine_status").in(ACTIVE_STATUSES)
                     .and(Criteria.where("responsible_person_id").is(memberId));
         };
@@ -762,7 +782,6 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน
                     if ("DEPARTMENT_ADMIN".equals(role)) {
                         return resolveDepartmentCodeByMemberId(memberId)
                                 .flatMap(deptCode -> buildFilterOptions(
@@ -786,9 +805,6 @@ public class MachineService {
                 });
     }
 
-    /**
-     * แยก logic การ query filter options ออกมาเพื่อ reuse ระหว่าง role ต่างๆ
-     */
     private Mono<ApiResponse<FilterOptionsDTO>> buildFilterOptions(String roleFilter) {
         String activeInClause = MachineStatus.sqlInClause();
 
@@ -864,7 +880,6 @@ public class MachineService {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    // DEPARTMENT_ADMIN ต้องดึง department_code ก่อน แล้วค่อย query summary
                     if ("DEPARTMENT_ADMIN".equals(role)) {
                         return resolveDepartmentCodeByMemberId(memberId)
                                 .flatMapMany(deptCode ->
@@ -882,9 +897,6 @@ public class MachineService {
                 });
     }
 
-    /**
-     * แยก logic การ query department summary ออกมาเพื่อ reuse ระหว่าง role ต่างๆ
-     */
     private Flux<MachineSummaryDTO> buildDepartmentSummary(String roleFilter) {
         String sql = """
                 SELECT
