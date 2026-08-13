@@ -25,11 +25,6 @@ public class CalibrationController {
         return calibrationService.update(dto);
     }
 
-    /**
-     * Paginated list with optional filters:
-     *   keyword, year, department, results, calibrationStatus
-     * Sorted by due_date DESC NULLS LAST.
-     */
     @GetMapping("/get/page")
     public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
             @RequestParam(required = false) String  keyword,
@@ -42,7 +37,6 @@ public class CalibrationController {
         return calibrationService.getPage(keyword, year, department, results, calibrationStatus, index, size);
     }
 
-    /** Distinct filter option values scoped to the caller's role. */
     @GetMapping("/filter-options")
     public Mono<CalibrationFilterOptionsDTO> getFilterOptions() {
         return calibrationService.getFilterOptions();
@@ -56,6 +50,13 @@ public class CalibrationController {
     @GetMapping("/get/{machineCode}")
     public Mono<ApiResponse<List<CalibrationResponseDTO>>> getByMachineCode(@PathVariable String machineCode) {
         return calibrationService.getByMachineCode(machineCode);
+    }
+
+    @GetMapping("/calendar")
+    public Flux<CalibrationResponseDTO> getCalendar(
+            @RequestParam int year,
+            @RequestParam int month) {
+        return calibrationService.getCalendarEvents(year, month);
     }
 
     @GetMapping("/department-summary")

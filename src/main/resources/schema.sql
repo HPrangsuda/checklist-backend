@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS calibration_record (
     created_by BIGINT,
     updated_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    is_canceled BOOLEAN DEFAULT FALSE,
+    canceled_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS checklist_record (
