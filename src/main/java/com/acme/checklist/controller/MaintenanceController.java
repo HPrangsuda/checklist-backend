@@ -62,4 +62,11 @@ public class MaintenanceController {
             @RequestParam(required = false) Integer year) {
         return maintenanceService.getMonthlyPlanActualSummary(year);
     }
+
+    @GetMapping("/calendar")
+    public Flux<MaintenanceResponseDTO> getCalendar(
+            @RequestParam int year,
+            @RequestParam int month) {
+        return maintenanceService.getCalendarEvents(year, month);
+    }
 }

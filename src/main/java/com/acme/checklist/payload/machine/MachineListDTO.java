@@ -16,6 +16,7 @@ public class MachineListDTO {
     private String machineStatus;
     private String checkStatus;
     private String responsiblePersonName;
+    private String createdAt;
     private String qrCode;
     private String image;
     private String hasWarranty;
@@ -30,6 +31,7 @@ public class MachineListDTO {
                 .machineStatus(machine.getMachineStatus())
                 .checkStatus(machine.getCheckStatus())
                 .responsiblePersonName(machine.getResponsiblePersonName())
+                .createdAt(String.valueOf(machine.getCreatedAt()))
                 .qrCode(machine.getQrCode())
                 .image(machine.getImage())
                 .hasWarranty(machine.getHasWarranty())

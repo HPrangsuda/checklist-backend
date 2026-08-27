@@ -1,7 +1,7 @@
 package com.acme.checklist.service;
 
-import com.acme.checklist.entity.*;
 import com.acme.checklist.entity.enums.MachineStatus;
+import com.acme.checklist.entity.*;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.ListResponse;
@@ -84,7 +84,6 @@ public class ChecklistService {
     private Mono<ApiResponse<Void>> processSave(ChecklistDTO dto) {
         dto.setCheckType("GENERAL");
 
-        // ── ค้นหา Machine ด้วย id หรือ code ──────────────────────────────────
         Mono<Machine> machineMono = (dto.getMachineId() != null)
                 ? template.selectOne(
                 Query.query(Criteria.where("id").is(dto.getMachineId())
@@ -118,20 +117,14 @@ public class ChecklistService {
                                 ChecklistRecord record = buildFromDTO(dto);
 
                                 if (isResponsible && isPending && !isWeekend) {
-                                    // ── Responsible person ส่งในวันทำงาน สถานะ PENDING ──────────
                                     return saveAsResponsiblePending(dto, machine, record, principal.memberId());
                                 } else {
-                                    // ── กรณีอื่น (ไม่ใช่ responsible / weekend / ไม่ได้ pending) ──
                                     return saveAsCompleted(dto, machine, record, isResponsible);
                                 }
                             });
                 });
     }
 
-    /**
-     * Branch: responsible person ส่ง checklist ในวันทำงาน + machine PENDING
-     * → สร้าง record recheck=true → รอ supervisor/manager อนุมัติ → recalculate KPI
-     */
     private Mono<ApiResponse<Void>> saveAsResponsiblePending(
             ChecklistDTO dto, Machine machine, ChecklistRecord record, Long memberId) {
 
@@ -142,7 +135,6 @@ public class ChecklistService {
 
         List<Long> checklistIds = parseChecklistIds(dto.getMachineChecklist());
 
-        // อัปเดต check_status=true เฉพาะ checklist ที่ reset_time ไม่ใช่ weekly cron
         Mono<Void> updateChecklistItems = template.select(
                         Query.query(Criteria.where("id").in(checklistIds)
                                 .and("reset_time").not("0 0 0 * * 1")),
@@ -168,16 +160,11 @@ public class ChecklistService {
                 .then(commonService.save(record, ChecklistRecord.class))
                 .flatMap(saved ->
                         updateMachine
-                                // ── Recalculate KPI ทันทีหลัง save + update machine ──
                                 .then(kpiService.recalculateKpiForPerson(memberId))
                                 .then(Mono.just(ApiResponse.<Void>success("MS001")))
                 );
     }
 
-    /**
-     * Branch: non-responsible / weekend / !isPending
-     * → สร้าง record recheck=false, COMPLETED → ไม่ต้อง recalculate KPI
-     */
     private Mono<ApiResponse<Void>> saveAsCompleted(
             ChecklistDTO dto, Machine machine, ChecklistRecord record, boolean isResponsible) {
 
@@ -186,13 +173,11 @@ public class ChecklistService {
 
         Mono<Void> updateMachine;
         if (!isResponsible) {
-            // ไม่ใช่ responsible → อัปเดตแค่ machine_status ไม่แตะ check_status
             updateMachine = template.update(Machine.class)
                     .matching(Query.query(Criteria.where("id").is(machine.getId())))
                     .apply(Update.update("machine_status", dto.getMachineStatus()))
                     .then();
         } else {
-            // isWeekend หรือ !isPending → อัปเดตทั้งคู่
             updateMachine = template.update(Machine.class)
                     .matching(Query.query(Criteria.where("id").is(machine.getId())))
                     .apply(Update.update("machine_status", dto.getMachineStatus())
@@ -346,16 +331,21 @@ public class ChecklistService {
 
     // =========================================================================
     //  GET WITH ROLE
+    //
+    //  DEPARTMENT_ADMIN → เห็น checklist ทุก machine ที่อยู่ใน department ตัวเอง
+    //  โดย JOIN machine m → filter ด้วย department_code (pattern เดียวกับ DashboardService)
     // =========================================================================
 
     public Mono<PagedResponse<ChecklistListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role     = principal.role();
-                    Long   memberId = principal.memberId();
-                    log.info("[CHECKLIST] getWithRole — role={} memberId={}", role, memberId);
+                    String role       = principal.role();
+                    Long   memberId   = principal.memberId();
+                    Long   deptId     = principal.departmentId();
+                    log.info("[CHECKLIST] getWithRole — role={} memberId={} deptId={}", role, memberId, deptId);
 
+                    // ── ADMIN: เห็นทุกอย่าง ────────────────────────────────────
                     if ("ADMIN".equals(role)) {
                         Criteria criteria = buildKeywordCriteria(keyword);
                         Query query = Query.query(criteria)
@@ -365,6 +355,54 @@ public class ChecklistService {
                                 ChecklistRecord.class, this::convertChecklistListDTOs);
                     }
 
+                    // ── DEPARTMENT_ADMIN: เห็น checklist ทุก machine ใน department ─
+                    if ("DEPARTMENT_ADMIN".equals(role)) {
+                        if (deptId == null) {
+                            log.warn("[CHECKLIST] DEPARTMENT_ADMIN has no departmentId, returning empty");
+                            return Mono.just(PagedResponse.<ChecklistListDTO>builder()
+                                    .success(true).message("Success")
+                                    .data(List.of()).totalElements(0L).totalPages(0)
+                                    .index(index).size(size).build());
+                        }
+
+                        // หา machine_codes ทั้งหมดใน department เดียวกัน
+                        // ไม่มี JOIN → ใช้ชื่อ column ตรงๆ ไม่ใช้ alias "m"
+                        String deptFilter = """
+                                department LIKE (
+                                    SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'
+                                    FROM department d WHERE d.id = \s""" + deptId + ")";
+
+                        return template.getDatabaseClient()
+                                .sql("SELECT machine_code FROM machine WHERE " + deptFilter)
+                                .map((row, meta) -> row.get("machine_code", String.class))
+                                .all()
+                                .collectList()
+                                .flatMap(machineCodes -> {
+                                    log.info("[CHECKLIST] DEPARTMENT_ADMIN machineCodes count={}", machineCodes.size());
+
+                                    if (machineCodes.isEmpty()) {
+                                        return Mono.just(PagedResponse.<ChecklistListDTO>builder()
+                                                .success(true).message("Success")
+                                                .data(List.of()).totalElements(0L).totalPages(0)
+                                                .index(index).size(size).build());
+                                    }
+
+                                    Criteria criteria = Criteria.where("machine_code").in(machineCodes);
+                                    if (StringUtils.hasText(keyword)) {
+                                        criteria = criteria.and(
+                                                Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true)
+                                                        .or("machine_code").like("%" + keyword + "%").ignoreCase(true));
+                                    }
+
+                                    Query query = Query.query(criteria)
+                                            .with(commonService.pageable(index, size, "created_at"));
+                                    return commonService.executePagedQuery(
+                                            index, size, query, criteria,
+                                            ChecklistRecord.class, this::convertChecklistListDTOs);
+                                });
+                    }
+
+                    // ── MEMBER / SUPERVISOR / MANAGER: เห็นของตัวเอง + ที่รับผิดชอบ ──
                     return template.select(
                                     Query.query(Criteria.where("responsible_person_id").is(memberId)),
                                     Machine.class)
@@ -438,6 +476,9 @@ public class ChecklistService {
 
     // =========================================================================
     //  STATS
+    //
+    //  DEPARTMENT_ADMIN → filter machine ด้วย department_code (LIKE pattern)
+    //  เหมือน DashboardService และ CalibrationService
     // =========================================================================
 
     public Mono<List<ChecklistStatsDTO>> getChecklistStats(Integer year, String department) {
@@ -463,17 +504,29 @@ public class ChecklistService {
                 });
     }
 
+    // =========================================================================
+    //  ROLE FILTER FOR STATS
+    //
+    //  เดิม: MEMBER / SUPERVISOR / MANAGER / default
+    //  เพิ่ม: DEPARTMENT_ADMIN → filter m.department LIKE ... (ใน buildStatsSQL JOIN machine m)
+    // =========================================================================
+
     private static String buildRoleFilter(MemberPrincipal principal) {
         String role     = principal.role();
         Long   memberId = principal.memberId();
+        Long   deptId   = principal.departmentId();
 
         return switch (role) {
-            case "MEMBER"     -> "AND m.responsible_person_id = " + memberId;
-            case "SUPERVISOR" -> "AND (m.responsible_person_id = " + memberId
-                    + " OR m.supervisor_id = " + memberId + ")";
-            case "MANAGER"    -> "AND (m.responsible_person_id = " + memberId
-                    + " OR m.manager_id = " + memberId + ")";
-            default           -> "";
+            case "ADMIN"            -> "";
+            case "DEPARTMENT_ADMIN" -> deptId != null
+                    ? "AND m.department LIKE (SELECT LEFT(d2.department_code, LENGTH(d2.department_code) - 1) || '%' FROM department d2 WHERE d2.id = " + deptId + ")"
+                    : "AND 1=0";
+            case "MEMBER"           -> "AND m.responsible_person_id = " + memberId;
+            case "SUPERVISOR"       -> "AND (m.responsible_person_id = " + memberId
+                    + " OR m.supervisor_id = "  + memberId + ")";
+            case "MANAGER"          -> "AND (m.responsible_person_id = " + memberId
+                    + " OR m.manager_id = "     + memberId + ")";
+            default                 -> "";
         };
     }
 

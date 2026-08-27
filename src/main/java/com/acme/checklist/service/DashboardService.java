@@ -25,6 +25,9 @@ import java.util.Objects;
 public class DashboardService {
     private final R2dbcEntityTemplate template;
 
+    // machine_status ที่นับได้ (OPERATIONAL, NON-OPERATIONAL, UNDER MAINTENANCE)
+    private static final String ACTIVE_STATUS_IN = MachineStatus.sqlInClause();
+
     private Mono<MemberPrincipal> getPrincipal() {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal());
@@ -32,29 +35,39 @@ public class DashboardService {
 
     private record MachineFilter(String clause, Long memberId) {}
 
-    private MachineFilter buildMachineFilter(String role, Long memberId) {
+    // ─── role filter สำหรับ WHERE clause ใน machine table ────────────────────
+    // clause ไม่มี "AND" นำหน้า → caller ต้องใส่เอง
+    private MachineFilter buildMachineFilter(String role, Long memberId, Long departmentId) {
         return switch (role) {
-            case "MEMBER" ->
-                    new MachineFilter("m.responsible_person_id = $1", memberId);
-            case "SUPERVISOR" ->
-                    new MachineFilter(
-                            "(m.responsible_person_id = $1 OR m.supervisor_id = $1)",
-                            memberId);
-            case "MANAGER" ->
-                    new MachineFilter(
-                            "(m.responsible_person_id = $1 OR m.manager_id = $1)",
-                            memberId);
-            default -> new MachineFilter(null, null);
+            case "MEMBER"           -> new MachineFilter("m.responsible_person_id = $1", memberId);
+            case "SUPERVISOR"       -> new MachineFilter("(m.responsible_person_id = $1 OR m.supervisor_id = $1)", memberId);
+            case "MANAGER"          -> new MachineFilter("(m.responsible_person_id = $1 OR m.manager_id = $1)", memberId);
+            case "DEPARTMENT_ADMIN" -> new MachineFilter(
+                    departmentId != null
+                            ? "m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + departmentId + ")"
+                            : "1=0",
+                    null);
+            default -> new MachineFilter(null, null); // ADMIN → ไม่ filter
         };
     }
 
+    // =========================================================================
+    //  SUMMARY
+    //  นับเฉพาะ machine ที่ machine_status IN (OPERATIONAL, NON-OPERATIONAL, UNDER MAINTENANCE)
+    // =========================================================================
+
     public Mono<SummaryDTO> getSummary() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
-            String machineWhere = f.clause() != null ? "WHERE " + f.clause() : "";
-            String subWhere = f.clause() != null
-                    ? "WHERE " + f.clause().replace("m.", "mc.")
-                    : "";
+            MachineFilter f = buildMachineFilter(
+                    principal.role(), principal.memberId(), principal.departmentId());
+
+            // WHERE สำหรับ machine หลัก (FROM machine m)
+            String machineWhere = "WHERE m.machine_status IN (" + ACTIVE_STATUS_IN + ")"
+                    + (f.clause() != null ? " AND " + f.clause() : "");
+
+            // WHERE สำหรับ subquery (JOIN machine mc)
+            String subWhere = "WHERE mc.machine_status IN (" + ACTIVE_STATUS_IN + ")"
+                    + (f.clause() != null ? " AND " + f.clause().replace("m.", "mc.") : "");
 
             String operationalValue = MachineStatus.OPERATIONAL.getDbValue();
 
@@ -66,15 +79,15 @@ public class DashboardService {
                      FROM calibration_record cr
                      JOIN machine mc ON cr.machine_code = mc.machine_code
                      %s
-                     AND cr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
-                     AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
+                       AND cr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                       AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
                     ) AS total_calibration,
                     (SELECT COUNT(DISTINCT mr.id)
                      FROM maintenance_record mr
                      JOIN machine mc ON mr.machine_code = mc.machine_code
                      %s
-                     AND mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
-                     AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
+                       AND mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+                       AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
                     ) AS total_maintenance
                 FROM machine m
                 %s
@@ -107,10 +120,20 @@ public class DashboardService {
         });
     }
 
+    // =========================================================================
+    //  SOON
+    //  แสดง calibration / maintenance ที่ครบกำหนดใน 30 วัน
+    //  JOIN machine → filter machine_status IN (active) ด้วยเสมอ
+    // =========================================================================
+
     public Mono<ListResponse<List<SoonDTO>>> getSoon() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
-            String joinWhere = f.clause() != null ? "AND " + f.clause() : "";
+            MachineFilter f = buildMachineFilter(
+                    principal.role(), principal.memberId(), principal.departmentId());
+
+            // AND clause สำหรับ JOIN machine m ที่มีอยู่แล้ว
+            String roleAnd   = f.clause() != null ? "AND " + f.clause() : "";
+            String statusAnd = "AND m.machine_status IN (" + ACTIVE_STATUS_IN + ")";
 
             String calibrationSql = """
                 SELECT DISTINCT ON (cr.id)
@@ -122,9 +145,10 @@ public class DashboardService {
                 JOIN machine m ON cr.machine_code = m.machine_code
                 WHERE cr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
                   AND (cr.is_canceled = FALSE OR cr.is_canceled IS NULL)
-                %s
+                  %s
+                  %s
                 ORDER BY cr.id, cr.due_date ASC
-            """.formatted(joinWhere);
+            """.formatted(statusAnd, roleAnd);
 
             String maintenanceSql = """
                 SELECT DISTINCT ON (mr.id)
@@ -136,9 +160,10 @@ public class DashboardService {
                 JOIN machine m ON mr.machine_code = m.machine_code
                 WHERE mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
                   AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
-                %s
+                  %s
+                  %s
                 ORDER BY mr.id, mr.due_date ASC
-            """.formatted(joinWhere);
+            """.formatted(statusAnd, roleAnd);
 
             var calSpec   = template.getDatabaseClient().sql(calibrationSql);
             var maintSpec = template.getDatabaseClient().sql(maintenanceSql);
@@ -166,15 +191,23 @@ public class DashboardService {
         });
     }
 
+    // =========================================================================
+    //  MAINTENANCE STATS
+    // =========================================================================
+
     public Mono<ListResponse<List<MaintenanceStatsDTO>>> getMaintenanceStats() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
+            MachineFilter f = buildMachineFilter(
+                    principal.role(), principal.memberId(), principal.departmentId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
 
+            // DEPARTMENT_ADMIN ใช้ inline subquery → ไม่มี $2 param
             String joinWhere = f.clause() != null
-                    ? "JOIN machine m ON mr.machine_code = m.machine_code AND "
-                    + f.clause().replace("$1", "$2")
-                    : "";
+                    ? "JOIN machine m ON mr.machine_code = m.machine_code"
+                    + " AND m.machine_status IN (" + ACTIVE_STATUS_IN + ")"
+                    + " AND " + (f.memberId() != null ? f.clause().replace("$1", "$2") : f.clause())
+                    : "JOIN machine m ON mr.machine_code = m.machine_code"
+                    + " AND m.machine_status IN (" + ACTIVE_STATUS_IN + ")";
 
             String sql = """
                 WITH months AS (SELECT generate_series(1, 12) AS month_num),
@@ -215,22 +248,29 @@ public class DashboardService {
                     .onErrorResume(e -> {
                         log.error("Error fetching maintenance stats", e);
                         return Mono.just(ListResponse.<List<MaintenanceStatsDTO>>builder()
-                                .success(false)
-                                .message("Error: " + e.getMessage())
+                                .success(false).message("Error: " + e.getMessage())
                                 .data(List.of()).build());
                     });
         });
     }
 
+    // =========================================================================
+    //  CALIBRATION STATS
+    // =========================================================================
+
     public Mono<ListResponse<List<CalibrationStatsDTO>>> getCalibrationStats() {
         return getPrincipal().flatMap(principal -> {
-            MachineFilter f = buildMachineFilter(principal.role(), principal.memberId());
+            MachineFilter f = buildMachineFilter(
+                    principal.role(), principal.memberId(), principal.departmentId());
             String currentYear = String.valueOf(LocalDate.now().getYear());
 
+            // DEPARTMENT_ADMIN ใช้ inline subquery → ไม่มี $2 param
             String joinWhere = f.clause() != null
-                    ? "JOIN machine m ON cr.machine_code = m.machine_code AND "
-                    + f.clause().replace("$1", "$2")
-                    : "";
+                    ? "JOIN machine m ON cr.machine_code = m.machine_code"
+                    + " AND m.machine_status IN (" + ACTIVE_STATUS_IN + ")"
+                    + " AND " + (f.memberId() != null ? f.clause().replace("$1", "$2") : f.clause())
+                    : "JOIN machine m ON cr.machine_code = m.machine_code"
+                    + " AND m.machine_status IN (" + ACTIVE_STATUS_IN + ")";
 
             String sql = """
                 WITH months AS (SELECT generate_series(1, 12) AS month_num),
@@ -271,12 +311,15 @@ public class DashboardService {
                     .onErrorResume(e -> {
                         log.error("Error fetching calibration stats", e);
                         return Mono.just(ListResponse.<List<CalibrationStatsDTO>>builder()
-                                .success(false)
-                                .message("Error: " + e.getMessage())
+                                .success(false).message("Error: " + e.getMessage())
                                 .data(List.of()).build());
                     });
         });
     }
+
+    // =========================================================================
+    //  PRIVATE HELPERS
+    // =========================================================================
 
     private SoonDTO mapToSoonDTO(io.r2dbc.spi.Row row) {
         try {
@@ -298,18 +341,18 @@ public class DashboardService {
     private Long getLongValue(io.r2dbc.spi.Row row, String columnName) {
         Object value = row.get(columnName);
         return switch (value) {
-            case null -> 0L;
-            case Long l -> l;
+            case null     -> 0L;
+            case Long l   -> l;
             case Number n -> n.longValue();
-            default -> 0L;
+            default       -> 0L;
         };
     }
 
     private String getEngMonthAbbreviation(int month) {
         return switch (month) {
-            case 1 -> "Jan"; case 2 -> "Feb"; case 3 -> "Mar";
-            case 4 -> "Apr"; case 5 -> "May"; case 6 -> "Jun";
-            case 7 -> "Jul"; case 8 -> "Aug"; case 9 -> "Sep";
+            case 1  -> "Jan"; case 2  -> "Feb"; case 3  -> "Mar";
+            case 4  -> "Apr"; case 5  -> "May"; case 6  -> "Jun";
+            case 7  -> "Jul"; case 8  -> "Aug"; case 9  -> "Sep";
             case 10 -> "Oct"; case 11 -> "Nov"; case 12 -> "Dec";
             default -> "";
         };

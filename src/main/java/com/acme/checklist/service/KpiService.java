@@ -35,13 +35,11 @@ import java.util.Objects;
 
 // ─── KpiService.java ──────────────────────────────────────────────────────────
 //
-//  recalculateKpiForPerson(memberId)
-//  ──────────────────────────────────
-//  เดิม: recalculate แค่ check_all
-//  ใหม่: recalculate ทั้ง check_all + checked ในคราวเดียวกัน
-//
-//  เหตุผล: เมื่อ responsible person submit checklist (recheck=true) ใน ChecklistService
-//  ต้อง reflect ใน checked ของ KPI ทันที ไม่รอ scheduler รายวัน 00:05
+//  getKpiByYearAndMonth
+//  ─────────────────────
+//  รองรับ role DEPARTMENT_ADMIN โดยใช้ raw SQL + subquery
+//  filter member ที่อยู่ใน department เดียวกัน (ผ่าน p.departmentId() จาก JWT)
+//  pattern เดียวกับ CalibrationService.roleFilterJoin()
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -54,6 +52,47 @@ public class KpiService {
     private final CommonService commonService;
 
     private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
+
+    // =========================================================================
+    //  ROLE FILTER HELPER
+    //
+    //  ใช้ p.departmentId() จาก JWT โดยตรง (เหมือน CalibrationService)
+    //  ไม่ต้อง query member table เพิ่ม
+    //
+    //  DEPARTMENT_ADMIN → filter k.member_id IN (
+    //      SELECT id FROM member WHERE department_id IN (
+    //          SELECT department_code FROM department
+    //          WHERE department = (
+    //              SELECT department FROM department WHERE id = :deptId
+    //          )
+    //      )
+    //  )
+    //
+    //  หมายเหตุ: deptId คือ department.id (FK ที่ member.department_id ชี้ไป)
+    // =========================================================================
+
+    private static String roleFilter(MemberPrincipal p) {
+        return switch (p.role()) {
+            case "ADMIN"            -> "";
+            case "DEPARTMENT_ADMIN" -> p.departmentId() != null
+                    ? """
+                      AND k.member_id IN (
+                          SELECT m.id FROM member m
+                          WHERE m.department_id IN (
+                              SELECT d2.department_code FROM department d2
+                              WHERE d2.department = (
+                                  SELECT d1.department FROM department d1
+                                  WHERE d1.id = """ + p.departmentId() + """
+                              )
+                          )
+                      )
+                      """
+                    : "AND 1=0";
+            case "MANAGER"          -> "AND (k.member_id = " + p.memberId() + " OR k.manager_id = "    + p.memberId() + ")";
+            case "SUPERVISOR"       -> "AND (k.member_id = " + p.memberId() + " OR k.supervisor_id = " + p.memberId() + ")";
+            default                 -> "AND k.member_id = " + p.memberId();
+        };
+    }
 
     // =========================================================================
     //  CREATE
@@ -89,7 +128,6 @@ public class KpiService {
         LocalDate firstFriday = getFirstFridayOfMonth(ym);
         LocalDate lastFriday  = getLastFridayOfMonth(ym);
         LocalDate kpiStart    = firstFriday.with(DayOfWeek.MONDAY);
-        // checked นับถึงวันนี้ แต่ไม่เกิน lastFriday ของเดือน
         LocalDate checkedEnd  = today.isAfter(lastFriday) ? lastFriday : today;
 
         log.info("[KPI] recalculateKpiForPerson memberId={} year={} month={} kpiStart={} checkedEnd={}",
@@ -119,8 +157,6 @@ public class KpiService {
                 .doOnSuccess(v -> log.info("[KPI] checkAll for memberId={} → {}", memberId, v));
 
         // ── 2. นับ checked จาก checklist_record ───────────────────────────────
-        //       SQL เดียวกับ KpiScheduler.recalculateCurrentMonthKpi()
-        //       แต่ใช้ BKK timezone และกรอง auto record ออก
         Mono<Long> checkedMono = template.getDatabaseClient()
                 .sql("""
                     SELECT COUNT(*) FROM checklist_record cr
@@ -173,7 +209,6 @@ public class KpiService {
                                             .and("months").is(month)),
                                     Kpi.class)
                             .flatMap(kpi -> {
-                                // อัปเดต row ที่มีอยู่แล้ว
                                 kpi.setCheckAll(newCheckAll);
                                 kpi.setChecked(newChecked);
                                 kpi.setManagerId(member.getManager());
@@ -206,6 +241,8 @@ public class KpiService {
 
     // =========================================================================
     //  GET LIST
+    //  ใช้ raw SQL + roleFilter() แทน R2DBC Criteria
+    //  เพราะ DEPARTMENT_ADMIN ต้องการ subquery ที่ Criteria API ไม่รองรับ
     // =========================================================================
 
     public Mono<PagedResponse<KpiResponseDTO>> getKpiByYearAndMonth(
@@ -214,40 +251,104 @@ public class KpiService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String role     = principal.role();
-                    Long   memberId = principal.memberId();
+                    String role = principal.role();
+                    log.info("[KPI] getKpiByYearAndMonth role='{}' memberId={}", role, principal.memberId());
 
-                    Criteria base = Criteria
-                            .where("years").is(year)
-                            .and("months").is(month);
+                    // ── build WHERE fragments ──────────────────────────────────
+                    boolean hasKw = StringUtils.hasText(keyword);
 
-                    if (StringUtils.hasText(keyword)) {
-                        base = base.and("employee_name").like("%" + keyword + "%").ignoreCase(true);
+                    String kwFragment   = hasKw ? "AND k.employee_name ILIKE :kw" : "";
+                    String roleFragment = roleFilter(principal);
+
+                    String where = """
+                            WHERE k.years  = :year
+                              AND k.months = :month
+                            """ + roleFragment + " " + kwFragment;
+
+                    // ── COUNT ──────────────────────────────────────────────────
+                    String countSql = "SELECT COUNT(*) FROM kpi k " + where;
+
+                    // ── DATA ───────────────────────────────────────────────────
+                    String dataSql = """
+                            SELECT
+                                k.id,
+                                k.member_id,
+                                k.employee_name,
+                                k.years,
+                                k.months,
+                                k.check_all,
+                                k.checked,
+                                k.manager_id,
+                                k.supervisor_id
+                            FROM kpi k
+                            """ + where + """
+                            ORDER BY k.employee_name ASC
+                            LIMIT :size OFFSET :offset
+                            """;
+
+                    // ── bind params ────────────────────────────────────────────
+                    var countSpec = template.getDatabaseClient().sql(countSql)
+                            .bind("year",  year)
+                            .bind("month", month);
+
+                    var dataSpec = template.getDatabaseClient().sql(dataSql)
+                            .bind("year",  year)
+                            .bind("month", month)
+                            .bind("size",  size)
+                            .bind("offset", (long) index * size);
+
+                    if (hasKw) {
+                        String kw = "%" + keyword.trim() + "%";
+                        countSpec = countSpec.bind("kw", kw);
+                        dataSpec  = dataSpec.bind("kw",  kw);
                     }
 
-                    Criteria criteria = switch (role) {
-                        case "MEMBER" ->
-                                base.and("member_id").is(memberId);
-                        case "SUPERVISOR" ->
-                                base.and(
-                                        Criteria.where("member_id").is(memberId)
-                                                .or("supervisor_id").is(memberId));
-                        case "MANAGER" ->
-                                base.and(
-                                        Criteria.where("member_id").is(memberId)
-                                                .or("manager_id").is(memberId));
-                        default -> base;
+                    // ── DEPARTMENT_ADMIN ไม่ใช้ :memberId (ใช้ literal ใน subquery แทน)
+                    // ── roles อื่นที่ใช้ :memberId ใน roleFilter
+                    boolean needsMemberId = switch (role) {
+                        case "ADMIN", "DEPARTMENT_ADMIN" -> false;
+                        default -> true;
                     };
+                    if (needsMemberId) {
+                        countSpec = countSpec.bind("memberId", principal.memberId());
+                        dataSpec  = dataSpec.bind("memberId",  principal.memberId());
+                    }
 
-                    Query query = Query.query(criteria)
-                            .with(commonService.pageable(index, size, "employee_name"));
+                    // ── execute ────────────────────────────────────────────────
+                    Mono<Long> countMono = countSpec
+                            .map((row, meta) -> {
+                                Object v = row.get(0);
+                                return v instanceof Number n ? n.longValue() : 0L;
+                            })
+                            .one()
+                            .defaultIfEmpty(0L);
 
-                    return commonService.executePagedQuery(
-                            index, size, query, criteria,
-                            Kpi.class,
-                            records -> Flux.fromIterable(records).map(KpiResponseDTO::from));
+                    Flux<KpiResponseDTO> dataFlux = dataSpec
+                            .map((row, meta) -> KpiResponseDTO.builder()
+                                    .id(row.get("id",            Long.class))
+                                    .memberId(row.get("member_id",     Long.class))
+                                    .employeeName(row.get("employee_name", String.class))
+                                    .years(row.get("years",        String.class))
+                                    .months(row.get("months",       String.class))
+                                    .checkAll(getLongValue(row, "check_all"))
+                                    .checked(getLongValue(row, "checked"))
+                                    .managerId(row.get("manager_id",   Long.class))
+                                    .supervisorId(row.get("supervisor_id", Long.class))
+                                    .build())
+                            .all();
+
+                    return Mono.zip(countMono, dataFlux.collectList())
+                            .map(tuple -> {
+                                long total = tuple.getT1();
+                                return PagedResponse.<KpiResponseDTO>builder()
+                                        .success(true).message("Success")
+                                        .data(tuple.getT2())
+                                        .totalElements(total)
+                                        .totalPages((int) Math.ceil((double) total / size))
+                                        .index(index).size(size).build();
+                            });
                 })
-                .doOnError(e -> log.error("[KPI] Failed to fetch list: {}", e.getMessage()));
+                .doOnError(e -> log.error("[KPI] Failed to fetch list: {}", e.getMessage(), e));
     }
 
     // =========================================================================
@@ -268,7 +369,7 @@ public class KpiService {
                     LocalDate start       = firstFriday.with(DayOfWeek.MONDAY);
 
                     Instant startInstant = start.atStartOfDay(BKK).toInstant();
-                    Instant endInstant = lastFriday.atTime(15, 0, 0).atZone(BKK).toInstant();
+                    Instant endInstant   = lastFriday.atTime(15, 0, 0).atZone(BKK).toInstant();
 
                     Criteria criteria = Criteria
                             .where("created_by").is(kpi.getMemberId())
@@ -368,5 +469,14 @@ public class KpiService {
         LocalDate d = ym.atEndOfMonth();
         while (d.getDayOfWeek() != DayOfWeek.FRIDAY) d = d.minusDays(1);
         return d;
+    }
+
+    private long getLongValue(io.r2dbc.spi.Row row, String col) {
+        Object v = row.get(col);
+        return switch (v) {
+            case Long l        -> l;
+            case Number n      -> n.longValue();
+            case null, default -> 0L;
+        };
     }
 }

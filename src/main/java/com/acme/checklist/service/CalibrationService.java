@@ -1,6 +1,7 @@
 package com.acme.checklist.service;
 
 import com.acme.checklist.entity.*;
+import com.acme.checklist.entity.Member;
 import com.acme.checklist.exception.ThrowException;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.MemberPrincipal;
@@ -31,14 +32,27 @@ public class CalibrationService {
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ROLE FILTER HELPERS
+    //
+    // กฎเดียวกันทุก method:
+    //   ADMIN      → ไม่ filter (เห็นทุก record)
+    //   MANAGER    → filter ด้วย manager_id
+    //   SUPERVISOR → filter ด้วย supervisor_id
+    //   USER/อื่น  → filter ด้วย responsible_person_id
+    //
+    // มี 2 รูปแบบ JOIN:
+    //   roleFilterJoin(p)    — ใช้กับ query ที่ JOIN machine m อยู่แล้ว
+    //                          → เพิ่ม AND m.<col> = <id> ใน WHERE
+    //   roleFilterExists(p)  — ใช้กับ query ที่ไม่ JOIN machine (หรือต้องการ safe)
+    //                          → เพิ่ม AND EXISTS (SELECT 1 FROM machine m2 ...)
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private static String roleFilterJoin(MemberPrincipal p) {
         return switch (p.role()) {
             case "ADMIN"            -> "";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? """
-                  AND m.department LIKE (
-                      SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'
-                      FROM department d WHERE d.id = """ + p.departmentId() + ")"
+                    ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + ")"
                     : "AND 1=0";
             case "MANAGER"          -> "AND m.manager_id    = " + p.memberId();
             case "SUPERVISOR"       -> "AND m.supervisor_id = " + p.memberId();
@@ -51,19 +65,17 @@ public class CalibrationService {
         return switch (p.role()) {
             case "ADMIN"            -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code " + statusCond + ")";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? """
-                  AND EXISTS (
-                      SELECT 1 FROM machine m2
-                      WHERE m2.machine_code = c.machine_code
-                        AND m2.department LIKE (
-                            SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'
-                            FROM department d WHERE d.id = """ + p.departmentId() + ") " + statusCond + ")"
+                    ? "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + ") " + statusCond + ")"
                     : "AND 1=0";
             case "MANAGER"          -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.manager_id = " + p.memberId() + " " + statusCond + ")";
             case "SUPERVISOR"       -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.supervisor_id = " + p.memberId() + " " + statusCond + ")";
             default                 -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.responsible_person_id = " + p.memberId() + " " + statusCond + ")";
         };
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // UPDATE
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<ApiResponse<Void>> update(CalibrationDTO dto) {
         return validateData(dto)
@@ -74,6 +86,14 @@ public class CalibrationService {
                 })
                 .onErrorResume(e -> Mono.just(ApiResponse.error("MS004", e.getMessage())));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GET PAGE
+    // ใช้ LEFT JOIN machine เพราะต้องแสดง department / responsible_person_name
+    // และต้องการ filter ด้วย department
+    // ADMIN: roleFragment = "" → ไม่ filter, ไม่ bind memberId
+    // ปัญหา duplicate: machine_code มีหลาย row ใน machine → ใช้ DISTINCT c.id
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
             String keyword, Integer year, String department,
@@ -95,10 +115,7 @@ public class CalibrationService {
                     String roleFragment = switch (role) {
                         case "ADMIN"            -> "";
                         case "DEPARTMENT_ADMIN" -> principal.departmentId() != null
-                                ? """
-                              AND m.department LIKE (
-                                  SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'
-                                  FROM department d WHERE d.id = """ + principal.departmentId() + ")"
+                                ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + principal.departmentId() + ")"
                                 : "AND 1=0";
                         case "MANAGER"          -> "AND m.manager_id    = :memberId";
                         case "SUPERVISOR"       -> "AND m.supervisor_id = :memberId";
@@ -251,6 +268,11 @@ public class CalibrationService {
                 });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FILTER OPTIONS
+    // ต้อง JOIN machine เพื่อดึง department → ใช้ roleFilterJoin
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public Mono<CalibrationFilterOptionsDTO> getFilterOptions() {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
@@ -318,12 +340,18 @@ public class CalibrationService {
                 });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DEPARTMENT SUMMARY
+    // JOIN machine เพื่อ GROUP BY department → ใช้ roleFilterJoin
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummaryWithRole(Integer year) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     int    effectiveYear = (year != null) ? year : LocalDate.now().getYear();
 
+                    // DISTINCT ON (c.id) ป้องกัน duplicate จาก machine มีหลาย row
                     String sql = """
                         SELECT
                             department,
@@ -371,6 +399,11 @@ public class CalibrationService {
                             });
                 });
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MONTHLY PLAN-ACTUAL
+    // ไม่ JOIN machine โดยตรง (GROUP BY due_date) → ใช้ roleFilterExists
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public Flux<CalibrationMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
         return ReactiveSecurityContextHolder.getContext()
@@ -451,6 +484,12 @@ public class CalibrationService {
                 });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CALENDAR
+    // ADMIN  → ไม่ JOIN (ป้องกัน duplicate, เห็นครบ)
+    // Others → JOIN + DISTINCT ON (c.id) เพื่อ filter scope
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public Flux<CalibrationResponseDTO> getCalendarEvents(int year, int month) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
@@ -497,6 +536,10 @@ public class CalibrationService {
                 });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GET BY ID / GET BY MACHINE CODE
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public Mono<ApiResponse<CalibrationResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), CalibrationRecord.class)
                 .flatMap(cal -> {
@@ -532,11 +575,19 @@ public class CalibrationService {
                 });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VALIDATE
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public Mono<CalibrationDTO> validateData(CalibrationDTO dto) {
         return template.selectOne(Query.query(Criteria.where("id").is(dto.getId())), CalibrationRecord.class)
                 .switchIfEmpty(Mono.error(new ThrowException("MS018", "Calibration not found")))
                 .flatMap(existing -> Mono.just(dto));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PRIVATE HELPERS
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private DatabaseClient.GenericExecuteSpec buildUpdateSpec(CalibrationDTO dto) {
         List<String> sets   = new ArrayList<>();
