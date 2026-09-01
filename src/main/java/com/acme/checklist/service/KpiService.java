@@ -33,16 +33,6 @@ import java.time.YearMonth;
 import java.time.ZoneId;
 import java.util.Objects;
 
-// ─── KpiService.java ──────────────────────────────────────────────────────────
-//
-//  getKpiByYearAndMonth
-//  ─────────────────────
-//  รองรับ role DEPARTMENT_ADMIN โดยใช้ raw SQL + subquery
-//  filter member ที่อยู่ใน department เดียวกัน (ผ่าน p.departmentId() จาก JWT)
-//  pattern เดียวกับ CalibrationService.roleFilterJoin()
-//
-// ─────────────────────────────────────────────────────────────────────────────
-
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -53,50 +43,30 @@ public class KpiService {
 
     private static final ZoneId BKK = ZoneId.of("Asia/Bangkok");
 
-    // =========================================================================
-    //  ROLE FILTER HELPER
-    //
-    //  ใช้ p.departmentId() จาก JWT โดยตรง (เหมือน CalibrationService)
-    //  ไม่ต้อง query member table เพิ่ม
-    //
-    //  DEPARTMENT_ADMIN → filter k.member_id IN (
-    //      SELECT id FROM member WHERE department_id IN (
-    //          SELECT department_code FROM department
-    //          WHERE department = (
-    //              SELECT department FROM department WHERE id = :deptId
-    //          )
-    //      )
-    //  )
-    //
-    //  หมายเหตุ: deptId คือ department.id (FK ที่ member.department_id ชี้ไป)
-    // =========================================================================
-
     private static String roleFilter(MemberPrincipal p) {
         return switch (p.role()) {
-            case "ADMIN"            -> "";
+            case "ADMIN" -> "";
+
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
                     ? """
-                      AND k.member_id IN (
-                          SELECT m.id FROM member m
-                          WHERE m.department_id IN (
-                              SELECT d2.department_code FROM department d2
-                              WHERE d2.department = (
-                                  SELECT d1.department FROM department d1
-                                  WHERE d1.id = """ + p.departmentId() + """
-                              )
+                  AND k.member_id IN (
+                      SELECT m.id FROM member m
+                      WHERE m.department_id IN (
+                          SELECT d2.department_code FROM department d2
+                          WHERE d2.department = (
+                              SELECT d1.department FROM department d1
+                              WHERE d1.id = %d
                           )
                       )
-                      """
+                  )
+                  """.formatted(p.departmentId())
                     : "AND 1=0";
-            case "MANAGER"          -> "AND (k.member_id = " + p.memberId() + " OR k.manager_id = "    + p.memberId() + ")";
-            case "SUPERVISOR"       -> "AND (k.member_id = " + p.memberId() + " OR k.supervisor_id = " + p.memberId() + ")";
-            default                 -> "AND k.member_id = " + p.memberId();
+
+            case "MANAGER"    -> "AND (k.member_id = :memberId OR k.manager_id = :memberId)";
+            case "SUPERVISOR" -> "AND (k.member_id = :memberId OR k.supervisor_id = :memberId)";
+            default           -> "AND k.member_id = :memberId";
         };
     }
-
-    // =========================================================================
-    //  CREATE
-    // =========================================================================
 
     @Transactional
     public Mono<ApiResponse<Void>> create(KpiDTO dto) {
@@ -111,10 +81,6 @@ public class KpiService {
                     return Mono.just(ApiResponse.error("KP002", e.getMessage()));
                 });
     }
-
-    // =========================================================================
-    //  RECALCULATE KPI FOR PERSON  (trigger ทันทีหลัง submit checklist)
-    // =========================================================================
 
     public Mono<Void> recalculateKpiForPerson(Long memberId) {
         if (memberId == null) return Mono.empty();
@@ -133,7 +99,6 @@ public class KpiService {
         log.info("[KPI] recalculateKpiForPerson memberId={} year={} month={} kpiStart={} checkedEnd={}",
                 memberId, year, month, kpiStart, checkedEnd);
 
-        // ── 1. คำนวณ check_all ────────────────────────────────────────────────
         Criteria historyCriteria = Criteria
                 .where("responsible_person_id").is(memberId)
                 .and("effective_from").lessThanOrEquals(lastDay)
@@ -156,7 +121,6 @@ public class KpiService {
                 .reduce(0L, Long::sum)
                 .doOnSuccess(v -> log.info("[KPI] checkAll for memberId={} → {}", memberId, v));
 
-        // ── 2. นับ checked จาก checklist_record ───────────────────────────────
         Mono<Long> checkedMono = template.getDatabaseClient()
                 .sql("""
                     SELECT COUNT(*) FROM checklist_record cr
@@ -190,11 +154,9 @@ public class KpiService {
                 .defaultIfEmpty(0L)
                 .doOnSuccess(v -> log.info("[KPI] checked for memberId={} → {}", memberId, v));
 
-        // ── 3. ดึง member ─────────────────────────────────────────────────────
         Mono<Member> memberMono = template.selectOne(
                 Query.query(Criteria.where("id").is(memberId)), Member.class);
 
-        // ── 4. zip แล้ว upsert KPI row ────────────────────────────────────────
         return Mono.zip(checkAllMono, checkedMono, memberMono)
                 .flatMap(tuple -> {
                     long   newCheckAll = tuple.getT1();
@@ -239,11 +201,6 @@ public class KpiService {
                 .onErrorResume(e -> Mono.empty());
     }
 
-    // =========================================================================
-    //  GET LIST
-    //  ใช้ raw SQL + roleFilter() แทน R2DBC Criteria
-    //  เพราะ DEPARTMENT_ADMIN ต้องการ subquery ที่ Criteria API ไม่รองรับ
-    // =========================================================================
 
     public Mono<PagedResponse<KpiResponseDTO>> getKpiByYearAndMonth(
             String year, String month, String keyword, int index, int size) {
@@ -351,10 +308,6 @@ public class KpiService {
                 .doOnError(e -> log.error("[KPI] Failed to fetch list: {}", e.getMessage(), e));
     }
 
-    // =========================================================================
-    //  GET BY ID
-    // =========================================================================
-
     public Mono<ApiResponse<KpiResponseDTO>> getById(Long id) {
         return template.selectOne(
                         Query.query(Criteria.where("id").is(id)), Kpi.class)
@@ -392,10 +345,6 @@ public class KpiService {
                 });
     }
 
-    // =========================================================================
-    //  VALIDATE
-    // =========================================================================
-
     public Mono<KpiDTO> validateData(KpiDTO kpiDTO) {
         if (kpiDTO.getMemberId() == null)
             return Mono.error(new ThrowException("KP003"));
@@ -410,10 +359,6 @@ public class KpiService {
         return Mono.just(kpiDTO);
     }
 
-    // =========================================================================
-    //  BUILD
-    // =========================================================================
-
     public Kpi buildFromDTO(KpiDTO kpiDTO) {
         return Kpi.builder()
                 .id(kpiDTO.getId())
@@ -427,10 +372,6 @@ public class KpiService {
                 .supervisorId(kpiDTO.getSupervisorId())
                 .build();
     }
-
-    // =========================================================================
-    //  HELPERS
-    // =========================================================================
 
     private Mono<Machine> findActiveMachine(String machineCode) {
         return template.select(
