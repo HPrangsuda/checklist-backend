@@ -12,14 +12,8 @@ import lombok.NoArgsConstructor;
 public class MachineSummaryDTO {
     private String department;
     private String departmentName;
-    private long total;
-    private long totalReadyToUse;
-    private long totalRepair;
-    private long totalNotInUse;
-    private long totalCompleted;
-    private long totalPending;
-    private long totalApprove;
+    private long   total;
+    private long   totalReadyToUse;
+    private long   totalUnderMaintenance;
     private double readyRate;
-    private double completedRate;
-    private double approveRate;
 }

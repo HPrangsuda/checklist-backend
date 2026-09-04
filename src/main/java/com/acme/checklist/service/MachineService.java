@@ -636,48 +636,36 @@ public class MachineService {
     private Flux<MachineSummaryDTO> buildDepartmentSummary(String roleFilter) {
         String activeInClause = MachineStatus.sqlInClause();
         String sql = """
-                SELECT
-                    d.department_code,
-                    d.department as department_name,
-                    COUNT(m.id) as total,
-                    COUNT(CASE WHEN m.machine_status = 'OPERATIONAL'       THEN 1 END) as total_ready_to_use,
-                    COUNT(CASE WHEN m.machine_status = 'UNDER MAINTENANCE' THEN 1 END) as total_not_in_use,
-                    COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
-                    COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,
-                    COUNT(CASE WHEN UPPER(m.check_status) = 'APPROVE'        THEN 1 END) as total_approve
-                FROM machine m
-                JOIN department d ON m.department = d.department_code
-                WHERE m.machine_status IN (%s) %s
-                GROUP BY d.department_code, d.department
-                ORDER BY d.department
-                """.formatted(activeInClause, roleFilter);
+            SELECT
+                d.department_code,
+                d.department as department_name,
+                COUNT(m.id) as total,
+                COUNT(CASE WHEN m.machine_status = 'OPERATIONAL'       THEN 1 END) as total_ready_to_use,
+                COUNT(CASE WHEN m.machine_status = 'UNDER MAINTENANCE' THEN 1 END) as total_under_maintenance
+            FROM machine m
+            JOIN department d ON m.department = d.department_code
+            WHERE m.machine_status IN (%s) %s
+            GROUP BY d.department_code, d.department
+            ORDER BY d.department
+            """.formatted(activeInClause, roleFilter);
 
         return template.getDatabaseClient().sql(sql)
                 .map((row, metadata) -> {
-                    long total      = getLongValue(row, "total");
-                    long readyToUse = getLongValue(row, "total_ready_to_use");
-                    long repair     = getLongValue(row, "total_repair");
-                    long notInUse   = getLongValue(row, "total_not_in_use");
-                    long completed  = getLongValue(row, "total_completed");
-                    long pending    = getLongValue(row, "total_pending");
-                    long approve    = getLongValue(row, "total_approve");
+                    long total            = getLongValue(row, "total");
+                    long readyToUse       = getLongValue(row, "total_ready_to_use");
+                    long underMaintenance = getLongValue(row, "total_under_maintenance");
                     return MachineSummaryDTO.builder()
                             .department(row.get("department_code", String.class))
                             .departmentName(row.get("department_name", String.class))
-                            .total(total).totalReadyToUse(readyToUse).totalRepair(repair).totalNotInUse(notInUse)
-                            .totalCompleted(completed).totalPending(pending).totalApprove(approve)
+                            .total(total)
+                            .totalReadyToUse(readyToUse)
+                            .totalUnderMaintenance(underMaintenance)
                             .readyRate(total > 0 ? (readyToUse * 100.0) / total : 0)
-                            .completedRate(total > 0 ? (completed * 100.0) / total : 0)
-                            .approveRate(total > 0 ? (approve * 100.0) / total : 0)
                             .build();
                 })
                 .all()
                 .onErrorResume(e -> { log.error("Error fetching machine department summary with role", e); return Flux.empty(); });
     }
-
-    // =========================================================================
-    //  GET LIST / GET BY ID / GET BY MACHINE CODE
-    // =========================================================================
 
     public Mono<ListResponse<List<MachineListDTO>>> getList(String keyword, List<Long> ids, int index, int size) {
         Pageable pageable = PageRequest.of(index, size, Sort.by(Sort.Direction.DESC, "id"));
