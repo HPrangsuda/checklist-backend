@@ -59,10 +59,6 @@ public class MachineService {
 
     private static final List<String> ACTIVE_STATUSES = MachineStatus.activeDbValues();
 
-    // =========================================================================
-    //  HELPERS
-    // =========================================================================
-
     private boolean isNonActiveStatus(String status) {
         return status != null && !ACTIVE_STATUSES.contains(status);
     }

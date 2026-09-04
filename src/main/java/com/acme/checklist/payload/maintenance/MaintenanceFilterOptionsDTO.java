@@ -12,6 +12,7 @@ public class MaintenanceFilterOptionsDTO {
     private List<Integer>          years;
     private List<DepartmentOption> departments;
     private List<String>           statuses;
+    private List<String> maintenanceByOptions;
 
     @Data
     @Builder

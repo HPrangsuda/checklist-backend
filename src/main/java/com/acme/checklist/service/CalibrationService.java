@@ -30,46 +30,37 @@ import java.util.*;
 public class CalibrationService {
 
     private final R2dbcEntityTemplate template;
-    private final CommonService commonService;
+    private final CommonService        commonService;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ROLE FILTER HELPERS
-    //
-    // กฎเดียวกันทุก method:
-    //   ADMIN      → ไม่ filter (เห็นทุก record)
-    //   MANAGER    → filter ด้วย manager_id
-    //   SUPERVISOR → filter ด้วย supervisor_id
-    //   USER/อื่น  → filter ด้วย responsible_person_id
-    //
-    // มี 2 รูปแบบ JOIN:
-    //   roleFilterJoin(p)    — ใช้กับ query ที่ JOIN machine m อยู่แล้ว
-    //                          → เพิ่ม AND m.<col> = <id> ใน WHERE
-    //   roleFilterExists(p)  — ใช้กับ query ที่ไม่ JOIN machine (หรือต้องการ safe)
-    //                          → เพิ่ม AND EXISTS (SELECT 1 FROM machine m2 ...)
     // ═══════════════════════════════════════════════════════════════════════════
 
     private static String roleFilterJoin(MemberPrincipal p) {
         return switch (p.role()) {
             case "ADMIN"            -> "";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + ")"
-                    : "AND 1=0";
-            case "MANAGER"          -> "AND m.manager_id    = " + p.memberId();
-            case "SUPERVISOR"       -> "AND m.supervisor_id = " + p.memberId();
-            default                 -> "AND m.responsible_person_id = " + p.memberId();
+                    ? "\nAND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                    + " FROM department d WHERE d.id = " + p.departmentId() + ")"
+                    : "\nAND 1=0";
+            case "MANAGER"          -> "\nAND m.manager_id    = " + p.memberId();
+            case "SUPERVISOR"       -> "\nAND m.supervisor_id = " + p.memberId();
+            default                 -> "\nAND m.responsible_person_id = " + p.memberId();
         };
     }
 
     private static String roleFilterExists(MemberPrincipal p) {
         String statusCond = "AND m2.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')";
         return switch (p.role()) {
-            case "ADMIN"            -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code " + statusCond + ")";
+            case "ADMIN"            -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code " + statusCond + ")";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + ") " + statusCond + ")"
-                    : "AND 1=0";
-            case "MANAGER"          -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.manager_id = " + p.memberId() + " " + statusCond + ")";
-            case "SUPERVISOR"       -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.supervisor_id = " + p.memberId() + " " + statusCond + ")";
-            default                 -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.responsible_person_id = " + p.memberId() + " " + statusCond + ")";
+                    ? "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code"
+                    + " AND m2.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                    + " FROM department d WHERE d.id = " + p.departmentId() + ") " + statusCond + ")"
+                    : "\nAND 1=0";
+            case "MANAGER"    -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.manager_id    = " + p.memberId() + " " + statusCond + ")";
+            case "SUPERVISOR" -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.supervisor_id = " + p.memberId() + " " + statusCond + ")";
+            default           -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code AND m2.responsible_person_id = " + p.memberId() + " " + statusCond + ")";
         };
     }
 
@@ -89,10 +80,6 @@ public class CalibrationService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GET PAGE
-    // ใช้ LEFT JOIN machine เพราะต้องแสดง department / responsible_person_name
-    // และต้องการ filter ด้วย department
-    // ADMIN: roleFragment = "" → ไม่ filter, ไม่ bind memberId
-    // ปัญหา duplicate: machine_code มีหลาย row ใน machine → ใช้ DISTINCT c.id
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
@@ -111,109 +98,73 @@ public class CalibrationService {
                     boolean hasRes        = StringUtils.hasText(results);
                     boolean hasCal        = StringUtils.hasText(calibrationStatus);
 
-                    // role filter: ใช้ bindable param สำหรับ non-ADMIN (ป้องกัน SQL injection)
                     String roleFragment = switch (role) {
                         case "ADMIN"            -> "";
                         case "DEPARTMENT_ADMIN" -> principal.departmentId() != null
-                                ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + principal.departmentId() + ")"
-                                : "AND 1=0";
-                        case "MANAGER"          -> "AND m.manager_id    = :memberId";
-                        case "SUPERVISOR"       -> "AND m.supervisor_id = :memberId";
-                        default                 -> "AND m.responsible_person_id = :memberId";
+                                ? "\nAND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                                + " FROM department d WHERE d.id = " + principal.departmentId() + ")"
+                                : "\nAND 1=0";
+                        case "MANAGER"    -> "\nAND m.manager_id    = :memberId";
+                        case "SUPERVISOR" -> "\nAND m.supervisor_id = :memberId";
+                        default           -> "\nAND m.responsible_person_id = :memberId";
                     };
 
-                    String kwFragment   = hasKw   ? "AND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "";
-                    String deptFragment = hasDept ? "AND m.department = :department"                              : "";
-                    String resFragment  = hasRes  ? "AND c.results = :results"                                    : "";
-                    String calFragment  = hasCal  ? "AND c.calibration_status = :calibrationStatus"               : "";
+                    String where = "\nWHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)"
+                            + "\nAND EXTRACT(YEAR FROM c.due_date) = :year"
+                            + "\nAND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                            + roleFragment
+                            + (hasKw   ? "\nAND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "")
+                            + (hasDept ? "\nAND m.department = :department"                              : "")
+                            + (hasRes  ? "\nAND c.results = :results"                                    : "")
+                            + (hasCal  ? "\nAND c.calibration_status = :calibrationStatus"               : "");
 
-                    String where = """
-                            WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)
-                              AND EXTRACT(YEAR FROM c.due_date) = :year
-                              AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')
-                            """ + roleFragment + " " + kwFragment + " "
-                            + deptFragment + " " + resFragment + " " + calFragment;
+                    String countSql =
+                            "SELECT COUNT(*) FROM (\n"
+                                    + "    SELECT DISTINCT c.id\n"
+                                    + "    FROM calibration_record c\n"
+                                    + "    LEFT JOIN machine m ON m.machine_code = c.machine_code\n"
+                                    + where + "\n) AS sub";
 
-                    // COUNT ใช้ subquery เพื่อนับ distinct c.id ป้องกัน duplicate จาก machine
-                    String countSql = """
-                            SELECT COUNT(*) FROM (
-                                SELECT DISTINCT c.id
-                                FROM calibration_record c
-                                LEFT JOIN machine m ON m.machine_code = c.machine_code
-                            """ + where + ") AS sub";
-
-                    String dataSql = """
-                            SELECT DISTINCT ON (c.id)
-                                c.id,
-                                c.machine_code,
-                                c.machine_name,
-                                c.years,
-                                c.due_date,
-                                c.start_date,
-                                c.certificate_date,
-                                c.results,
-                                c.criteria,
-                                c.measuring_range,
-                                c.accuracy,
-                                c.calibration_range,
-                                c.calibration_status,
-                                c.attachment,
-                                c.note,
-                                c.permissible_capacity,
-                                c.comment,
-                                c.resolution,
-                                c.max_uncertainty,
-                                c.mpe,
-                                c.check_mpe,
-                                c.check_resolution,
-                                c.check_result,
-                                c.reason_not_pass,
-                                m.responsible_person_name AS responsible_maintenance_name,
-                                m.department              AS machine_department_code,
-                                d.department              AS machine_department_name
-                            FROM calibration_record c
-                            LEFT JOIN machine m ON m.machine_code = c.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            """ + where + """
-                            ORDER BY c.id, m.department ASC NULLS LAST, c.due_date ASC NULLS LAST
-                            LIMIT :size OFFSET :offset
-                            """;
+                    String dataSql =
+                            "SELECT DISTINCT ON (c.id)\n"
+                                    + "    c.id, c.machine_code, c.machine_name, c.years,\n"
+                                    + "    c.due_date, c.start_date, c.certificate_date,\n"
+                                    + "    c.results, c.criteria, c.measuring_range, c.accuracy,\n"
+                                    + "    c.calibration_range, c.calibration_status,\n"
+                                    + "    c.attachment, c.note, c.permissible_capacity,\n"
+                                    + "    c.comment, c.resolution, c.max_uncertainty,\n"
+                                    + "    c.mpe, c.check_mpe, c.check_resolution,\n"
+                                    + "    c.check_result, c.reason_not_pass,\n"
+                                    + "    m.responsible_person_name AS responsible_maintenance_name,\n"
+                                    + "    m.department              AS machine_department_code,\n"
+                                    + "    d.department              AS machine_department_name\n"
+                                    + "FROM calibration_record c\n"
+                                    + "LEFT JOIN machine m ON m.machine_code = c.machine_code\n"
+                                    + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + where
+                                    + "\nORDER BY c.id, m.department ASC NULLS LAST, c.due_date ASC NULLS LAST"
+                                    + "\nLIMIT :size OFFSET :offset";
 
                     DatabaseClient.GenericExecuteSpec countSpec = template.getDatabaseClient().sql(countSql);
                     DatabaseClient.GenericExecuteSpec dataSpec  = template.getDatabaseClient().sql(dataSql);
 
-                    // bind params เหมือนกันทั้งคู่
                     countSpec = countSpec.bind("year", effectiveYear);
                     dataSpec  = dataSpec.bind("year",  effectiveYear);
-                    // ADMIN และ DEPARTMENT_ADMIN ไม่ใช้ :memberId param
                     if (!"ADMIN".equals(role) && !"DEPARTMENT_ADMIN".equals(role)) {
                         countSpec = countSpec.bind("memberId", memberId);
                         dataSpec  = dataSpec.bind("memberId",  memberId);
                     }
                     if (hasKw) {
                         String kw = "%" + keyword.trim() + "%";
-                        countSpec = countSpec.bind("kw", kw);
-                        dataSpec  = dataSpec.bind("kw",  kw);
+                        countSpec = countSpec.bind("kw", kw); dataSpec = dataSpec.bind("kw", kw);
                     }
-                    if (hasDept) {
-                        countSpec = countSpec.bind("department", department.trim());
-                        dataSpec  = dataSpec.bind("department",  department.trim());
-                    }
-                    if (hasRes) {
-                        countSpec = countSpec.bind("results", results.trim());
-                        dataSpec  = dataSpec.bind("results",  results.trim());
-                    }
-                    if (hasCal) {
-                        countSpec = countSpec.bind("calibrationStatus", calibrationStatus.trim());
-                        dataSpec  = dataSpec.bind("calibrationStatus",  calibrationStatus.trim());
-                    }
+                    if (hasDept) { countSpec = countSpec.bind("department", department.trim());              dataSpec = dataSpec.bind("department",         department.trim()); }
+                    if (hasRes)  { countSpec = countSpec.bind("results",    results.trim());                 dataSpec = dataSpec.bind("results",            results.trim()); }
+                    if (hasCal)  { countSpec = countSpec.bind("calibrationStatus", calibrationStatus.trim()); dataSpec = dataSpec.bind("calibrationStatus", calibrationStatus.trim()); }
                     dataSpec = dataSpec.bind("size", size).bind("offset", (long) index * size);
 
                     Mono<Long> countMono = countSpec
-                            .map((row, meta) -> {
-                                Object v = row.get(0);
-                                return v instanceof Number n ? n.longValue() : 0L;
-                            })
+                            .map((row, meta) -> { Object v = row.get(0); return v instanceof Number n ? n.longValue() : 0L; })
                             .one().defaultIfEmpty(0L);
 
                     Flux<CalibrationResponseDTO> dataFlux = dataSpec
@@ -248,16 +199,15 @@ public class CalibrationService {
                                     .build())
                             .all();
 
-                    return Mono.zip(countMono, dataFlux.collectList())
-                            .map(tuple -> {
-                                long total = tuple.getT1();
-                                return PagedResponse.<CalibrationResponseDTO>builder()
-                                        .success(true).message("Success")
-                                        .data(tuple.getT2())
-                                        .totalElements(total)
-                                        .totalPages((int) Math.ceil((double) total / size))
-                                        .index(index).size(size).build();
-                            });
+                    return Mono.zip(countMono, dataFlux.collectList()).map(tuple -> {
+                        long total = tuple.getT1();
+                        return PagedResponse.<CalibrationResponseDTO>builder()
+                                .success(true).message("Success")
+                                .data(tuple.getT2())
+                                .totalElements(total)
+                                .totalPages((int) Math.ceil((double) total / size))
+                                .index(index).size(size).build();
+                    });
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to fetch calibration page: {}", e.getMessage(), e);
@@ -270,45 +220,43 @@ public class CalibrationService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // FILTER OPTIONS
-    // ต้อง JOIN machine เพื่อดึง department → ใช้ roleFilterJoin
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<CalibrationFilterOptionsDTO> getFilterOptions() {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String sql = """
-                            SELECT DISTINCT
-                                EXTRACT(YEAR FROM c.due_date)::int        AS year,
-                                m.department                               AS department_code,
-                                COALESCE(d.department, m.department, '')   AS department_name,
-                                d.division                                  AS division,
-                                c.results                                   AS results,
-                                c.calibration_status                        AS calibration_status
-                            FROM calibration_record c
-                            LEFT JOIN machine m ON m.machine_code = c.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            WHERE c.due_date IS NOT NULL
-                              AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')
-                            """ + roleFilterJoin(principal) + """
-                            ORDER BY department_name ASC, division ASC
-                            """;
+                    String sql =
+                            "SELECT DISTINCT\n"
+                                    + "    EXTRACT(YEAR FROM c.due_date)::int        AS year,\n"
+                                    + "    m.department                               AS department_code,\n"
+                                    + "    COALESCE(d.department, m.department, '')   AS department_name,\n"
+                                    + "    d.division                                 AS division,\n"
+                                    + "    c.results                                  AS results,\n"
+                                    + "    c.calibration_status                       AS calibration_status\n"
+                                    + "FROM calibration_record c\n"
+                                    + "LEFT JOIN machine m ON m.machine_code = c.machine_code\n"
+                                    + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + "WHERE c.due_date IS NOT NULL\n"
+                                    + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + roleFilterJoin(principal)
+                                    + "\nORDER BY department_name ASC, division ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .map((row, meta) -> new Object[]{
                                     getIntValueNullable(row),
                                     row.get("department_code",   String.class),
                                     row.get("department_name",   String.class),
-                                    row.get("division",           String.class),
-                                    row.get("results",            String.class),
+                                    row.get("division",          String.class),
+                                    row.get("results",           String.class),
                                     row.get("calibration_status", String.class),
                             })
                             .all().collectList()
                             .map(rows -> {
-                                Set<Integer>        years       = new TreeSet<>(Comparator.reverseOrder());
-                                Map<String, String> depts       = new LinkedHashMap<>();
-                                Set<String>         resultSet   = new LinkedHashSet<>();
-                                Set<String>         calStatusSet= new LinkedHashSet<>();
+                                Set<Integer>        years        = new TreeSet<>(Comparator.reverseOrder());
+                                Map<String, String> depts        = new LinkedHashMap<>();
+                                Set<String>         resultSet    = new LinkedHashSet<>();
+                                Set<String>         calStatusSet = new LinkedHashSet<>();
 
                                 for (Object[] r : rows) {
                                     if (r[0] != null) years.add((Integer) r[0]);
@@ -316,7 +264,7 @@ public class CalibrationService {
                                     String dn  = (String) r[2];
                                     String div = (String) r[3];
                                     String label = StringUtils.hasText(div) ? dn + " - " + div : dn;
-                                    if (StringUtils.hasText(dc))           depts.putIfAbsent(dc, label);
+                                    if (StringUtils.hasText(dc))            depts.putIfAbsent(dc, label);
                                     if (StringUtils.hasText((String) r[4])) resultSet.add((String) r[4]);
                                     if (StringUtils.hasText((String) r[5])) calStatusSet.add((String) r[5]);
                                 }
@@ -342,53 +290,46 @@ public class CalibrationService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // DEPARTMENT SUMMARY
-    // JOIN machine เพื่อ GROUP BY department → ใช้ roleFilterJoin
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Flux<CalibrationDepartmentSummaryDTO> getDepartmentSummaryWithRole(Integer year) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    int    effectiveYear = (year != null) ? year : LocalDate.now().getYear();
+                    int yr = (year != null) ? year : LocalDate.now().getYear();
 
-                    // DISTINCT ON (c.id) ป้องกัน duplicate จาก machine มีหลาย row
-                    String sql = """
-                        SELECT
-                            department,
-                            department_name,
-                            COUNT(*)                                                     AS total,
-                            COUNT(CASE WHEN results = 'PASS'               THEN 1 END)  AS total_pass,
-                            COUNT(CASE WHEN results = 'FAILED'             THEN 1 END)  AS total_not_pass,
-                            COUNT(CASE WHEN calibration_status = 'ON TIME' THEN 1 END)  AS total_on_time,
-                            COUNT(CASE WHEN calibration_status = 'OVERDUE' THEN 1 END)  AS total_overdue,
-                            COUNT(CASE WHEN certificate_date IS NOT NULL   THEN 1 END)  AS total_completed,
-                            COUNT(CASE WHEN certificate_date IS NULL       THEN 1 END)  AS total_pending
-                        FROM (
-                            SELECT DISTINCT ON (c.id)
-                                c.id,
-                                c.results,
-                                c.calibration_status,
-                                c.certificate_date,
-                                m.department AS department,
-                                CASE
-                                    WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != ''
-                                        THEN d.department || ' - ' || d.division
-                                    WHEN d.department IS NOT NULL THEN d.department
-                                    ELSE m.department
-                                END AS department_name
-                            FROM calibration_record c
-                            JOIN machine m ON c.machine_code = m.machine_code
-                            LEFT JOIN department d ON m.department = d.department_code::text
-                            WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)
-                              AND EXTRACT(YEAR FROM c.due_date) = """ + effectiveYear + """
-                              AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')
-                            """ + roleFilterJoin(principal) + """
-                            ORDER BY c.id
-                        ) sub
-                        GROUP BY department, department_name
-                        HAVING COUNT(*) > 0
-                        ORDER BY department_name ASC
-                        """;
+                    String sql =
+                            "SELECT\n"
+                                    + "    department, department_name,\n"
+                                    + "    COUNT(*)                                                     AS total,\n"
+                                    + "    COUNT(CASE WHEN results = 'PASS'               THEN 1 END)  AS total_pass,\n"
+                                    + "    COUNT(CASE WHEN results = 'FAILED'             THEN 1 END)  AS total_not_pass,\n"
+                                    + "    COUNT(CASE WHEN calibration_status = 'ON TIME' THEN 1 END)  AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN calibration_status = 'OVERDUE' THEN 1 END)  AS total_overdue,\n"
+                                    + "    COUNT(CASE WHEN certificate_date IS NOT NULL   THEN 1 END)  AS total_completed,\n"
+                                    + "    COUNT(CASE WHEN certificate_date IS NULL       THEN 1 END)  AS total_pending\n"
+                                    + "FROM (\n"
+                                    + "    SELECT DISTINCT ON (c.id)\n"
+                                    + "        c.id, c.results, c.calibration_status, c.certificate_date,\n"
+                                    + "        m.department AS department,\n"
+                                    + "        CASE\n"
+                                    + "            WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != ''\n"
+                                    + "                THEN d.department || ' - ' || d.division\n"
+                                    + "            WHEN d.department IS NOT NULL THEN d.department\n"
+                                    + "            ELSE m.department\n"
+                                    + "        END AS department_name\n"
+                                    + "    FROM calibration_record c\n"
+                                    + "    JOIN machine m ON c.machine_code = m.machine_code\n"
+                                    + "    LEFT JOIN department d ON m.department = d.department_code::text\n"
+                                    + "    WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)\n"
+                                    + "      AND EXTRACT(YEAR FROM c.due_date) = " + yr + "\n"
+                                    + "      AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + roleFilterJoin(principal)
+                                    + "\n    ORDER BY c.id\n"
+                                    + ") sub\n"
+                                    + "GROUP BY department, department_name\n"
+                                    + "HAVING COUNT(*) > 0\n"
+                                    + "ORDER BY department_name ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .map((row, metadata) -> mapDepartmentSummary(row))
@@ -402,7 +343,6 @@ public class CalibrationService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // MONTHLY PLAN-ACTUAL
-    // ไม่ JOIN machine โดยตรง (GROUP BY due_date) → ใช้ roleFilterExists
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Flux<CalibrationMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
@@ -410,36 +350,36 @@ public class CalibrationService {
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     String yearFilter = (year != null)
-                            ? "AND EXTRACT(YEAR FROM c.due_date) = " + year : "";
+                            ? "\nAND EXTRACT(YEAR FROM c.due_date) = " + year : "";
 
-                    String sql = """
-                        SELECT
-                            EXTRACT(YEAR  FROM c.due_date)::int AS year,
-                            EXTRACT(MONTH FROM c.due_date)::int AS month,
-                            (SELECT m2.responsible_person_id FROM machine m2
-                             WHERE m2.machine_code = c.machine_code LIMIT 1) AS member_id,
-                            MAX(COALESCE(
-                                NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
-                                mb.first_name, mb.user_name, 'Unassigned'))  AS member_name,
-                            COUNT(*)                                          AS total_plan,
-                            COUNT(CASE WHEN c.certificate_date IS NOT NULL
-                                       AND c.certificate_date <= c.due_date  THEN 1 END) AS total_on_time,
-                            COUNT(CASE WHEN (c.certificate_date IS NOT NULL
-                                            AND c.certificate_date > c.due_date)
-                                        OR   c.certificate_date IS NULL      THEN 1 END) AS total_overdue
-                        FROM calibration_record c
-                        LEFT JOIN member mb ON mb.id = (
-                            SELECT m2.responsible_person_id FROM machine m2
-                            WHERE m2.machine_code = c.machine_code LIMIT 1)
-                        WHERE c.due_date IS NOT NULL
-                        """ + roleFilterExists(principal) + " " + yearFilter + """
-                        GROUP BY
-                            EXTRACT(YEAR  FROM c.due_date),
-                            EXTRACT(MONTH FROM c.due_date),
-                            (SELECT m2.responsible_person_id FROM machine m2
-                             WHERE m2.machine_code = c.machine_code LIMIT 1)
-                        ORDER BY year ASC, month ASC, member_name ASC
-                        """;
+                    String sql =
+                            "SELECT\n"
+                                    + "    EXTRACT(YEAR  FROM c.due_date)::int AS year,\n"
+                                    + "    EXTRACT(MONTH FROM c.due_date)::int AS month,\n"
+                                    + "    (SELECT m2.responsible_person_id FROM machine m2\n"
+                                    + "     WHERE m2.machine_code = c.machine_code LIMIT 1) AS member_id,\n"
+                                    + "    MAX(COALESCE(\n"
+                                    + "        NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),\n"
+                                    + "        mb.first_name, mb.user_name, 'Unassigned'))  AS member_name,\n"
+                                    + "    COUNT(*) AS total_plan,\n"
+                                    + "    COUNT(CASE WHEN c.certificate_date IS NOT NULL\n"
+                                    + "               AND c.certificate_date <= c.due_date  THEN 1 END) AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN (c.certificate_date IS NOT NULL\n"
+                                    + "                    AND c.certificate_date > c.due_date)\n"
+                                    + "                OR   c.certificate_date IS NULL      THEN 1 END) AS total_overdue\n"
+                                    + "FROM calibration_record c\n"
+                                    + "LEFT JOIN member mb ON mb.id = (\n"
+                                    + "    SELECT m2.responsible_person_id FROM machine m2\n"
+                                    + "    WHERE m2.machine_code = c.machine_code LIMIT 1)\n"
+                                    + "WHERE c.due_date IS NOT NULL"
+                                    + roleFilterExists(principal)
+                                    + yearFilter
+                                    + "\nGROUP BY\n"
+                                    + "    EXTRACT(YEAR  FROM c.due_date),\n"
+                                    + "    EXTRACT(MONTH FROM c.due_date),\n"
+                                    + "    (SELECT m2.responsible_person_id FROM machine m2\n"
+                                    + "     WHERE m2.machine_code = c.machine_code LIMIT 1)\n"
+                                    + "ORDER BY year ASC, month ASC, member_name ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .map((row, meta) -> new Object[]{
@@ -453,9 +393,8 @@ public class CalibrationService {
                             })
                             .all().collectList()
                             .flatMapMany(flatRows -> {
-                                LinkedHashMap<String, List<CalibrationMonthlyDTO.ResponsibleSummary>> monthMap =
-                                        new LinkedHashMap<>();
-                                Map<String, long[]> monthTotals = new LinkedHashMap<>();
+                                LinkedHashMap<String, List<CalibrationMonthlyDTO.ResponsibleSummary>> monthMap    = new LinkedHashMap<>();
+                                Map<String, long[]>                                                   monthTotals = new LinkedHashMap<>();
 
                                 for (Object[] r : flatRows) {
                                     String key = r[0] + "-" + r[1];
@@ -469,8 +408,8 @@ public class CalibrationService {
                                 }
 
                                 return Flux.fromIterable(monthMap.entrySet().stream().map(e -> {
-                                    String[] p  = e.getKey().split("-");
-                                    long[]   t  = monthTotals.get(e.getKey());
+                                    String[] p = e.getKey().split("-");
+                                    long[]   t = monthTotals.get(e.getKey());
                                     return CalibrationMonthlyDTO.builder()
                                             .year(Integer.parseInt(p[0])).month(Integer.parseInt(p[1]))
                                             .totalPlan(t[0]).totalOnTime(t[1]).totalOverdue(t[2])
@@ -486,34 +425,27 @@ public class CalibrationService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CALENDAR
-    // ADMIN  → ไม่ JOIN (ป้องกัน duplicate, เห็นครบ)
-    // Others → JOIN + DISTINCT ON (c.id) เพื่อ filter scope
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Flux<CalibrationResponseDTO> getCalendarEvents(int year, int month) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    final String sql;
-                    // รวม ADMIN และ role อื่นเป็น query เดียว
-                    // JOIN machine เสมอเพื่อ filter machine_status
-                    // DISTINCT ON (c.id) ป้องกัน duplicate จาก machine มีหลาย row
-                    sql = """
-                        SELECT DISTINCT ON (c.id)
-                            c.id, c.machine_code, c.machine_name, c.years, c.due_date,
-                            c.results, c.calibration_status,
-                            m.department                             AS machine_department_code,
-                            COALESCE(d.department, m.department, '') AS machine_department_name
-                        FROM calibration_record c
-                        JOIN machine m ON m.machine_code = c.machine_code
-                        LEFT JOIN department d ON d.department_code::text = m.department
-                        WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)
-                          AND EXTRACT(YEAR  FROM c.due_date) = :year
-                          AND EXTRACT(MONTH FROM c.due_date) = :month
-                          AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')
-                        """ + roleFilterJoin(principal) + """
-                        ORDER BY c.id, c.due_date ASC
-                        """;
+                    String sql =
+                            "SELECT DISTINCT ON (c.id)\n"
+                                    + "    c.id, c.machine_code, c.machine_name, c.years, c.due_date,\n"
+                                    + "    c.results, c.calibration_status,\n"
+                                    + "    m.department                             AS machine_department_code,\n"
+                                    + "    COALESCE(d.department, m.department, '') AS machine_department_name\n"
+                                    + "FROM calibration_record c\n"
+                                    + "JOIN machine m ON m.machine_code = c.machine_code\n"
+                                    + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + "WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)\n"
+                                    + "  AND EXTRACT(YEAR  FROM c.due_date) = :year\n"
+                                    + "  AND EXTRACT(MONTH FROM c.due_date) = :month\n"
+                                    + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + roleFilterJoin(principal)
+                                    + "\nORDER BY c.id, c.due_date ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .bind("year", year).bind("month", month)
@@ -537,7 +469,7 @@ public class CalibrationService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // GET BY ID / GET BY MACHINE CODE
+    // GET BY ID / BY MACHINE CODE
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<ApiResponse<CalibrationResponseDTO>> getById(Long id) {
@@ -654,28 +586,16 @@ public class CalibrationService {
 
     private Long getLongValue(Row row, String col) {
         Object v = row.get(col);
-        return switch (v) {
-            case Long l        -> l;
-            case Number n      -> n.longValue();
-            case null, default -> 0L;
-        };
+        return switch (v) { case Long l -> l; case Number n -> n.longValue(); case null, default -> 0L; };
     }
 
     private int getIntValue(Row row, String col) {
         Object v = row.get(col);
-        return switch (v) {
-            case Integer i     -> i;
-            case Number n      -> n.intValue();
-            case null, default -> 0;
-        };
+        return switch (v) { case Integer i -> i; case Number n -> n.intValue(); case null, default -> 0; };
     }
 
     private Integer getIntValueNullable(Row row) {
         Object v = row.get("year");
-        return switch (v) {
-            case Integer i     -> i;
-            case Number n      -> n.intValue();
-            case null, default -> null;
-        };
+        return switch (v) { case Integer i -> i; case Number n -> n.intValue(); case null, default -> null; };
     }
 }

@@ -31,9 +31,10 @@ public class MaintenanceController {
             @RequestParam(required = false) Integer year,
             @RequestParam(required = false) String  department,
             @RequestParam(required = false) String  status,
+            @RequestParam(required = false) String  maintenanceBy,
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
-        return maintenanceService.getPage(keyword, year, department, status, index, size);
+        return maintenanceService.getPage(keyword, year, department, status, maintenanceBy, index, size);
     }
 
     @GetMapping("/filter-options")
@@ -53,20 +54,23 @@ public class MaintenanceController {
 
     @GetMapping("/department-summary")
     public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummary(
-            @RequestParam(required = false) Integer year) {
-        return maintenanceService.getDepartmentSummaryWithRole(year);
+            @RequestParam(required = false) Integer year,
+            @RequestParam(required = false, defaultValue = "ALL") String maintenanceBy) {
+        return maintenanceService.getDepartmentSummaryWithRole(year, maintenanceBy);
     }
 
     @GetMapping("/monthly-summary")
     public Flux<MaintenanceMonthlyDTO> getMonthlySummary(
-            @RequestParam(required = false) Integer year) {
-        return maintenanceService.getMonthlyPlanActualSummary(year);
+            @RequestParam(required = false) Integer year,
+            @RequestParam(required = false) String maintenanceBy) {
+        return maintenanceService.getMonthlyPlanActualSummary(year, maintenanceBy);
     }
 
     @GetMapping("/calendar")
     public Flux<MaintenanceResponseDTO> getCalendar(
             @RequestParam int year,
-            @RequestParam int month) {
-        return maintenanceService.getCalendarEvents(year, month);
+            @RequestParam int month,
+            @RequestParam(required = false) String maintenanceBy) {
+        return maintenanceService.getCalendarEvents(year, month, maintenanceBy);
     }
 }

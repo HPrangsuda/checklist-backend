@@ -31,41 +31,50 @@ import java.util.*;
 public class MaintenanceService {
 
     private final R2dbcEntityTemplate template;
-    private final CommonService commonService;
+    private final CommonService       commonService;
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // ROLE FILTER HELPERS
-    //
-    // roleFilterJoin   — query ที่ JOIN machine m อยู่แล้ว
-    // roleFilterExists — query ที่ไม่ JOIN machine (ใช้ EXISTS subquery)
-    //
-    // DEPARTMENT_ADMIN: เห็น department prefix ตัวเอง (เช่น "61%" เห็น 611,612)
+    // ROLE / FILTER HELPERS
     // ═══════════════════════════════════════════════════════════════════════════
 
     private static String roleFilterJoin(MemberPrincipal p) {
         return switch (p.role()) {
             case "ADMIN"            -> "";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + ")"
-                    : "AND 1=0";
-            case "MANAGER"          -> "AND m.manager_id    = " + p.memberId();
-            case "SUPERVISOR"       -> "AND m.supervisor_id = " + p.memberId();
-            default                 -> "AND (m.responsible_person_id = " + p.memberId() + " OR mr.responsible_maintenance = " + p.memberId() + ")";
+                    ? "\nAND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                    + " FROM department d WHERE d.id = " + p.departmentId() + ")"
+                    : "\nAND 1=0";
+            case "MANAGER"          -> "\nAND m.manager_id    = " + p.memberId();
+            case "SUPERVISOR"       -> "\nAND m.supervisor_id = " + p.memberId();
+            default                 -> "\nAND (m.responsible_person_id = " + p.memberId()
+                    + " OR mr.responsible_maintenance = " + p.memberId() + ")";
         };
     }
 
     private static String roleFilterExists(MemberPrincipal p) {
-        Long memberId = p.memberId();
+        Long id = p.memberId();
         return switch (p.role()) {
             case "ADMIN"            -> "";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
-                    ? "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + p.departmentId() + "))"
-                    : "AND 1=0";
-            case "MANAGER"          -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.manager_id = " + memberId + ")";
-            case "SUPERVISOR"       -> "AND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.supervisor_id = " + memberId + ")";
-            default                 -> "AND (EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.responsible_person_id = " + memberId + ") OR mr.responsible_maintenance = " + memberId + ")";
+                    ? "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code"
+                    + " AND m2.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                    + " FROM department d WHERE d.id = " + p.departmentId() + "))"
+                    : "\nAND 1=0";
+            case "MANAGER"    -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.manager_id    = " + id + ")";
+            case "SUPERVISOR" -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.supervisor_id = " + id + ")";
+            default           -> "\nAND (EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = mr.machine_code AND m2.responsible_person_id = " + id + ")"
+                    + " OR mr.responsible_maintenance = " + id + ")";
         };
     }
+
+    private static String mbFragment(String maintenanceBy, String alias) {
+        if (!StringUtils.hasText(maintenanceBy) || "ALL".equalsIgnoreCase(maintenanceBy.trim())) return "";
+        String col = StringUtils.hasText(alias) ? alias + ".maintenance_by" : "maintenance_by";
+        return "\nAND " + col + " = '" + maintenanceBy.trim().toUpperCase() + "'";
+    }
+
+    private static final String MEMBER_NAME_EXPR =
+            "COALESCE(NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''), mb.first_name, mb.user_name)";
 
     // ═══════════════════════════════════════════════════════════════════════════
     // UPDATE
@@ -73,124 +82,98 @@ public class MaintenanceService {
 
     public Mono<ApiResponse<Void>> update(MaintenanceDTO dto) {
         return validateData(dto, true)
-                .flatMap(validated -> {
-                    Update update = buildUpdateFromDTO(validated);
-                    return commonService.update(dto.getId(), update, MaintenanceRecord.class)
-                            .then(Mono.just(ApiResponse.<Void>success("MS001")));
-                })
+                .flatMap(v -> commonService.update(dto.getId(), buildUpdateFromDTO(v), MaintenanceRecord.class)
+                        .then(Mono.just(ApiResponse.<Void>success("MS001"))))
                 .onErrorResume(e -> {
-                    log.error("Failed to update the maintenance: {}", e.getMessage());
+                    log.error("Failed to update maintenance: {}", e.getMessage());
                     return Mono.just(ApiResponse.error("MS001", e.getMessage()));
                 });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GET PAGE
-    // JOIN machine เพื่อแสดง department / responsible_person_name
-    // DEPARTMENT_ADMIN: roleFragment ใช้ LIKE prefix (ไม่ใช้ :memberId param)
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<PagedResponse<MaintenanceResponseDTO>> getPage(
             String keyword, Integer year, String department, String status,
-            int index, int size) {
+            String maintenanceBy, int index, int size) {
 
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String  role          = principal.role();
-                    Long    memberId      = principal.memberId();
-                    boolean hasKw         = StringUtils.hasText(keyword);
-                    int     effectiveYear = (year != null) ? year : LocalDate.now().getYear();
-                    boolean hasDept       = StringUtils.hasText(department);
-                    boolean hasSt         = StringUtils.hasText(status);
+                    String  role  = principal.role();
+                    Long    memId = principal.memberId();
+                    int     yr    = (year != null) ? year : LocalDate.now().getYear();
+                    boolean hasKw   = StringUtils.hasText(keyword);
+                    boolean hasDept = StringUtils.hasText(department);
+                    boolean hasSt   = StringUtils.hasText(status);
+                    boolean hasMb   = StringUtils.hasText(maintenanceBy) && !"ALL".equalsIgnoreCase(maintenanceBy);
 
-                    // DEPARTMENT_ADMIN ใช้ inline SQL ไม่ใช้ :memberId param
                     String roleFragment = switch (role) {
                         case "ADMIN"            -> "";
                         case "DEPARTMENT_ADMIN" -> principal.departmentId() != null
-                                ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + principal.departmentId() + ")"
-                                : "AND 1=0";
-                        case "MANAGER"          -> "AND m.manager_id    = :memberId";
-                        case "SUPERVISOR"       -> "AND m.supervisor_id = :memberId";
-                        default                 -> "AND (m.responsible_person_id = :memberId OR mr.responsible_maintenance = :memberId)";
+                                ? "\nAND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                                + " FROM department d WHERE d.id = " + principal.departmentId() + ")"
+                                : "\nAND 1=0";
+                        case "MANAGER"    -> "\nAND m.manager_id    = :memberId";
+                        case "SUPERVISOR" -> "\nAND m.supervisor_id = :memberId";
+                        default           -> "\nAND (m.responsible_person_id = :memberId OR mr.responsible_maintenance = :memberId)";
                     };
 
-                    String kwFragment   = hasKw   ? "AND (mr.machine_code ILIKE :kw OR mr.machine_name ILIKE :kw)" : "";
-                    String deptFragment = hasDept ? "AND m.department = :department" : "";
-                    String stFragment   = hasSt   ? "AND mr.status = :status"        : "";
+                    String where = "\nWHERE 1=1"
+                            + "\nAND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)"
+                            + roleFragment
+                            + (hasKw   ? "\nAND (mr.machine_code ILIKE :kw OR mr.machine_name ILIKE :kw)" : "")
+                            + "\nAND mr.years::int = :year"
+                            + (hasDept ? "\nAND m.department = :department"         : "")
+                            + (hasSt   ? "\nAND mr.status = :status"                : "")
+                            + (hasMb   ? "\nAND mr.maintenance_by = :maintenanceBy" : "");
 
-                    String where = "WHERE 1=1 "
-                            + "AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL) "
-                            + roleFragment   + " "
-                            + kwFragment     + " "
-                            + "AND EXTRACT(YEAR FROM mr.due_date) = :year "
-                            + deptFragment   + " "
-                            + stFragment;
+                    String countSql =
+                            "SELECT COUNT(*)\n"
+                                    + "FROM maintenance_record mr\n"
+                                    + "LEFT JOIN machine m ON m.machine_code = mr.machine_code\n"
+                                    + where;
 
-                    String countSql = """
-                            SELECT COUNT(*)
-                            FROM maintenance_record mr
-                            LEFT JOIN machine m ON m.machine_code = mr.machine_code
-                            """ + where;
+                    String dataSql =
+                            "SELECT\n"
+                                    + "    mr.id, mr.machine_code, mr.machine_name, mr.years, mr.round,\n"
+                                    + "    mr.due_date, mr.plan_date, mr.start_date, mr.actual_date,\n"
+                                    + "    mr.status, mr.maintenance_by, mr.responsible_maintenance,\n"
+                                    + "    mr.note, mr.attachment, mr.checklist_record_id,\n"
+                                    + "    " + MEMBER_NAME_EXPR + " AS responsible_maintenance_name,\n"
+                                    + "    m.department              AS machine_department_code,\n"
+                                    + "    d.department              AS machine_department_name\n"
+                                    + "FROM maintenance_record mr\n"
+                                    + "LEFT JOIN machine m  ON m.machine_code       = mr.machine_code\n"
+                                    + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + "LEFT JOIN member mb   ON mb.id               = mr.responsible_maintenance\n"
+                                    + where
+                                    + "\nORDER BY m.department ASC NULLS LAST, mr.due_date ASC NULLS LAST"
+                                    + "\nLIMIT :size OFFSET :offset";
 
-                    String dataSql = """
-                            SELECT
-                                mr.id,
-                                mr.machine_code,
-                                mr.machine_name,
-                                mr.years,
-                                mr.round,
-                                mr.due_date,
-                                mr.plan_date,
-                                mr.start_date,
-                                mr.actual_date,
-                                mr.status,
-                                mr.maintenance_by,
-                                mr.responsible_maintenance,
-                                mr.note,
-                                mr.attachment,
-                                mr.checklist_record_id,
-                                m.responsible_person_name AS responsible_maintenance_name,
-                                m.department              AS machine_department_code,
-                                d.department              AS machine_department_name
-                            FROM maintenance_record mr
-                            LEFT JOIN machine m ON m.machine_code = mr.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            """ + where + """
-                            ORDER BY m.department ASC NULLS LAST, mr.due_date ASC NULLS LAST
-                            LIMIT :size OFFSET :offset
-                            """;
+                    DatabaseClient.GenericExecuteSpec cs = template.getDatabaseClient().sql(countSql);
+                    DatabaseClient.GenericExecuteSpec ds = template.getDatabaseClient().sql(dataSql);
 
-                    DatabaseClient.GenericExecuteSpec countSpec = template.getDatabaseClient().sql(countSql);
-                    DatabaseClient.GenericExecuteSpec dataSpec  = template.getDatabaseClient().sql(dataSql);
-
-                    // bind :memberId เฉพาะ role ที่ใช้ param (ไม่รวม ADMIN และ DEPARTMENT_ADMIN)
                     if (!"ADMIN".equals(role) && !"DEPARTMENT_ADMIN".equals(role)) {
-                        countSpec = countSpec.bind("memberId", memberId);
-                        dataSpec  = dataSpec.bind("memberId",  memberId);
+                        cs = cs.bind("memberId", memId);
+                        ds = ds.bind("memberId", memId);
                     }
                     if (hasKw) {
                         String kw = "%" + keyword.trim() + "%";
-                        countSpec = countSpec.bind("kw", kw);
-                        dataSpec  = dataSpec.bind("kw",  kw);
+                        cs = cs.bind("kw", kw); ds = ds.bind("kw", kw);
                     }
-                    countSpec = countSpec.bind("year", effectiveYear);
-                    dataSpec  = dataSpec.bind("year",  effectiveYear);
-                    if (hasDept) {
-                        countSpec = countSpec.bind("department", department.trim());
-                        dataSpec  = dataSpec.bind("department",  department.trim());
-                    }
-                    if (hasSt) {
-                        countSpec = countSpec.bind("status", status.trim());
-                        dataSpec  = dataSpec.bind("status",  status.trim());
-                    }
-                    dataSpec = dataSpec.bind("size", size).bind("offset", (long) index * size);
+                    cs = cs.bind("year", yr); ds = ds.bind("year", yr);
+                    if (hasDept) { cs = cs.bind("department",    department.trim());                    ds = ds.bind("department",    department.trim()); }
+                    if (hasSt)   { cs = cs.bind("status",        status.trim());                        ds = ds.bind("status",        status.trim()); }
+                    if (hasMb)   { cs = cs.bind("maintenanceBy", maintenanceBy.trim().toUpperCase());   ds = ds.bind("maintenanceBy", maintenanceBy.trim().toUpperCase()); }
+                    ds = ds.bind("size", size).bind("offset", (long) index * size);
 
-                    Mono<Long> countMono = countSpec
+                    Mono<Long> countMono = cs
                             .map((row, meta) -> { Object v = row.get(0); return v instanceof Number n ? n.longValue() : 0L; })
                             .one().defaultIfEmpty(0L);
 
-                    Flux<MaintenanceResponseDTO> dataFlux = dataSpec
+                    Flux<MaintenanceResponseDTO> dataFlux = ds
                             .map((row, meta) -> MaintenanceResponseDTO.builder()
                                     .id(row.get("id", Long.class))
                                     .machineCode(row.get("machine_code", String.class))
@@ -213,16 +196,15 @@ public class MaintenanceService {
                                     .build())
                             .all();
 
-                    return Mono.zip(countMono, dataFlux.collectList())
-                            .map(tuple -> {
-                                long total = tuple.getT1();
-                                return PagedResponse.<MaintenanceResponseDTO>builder()
-                                        .success(true).message("Success")
-                                        .data(tuple.getT2())
-                                        .totalElements(total)
-                                        .totalPages((int) Math.ceil((double) total / size))
-                                        .index(index).size(size).build();
-                            });
+                    return Mono.zip(countMono, dataFlux.collectList()).map(t -> {
+                        long total = t.getT1();
+                        return PagedResponse.<MaintenanceResponseDTO>builder()
+                                .success(true).message("Success")
+                                .data(t.getT2())
+                                .totalElements(total)
+                                .totalPages((int) Math.ceil((double) total / size))
+                                .index(index).size(size).build();
+                    });
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to fetch maintenance page: {}", e.getMessage(), e);
@@ -234,188 +216,177 @@ public class MaintenanceService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // FILTER OPTIONS — ใช้ roleFilterJoin (JOIN machine m อยู่แล้ว)
+    // FILTER OPTIONS
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<MaintenanceFilterOptionsDTO> getFilterOptions() {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    String sql = """
-                            SELECT DISTINCT
-                                EXTRACT(YEAR FROM mr.due_date)::int        AS year,
-                                m.department                               AS department_code,
-                                COALESCE(d.department, m.department, '')   AS department_name,
-                                d.division                                  AS division,
-                                mr.status                                   AS status
-                            FROM maintenance_record mr
-                            LEFT JOIN machine m ON m.machine_code = mr.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            WHERE mr.due_date IS NOT NULL
-                            """ + roleFilterJoin(principal) + """
-                            ORDER BY department_name ASC, division ASC
-                            """;
+                    String sql =
+                            "SELECT DISTINCT\n"
+                                    + "    mr.years::int                              AS year,\n"
+                                    + "    m.department                               AS department_code,\n"
+                                    + "    COALESCE(d.department, m.department, '')   AS department_name,\n"
+                                    + "    d.division                                 AS division,\n"
+                                    + "    mr.status                                  AS status,\n"
+                                    + "    mr.maintenance_by                          AS maintenance_by\n"
+                                    + "FROM maintenance_record mr\n"
+                                    + "LEFT JOIN machine m ON m.machine_code = mr.machine_code\n"
+                                    + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + "WHERE mr.years IS NOT NULL"
+                                    + roleFilterJoin(principal)
+                                    + "\nORDER BY department_name ASC, division ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .map((row, meta) -> new Object[]{
                                     getIntValueNullable(row),
                                     row.get("department_code", String.class),
                                     row.get("department_name", String.class),
-                                    row.get("division",         String.class),
-                                    row.get("status",           String.class),
+                                    row.get("division",        String.class),
+                                    row.get("status",          String.class),
+                                    row.get("maintenance_by",  String.class),
                             })
                             .all().collectList()
                             .map(rows -> {
-                                Set<Integer>        years     = new TreeSet<>(Comparator.reverseOrder());
-                                Map<String, String> depts     = new LinkedHashMap<>();
-                                Set<String>         statusSet = new LinkedHashSet<>();
+                                Set<Integer>        years    = new TreeSet<>(Comparator.reverseOrder());
+                                Map<String, String> depts    = new LinkedHashMap<>();
+                                Set<String>         statuses = new LinkedHashSet<>();
+                                Set<String>         mbSet    = new LinkedHashSet<>();
+
                                 for (Object[] r : rows) {
                                     if (r[0] != null) years.add((Integer) r[0]);
-                                    String dc  = (String) r[1];
-                                    String dn  = (String) r[2];
-                                    String div = (String) r[3];
+                                    String dc    = (String) r[1];
+                                    String dn    = (String) r[2];
+                                    String div   = (String) r[3];
                                     String label = StringUtils.hasText(div) ? dn + " - " + div : dn;
-                                    if (StringUtils.hasText(dc))           depts.putIfAbsent(dc, label);
-                                    if (StringUtils.hasText((String) r[4])) statusSet.add((String) r[4]);
+                                    if (StringUtils.hasText(dc))            depts.putIfAbsent(dc, label);
+                                    if (StringUtils.hasText((String) r[4])) statuses.add((String) r[4]);
+                                    if (StringUtils.hasText((String) r[5])) mbSet.add((String) r[5]);
                                 }
+
                                 List<MaintenanceFilterOptionsDTO.DepartmentOption> deptList = depts.entrySet().stream()
                                         .map(e -> MaintenanceFilterOptionsDTO.DepartmentOption.builder()
                                                 .code(e.getKey()).name(e.getValue()).build())
                                         .toList();
+
                                 return MaintenanceFilterOptionsDTO.builder()
                                         .years(new ArrayList<>(years))
                                         .departments(deptList)
-                                        .statuses(new ArrayList<>(statusSet))
+                                        .statuses(new ArrayList<>(statuses))
+                                        .maintenanceByOptions(new ArrayList<>(mbSet))
                                         .build();
                             });
                 })
                 .onErrorResume(e -> {
                     log.error("Failed to fetch maintenance filter options: {}", e.getMessage(), e);
                     return Mono.just(MaintenanceFilterOptionsDTO.builder()
-                            .years(List.of()).departments(List.of()).statuses(List.of()).build());
+                            .years(List.of()).departments(List.of())
+                            .statuses(List.of()).maintenanceByOptions(List.of()).build());
                 });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // DEPARTMENT SUMMARY — ใช้ roleFilterExists (GROUP BY department)
+    // DEPARTMENT SUMMARY
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummaryWithRole(Integer year) {
+    public Flux<MaintenanceDepartmentSummaryDTO> getDepartmentSummaryWithRole(Integer year, String maintenanceBy) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    int effectiveYear = (year != null) ? year : LocalDate.now().getYear();
+                    int yr = (year != null) ? year : LocalDate.now().getYear();
 
-                    String sql = """
-                        SELECT
-                            department,
-                            department_name,
-                            COUNT(*)                                                            AS total,
-                            COUNT(CASE WHEN status = 'Pass'     THEN 1 END)                    AS total_pass,
-                            COUNT(CASE WHEN status = 'Not Pass' THEN 1 END)                    AS total_not_pass,
-                            COUNT(CASE WHEN actual_date IS NOT NULL
-                                       AND actual_date <= due_date THEN 1 END)                 AS total_on_time,
-                            COUNT(CASE WHEN actual_date IS NOT NULL
-                                       AND actual_date > due_date  THEN 1 END)                 AS total_overdue,
-                            COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END)                AS total_completed,
-                            COUNT(CASE WHEN actual_date IS NULL     THEN 1 END)                AS total_pending,
-                            ROUND(COUNT(CASE WHEN status = 'Pass' THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS pass_rate,
-                            ROUND(COUNT(CASE WHEN status = 'Not Pass' THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS not_pass_rate,
-                            ROUND(COUNT(CASE WHEN actual_date IS NOT NULL
-                                            AND actual_date <= due_date THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS on_time_rate,
-                            ROUND(COUNT(CASE WHEN actual_date IS NOT NULL
-                                            AND actual_date > due_date THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS overdue_rate,
-                            ROUND(COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS completed_rate,
-                            ROUND(COUNT(CASE WHEN actual_date IS NULL THEN 1 END) * 100.0
-                                / NULLIF(COUNT(*), 0), 2)                                      AS pending_rate
-                        FROM (
-                            SELECT DISTINCT ON (mr.id)
-                                mr.id,
-                                mr.status,
-                                mr.actual_date,
-                                mr.due_date,
-                                m.department AS department,
-                                CASE
-                                    WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != ''
-                                        THEN d.department || ' - ' || d.division
-                                    WHEN d.department IS NOT NULL THEN d.department
-                                    ELSE m.department
-                                END AS department_name
-                            FROM maintenance_record mr
-                            JOIN machine m ON m.machine_code = mr.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            WHERE (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
-                              AND EXTRACT(YEAR FROM mr.due_date) = """ + effectiveYear + "\n                            "
-                            + roleFilterJoin(principal) + """
-                            ORDER BY mr.id
-                        ) sub
-                        GROUP BY department, department_name
-                        HAVING COUNT(*) > 0
-                        ORDER BY department_name ASC
-                        """;
+                    String sql =
+                            "SELECT\n"
+                                    + "    department, department_name,\n"
+                                    + "    COUNT(*)                                                            AS total,\n"
+                                    + "    COUNT(CASE WHEN status = 'Pass'     THEN 1 END)                    AS total_pass,\n"
+                                    + "    COUNT(CASE WHEN status = 'Not Pass' THEN 1 END)                    AS total_not_pass,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date <= due_date THEN 1 END) AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date >  due_date THEN 1 END) AS total_overdue,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END)                AS total_completed,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NULL     THEN 1 END)                AS total_pending,\n"
+                                    + "    ROUND(COUNT(CASE WHEN status = 'Pass'     THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS pass_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN status = 'Not Pass' THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS not_pass_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date <= due_date THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS on_time_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date >  due_date THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS overdue_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS completed_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NULL     THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS pending_rate\n"
+                                    + "FROM (\n"
+                                    + "    SELECT DISTINCT ON (mr.id)\n"
+                                    + "        mr.id, mr.status, mr.actual_date, mr.due_date,\n"
+                                    + "        m.department AS department,\n"
+                                    + "        CASE\n"
+                                    + "            WHEN d.department IS NOT NULL AND d.division IS NOT NULL AND d.division != ''\n"
+                                    + "                THEN d.department || ' - ' || d.division\n"
+                                    + "            WHEN d.department IS NOT NULL THEN d.department\n"
+                                    + "            ELSE m.department\n"
+                                    + "        END AS department_name\n"
+                                    + "    FROM maintenance_record mr\n"
+                                    + "    JOIN machine m ON m.machine_code = mr.machine_code\n"
+                                    + "    LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                    + "    WHERE (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)\n"
+                                    + "      AND mr.years::int = " + yr
+                                    + mbFragment(maintenanceBy, "mr")
+                                    + roleFilterJoin(principal)
+                                    + "\n    ORDER BY mr.id\n"
+                                    + ") sub\n"
+                                    + "GROUP BY department, department_name\n"
+                                    + "HAVING COUNT(*) > 0\n"
+                                    + "ORDER BY department_name ASC";
 
                     return template.getDatabaseClient().sql(sql)
-                            .map((row, metadata) -> mapDepartmentSummary(row))
+                            .map((row, meta) -> mapDepartmentSummary(row))
                             .all()
                             .onErrorResume(e -> {
-                                log.error("Error fetching maintenance department summary with role", e);
+                                log.error("Error fetching maintenance department summary", e);
                                 return Flux.empty();
                             });
                 });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // MONTHLY PLAN-ACTUAL — ใช้ roleFilterExists
+    // MONTHLY PLAN-ACTUAL
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public Flux<MaintenanceMonthlyDTO> getMonthlyPlanActualSummary(Integer year) {
+    public Flux<MaintenanceMonthlyDTO> getMonthlyPlanActualSummary(Integer year, String maintenanceBy) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
-                    String yearFilter = (year != null) ? "AND EXTRACT(YEAR FROM mr.due_date) = " + year + " " : "";
-                    String roleFilter = roleFilterExists(principal);
+                    String yearFilter = (year != null) ? "\nAND mr.years::int = " + year : "";
 
-                    String sql = """
-                        SELECT
-                            EXTRACT(YEAR  FROM mr.due_date)::int AS year,
-                            EXTRACT(MONTH FROM mr.due_date)::int AS month,
-                            mr.responsible_maintenance           AS member_id,
-                            MAX(COALESCE(
-                                NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''),
-                                mb.first_name, mb.user_name, 'Unassigned')) AS member_name,
-                            COUNT(*)                             AS total_plan,
-                            COUNT(CASE WHEN mr.actual_date IS NOT NULL
-                                       AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,
-                            COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.actual_date > mr.due_date)
-                                        OR   mr.actual_date IS NULL THEN 1 END)      AS total_overdue
-                        FROM maintenance_record mr
-                        LEFT JOIN member mb ON mb.id = mr.responsible_maintenance
-                        WHERE mr.due_date IS NOT NULL
-                        """ + roleFilter + " " + yearFilter + """
-                        GROUP BY
-                            EXTRACT(YEAR  FROM mr.due_date),
-                            EXTRACT(MONTH FROM mr.due_date),
-                            mr.responsible_maintenance
-                        ORDER BY year ASC, month ASC, member_name ASC
-                        """;
+                    String sql =
+                            "SELECT\n"
+                                    + "    mr.years::int                        AS year,\n"
+                                    + "    EXTRACT(MONTH FROM mr.due_date)::int AS month,\n"
+                                    + "    mr.responsible_maintenance           AS member_id,\n"
+                                    + "    MAX(" + MEMBER_NAME_EXPR + ")        AS member_name,\n"
+                                    + "    COUNT(*) AS total_plan,\n"
+                                    + "    COUNT(CASE WHEN mr.actual_date IS NOT NULL AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.actual_date > mr.due_date) OR mr.actual_date IS NULL THEN 1 END) AS total_overdue\n"
+                                    + "FROM maintenance_record mr\n"
+                                    + "LEFT JOIN member mb ON mb.id = mr.responsible_maintenance\n"
+                                    + "WHERE mr.years IS NOT NULL"
+                                    + roleFilterExists(principal)
+                                    + yearFilter
+                                    + mbFragment(maintenanceBy, "mr")
+                                    + "\nGROUP BY mr.years::int, EXTRACT(MONTH FROM mr.due_date), mr.responsible_maintenance"
+                                    + "\nORDER BY year ASC, month ASC, member_name ASC";
 
                     return template.getDatabaseClient().sql(sql)
                             .map((row, meta) -> new Object[]{
                                     getIntValue(row, "year"), getIntValue(row, "month"),
-                                    row.get("member_id", Long.class), row.get("member_name", String.class),
+                                    row.get("member_id",   Long.class),
+                                    row.get("member_name", String.class),
                                     getLongValue(row, "total_plan"),
                                     getLongValue(row, "total_on_time"),
                                     getLongValue(row, "total_overdue"),
                             })
                             .all().collectList()
                             .flatMapMany(flatRows -> {
-                                LinkedHashMap<String, List<MaintenanceMonthlyDTO.ResponsibleSummary>> monthMap = new LinkedHashMap<>();
-                                Map<String, long[]> monthTotals = new LinkedHashMap<>();
+                                LinkedHashMap<String, List<MaintenanceMonthlyDTO.ResponsibleSummary>> monthMap    = new LinkedHashMap<>();
+                                Map<String, long[]>                                                   monthTotals = new LinkedHashMap<>();
+
                                 for (Object[] r : flatRows) {
                                     String key = r[0] + "-" + r[1];
                                     monthMap.computeIfAbsent(key, k -> new ArrayList<>())
@@ -423,14 +394,15 @@ public class MaintenanceService {
                                                     .memberId((Long) r[2]).memberName((String) r[3])
                                                     .totalPlan((long) r[4]).totalOnTime((long) r[5]).totalOverdue((long) r[6])
                                                     .build());
-                                    monthTotals.merge(key, new long[]{ (long)r[4], (long)r[5], (long)r[6] },
+                                    monthTotals.merge(key, new long[]{ (long) r[4], (long) r[5], (long) r[6] },
                                             (a, b) -> new long[]{ a[0]+b[0], a[1]+b[1], a[2]+b[2] });
                                 }
+
                                 return Flux.fromIterable(monthMap.entrySet().stream().map(e -> {
-                                    String[] p = e.getKey().split("-");
-                                    long[]   t = monthTotals.get(e.getKey());
+                                    String[] parts = e.getKey().split("-");
+                                    long[]   t     = monthTotals.get(e.getKey());
                                     return MaintenanceMonthlyDTO.builder()
-                                            .year(Integer.parseInt(p[0])).month(Integer.parseInt(p[1]))
+                                            .year(Integer.parseInt(parts[0])).month(Integer.parseInt(parts[1]))
                                             .totalPlan(t[0]).totalOnTime(t[1]).totalOverdue(t[2])
                                             .byResponsible(e.getValue()).build();
                                 }).toList());
@@ -444,52 +416,56 @@ public class MaintenanceService {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CALENDAR
-    // ADMIN  → ไม่ JOIN machine (ครบทุก record)
-    // Others → JOIN machine + DISTINCT ON (r.id) + filter machine_status
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public Flux<MaintenanceResponseDTO> getCalendarEvents(int year, int month) {
+    public Flux<MaintenanceResponseDTO> getCalendarEvents(int year, int month, String maintenanceBy) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMapMany(principal -> {
                     final String sql;
+
                     if ("ADMIN".equals(principal.role())) {
-                        sql = """
-                            SELECT DISTINCT ON (r.id)
-                                r.id, r.machine_code, r.machine_name, r.years, r.round, r.due_date, r.status,
-                                NULL::text AS machine_department_code,
-                                NULL::text AS machine_department_name
-                            FROM maintenance_record r
-                            WHERE (r.is_canceled = FALSE OR r.is_canceled IS NULL)
-                              AND EXTRACT(YEAR  FROM r.due_date) = :year
-                              AND EXTRACT(MONTH FROM r.due_date) = :month
-                            ORDER BY r.id, r.due_date ASC
-                            """;
+                        sql = "SELECT DISTINCT ON (r.id)\n"
+                                + "    r.id, r.machine_code, r.machine_name, r.years, r.round,\n"
+                                + "    r.due_date, r.status, r.maintenance_by, r.responsible_maintenance,\n"
+                                + "    " + MEMBER_NAME_EXPR.replace("mb.", "mb.") + " AS responsible_maintenance_name,\n"
+                                + "    NULL::text AS machine_department_code,\n"
+                                + "    NULL::text AS machine_department_name\n"
+                                + "FROM maintenance_record r\n"
+                                + "LEFT JOIN member mb ON mb.id = r.responsible_maintenance\n"
+                                + "WHERE (r.is_canceled = FALSE OR r.is_canceled IS NULL)\n"
+                                + "  AND r.years::int = :year\n"
+                                + "  AND EXTRACT(MONTH FROM r.due_date)::int = :month"
+                                + mbFragment(maintenanceBy, "r")
+                                + "\nORDER BY r.id, r.due_date ASC";
                     } else {
-                        String statusFilter = "AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')";
-                        String roleFilter   = switch (principal.role()) {
+                        String roleFilter = switch (principal.role()) {
                             case "DEPARTMENT_ADMIN" -> principal.departmentId() != null
-                                    ? "AND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%' FROM department d WHERE d.id = " + principal.departmentId() + ")"
-                                    : "AND 1=0";
-                            case "MANAGER"    -> "AND m.manager_id    = " + principal.memberId();
-                            case "SUPERVISOR" -> "AND m.supervisor_id = " + principal.memberId();
-                            default           -> "AND (m.responsible_person_id = " + principal.memberId()
+                                    ? "\nAND m.department LIKE (SELECT LEFT(d.department_code, LENGTH(d.department_code) - 1) || '%'"
+                                    + " FROM department d WHERE d.id = " + principal.departmentId() + ")"
+                                    : "\nAND 1=0";
+                            case "MANAGER"    -> "\nAND m.manager_id    = " + principal.memberId();
+                            case "SUPERVISOR" -> "\nAND m.supervisor_id = " + principal.memberId();
+                            default           -> "\nAND (m.responsible_person_id = " + principal.memberId()
                                     + " OR r.responsible_maintenance = " + principal.memberId() + ")";
                         };
-                        sql = """
-                            SELECT DISTINCT ON (r.id)
-                                r.id, r.machine_code, r.machine_name, r.years, r.round, r.due_date, r.status,
-                                m.department                             AS machine_department_code,
-                                COALESCE(d.department, m.department, '') AS machine_department_name
-                            FROM maintenance_record r
-                            JOIN machine m ON m.machine_code = r.machine_code
-                            LEFT JOIN department d ON d.department_code::text = m.department
-                            WHERE (r.is_canceled = FALSE OR r.is_canceled IS NULL)
-                              AND EXTRACT(YEAR  FROM r.due_date) = :year
-                              AND EXTRACT(MONTH FROM r.due_date) = :month
-                              """ + statusFilter + " " + roleFilter + """
-                            ORDER BY r.id, r.due_date ASC
-                            """;
+                        sql = "SELECT DISTINCT ON (r.id)\n"
+                                + "    r.id, r.machine_code, r.machine_name, r.years, r.round,\n"
+                                + "    r.due_date, r.status, r.maintenance_by, r.responsible_maintenance,\n"
+                                + "    " + MEMBER_NAME_EXPR + " AS responsible_maintenance_name,\n"
+                                + "    m.department                             AS machine_department_code,\n"
+                                + "    COALESCE(d.department, m.department, '') AS machine_department_name\n"
+                                + "FROM maintenance_record r\n"
+                                + "JOIN machine m ON m.machine_code = r.machine_code\n"
+                                + "LEFT JOIN department d ON d.department_code::text = m.department\n"
+                                + "LEFT JOIN member mb ON mb.id = r.responsible_maintenance\n"
+                                + "WHERE (r.is_canceled = FALSE OR r.is_canceled IS NULL)\n"
+                                + "  AND r.years::int = :year\n"
+                                + "  AND EXTRACT(MONTH FROM r.due_date)::int = :month\n"
+                                + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                + roleFilter
+                                + mbFragment(maintenanceBy, "r")
+                                + "\nORDER BY r.id, r.due_date ASC";
                     }
 
                     return template.getDatabaseClient().sql(sql)
@@ -502,6 +478,9 @@ public class MaintenanceService {
                                     .round(row.get("round", Integer.class))
                                     .dueDate(row.get("due_date", LocalDate.class))
                                     .status(row.get("status", String.class))
+                                    .maintenanceBy(row.get("maintenance_by", String.class))
+                                    .responsibleMaintenance(row.get("responsible_maintenance", Long.class))
+                                    .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
                                     .machineDepartmentCode(row.get("machine_department_code", String.class))
                                     .machineDepartmentName(row.get("machine_department_name", String.class))
                                     .build())
@@ -514,33 +493,66 @@ public class MaintenanceService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // GET BY ID / GET BY MACHINE CODE
+    // GET BY ID / BY MACHINE CODE
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Mono<ApiResponse<MaintenanceResponseDTO>> getById(Long id) {
         return template.selectOne(Query.query(Criteria.where("id").is(id)), MaintenanceRecord.class)
-                .flatMap(maintenance -> {
+                .flatMap(m -> {
                     List<Long> memberIds = new ArrayList<>();
-                    if (maintenance.getCreatedBy() != null) memberIds.add(maintenance.getCreatedBy());
-                    if (maintenance.getUpdatedBy()  != null) memberIds.add(maintenance.getUpdatedBy());
+                    if (m.getCreatedBy() != null) memberIds.add(m.getCreatedBy());
+                    if (m.getUpdatedBy()  != null) memberIds.add(m.getUpdatedBy());
+                    if (m.getResponsibleMaintenance() != null) memberIds.add(m.getResponsibleMaintenance());
                     Mono<Map<Long, Member>> membersMono = memberIds.isEmpty()
                             ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(memberIds);
-                    return membersMono.map(m -> ApiResponse.success("MS017", MaintenanceResponseDTO.from(maintenance)));
+                    return membersMono.map(mp -> {
+                        Member responsible = m.getResponsibleMaintenance() != null
+                                ? mp.get(m.getResponsibleMaintenance()) : null;
+                        String responsibleName = responsible != null
+                                ? buildMemberName(responsible) : null;
+                        return ApiResponse.success("MS017", MaintenanceResponseDTO.from(m, responsibleName));
+                    });
                 })
                 .switchIfEmpty(Mono.just(ApiResponse.error("MS018", "Data not found")))
-                .onErrorResume(e -> { log.error("Failed to fetch maintenance: {}", e.getMessage(), e); return Mono.just(ApiResponse.error("MS019", e.getMessage())); });
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch maintenance: {}", e.getMessage(), e);
+                    return Mono.just(ApiResponse.error("MS019", e.getMessage()));
+                });
     }
 
     public Mono<ApiResponse<List<MaintenanceResponseDTO>>> getByMachineCode(String machineCode) {
         return template.select(
-                        Query.query(Criteria.where("machine_code").is(machineCode)).sort(Sort.by("due_date").descending()),
+                        Query.query(Criteria.where("machine_code").is(machineCode))
+                                .sort(Sort.by("due_date").descending()),
                         MaintenanceRecord.class)
                 .collectList()
                 .flatMap(records -> {
-                    if (records.isEmpty()) return Mono.just(ApiResponse.<List<MaintenanceResponseDTO>>error("MS018", "Data not found"));
-                    return Mono.just(ApiResponse.success("MS017", records.stream().map(MaintenanceResponseDTO::from).toList()));
+                    if (records.isEmpty())
+                        return Mono.just(ApiResponse.<List<MaintenanceResponseDTO>>error("MS018", "Data not found"));
+
+                    Set<Long> memberIds = new HashSet<>();
+                    records.stream()
+                            .map(MaintenanceRecord::getResponsibleMaintenance)
+                            .filter(Objects::nonNull)
+                            .forEach(memberIds::add);
+
+                    Mono<Map<Long, Member>> membersMono = memberIds.isEmpty()
+                            ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(new ArrayList<>(memberIds));
+
+                    return membersMono.map(mp -> {
+                        List<MaintenanceResponseDTO> dtos = records.stream().map(r -> {
+                            Member responsible = r.getResponsibleMaintenance() != null
+                                    ? mp.get(r.getResponsibleMaintenance()) : null;
+                            String responsibleName = responsible != null ? buildMemberName(responsible) : null;
+                            return MaintenanceResponseDTO.from(r, responsibleName);
+                        }).toList();
+                        return ApiResponse.success("MS017", dtos);
+                    });
                 })
-                .onErrorResume(e -> { log.error("Failed to fetch maintenance by machine code: {}", e.getMessage(), e); return Mono.just(ApiResponse.error("MS019", e.getMessage())); });
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch maintenance by machine code: {}", e.getMessage(), e);
+                    return Mono.just(ApiResponse.error("MS019", e.getMessage()));
+                });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -559,24 +571,33 @@ public class MaintenanceService {
     // PRIVATE HELPERS
     // ═══════════════════════════════════════════════════════════════════════════
 
+    private static String buildMemberName(Member m) {
+        if (m == null) return null;
+        String full = ((m.getFirstName() != null ? m.getFirstName() : "") + " "
+                + (m.getLastName()  != null ? m.getLastName()  : "")).trim();
+        if (!full.isEmpty()) return full;
+        if (m.getFirstName() != null) return m.getFirstName();
+        return m.getUserName();
+    }
+
     private Update buildUpdateFromDTO(MaintenanceDTO dto) {
-        Update update = Update.update("updated_at", java.time.LocalDateTime.now());
-        if (dto.getAttachment()             != null) update = update.set("attachment",              dto.getAttachment());
-        if (dto.getDueDate()                != null) update = update.set("due_date",                dto.getDueDate());
-        if (dto.getPlanDate()               != null) update = update.set("plan_date",               dto.getPlanDate());
-        if (dto.getStartDate()              != null) update = update.set("start_date",              dto.getStartDate());
-        if (dto.getActualDate()             != null) update = update.set("actual_date",             dto.getActualDate());
-        if (dto.getStatus()                 != null) update = update.set("status",                  dto.getStatus());
-        if (dto.getMaintenanceBy()          != null) update = update.set("maintenance_by",          dto.getMaintenanceBy());
-        if (dto.getNote()                   != null) update = update.set("note",                    dto.getNote());
-        if (dto.getResponsibleMaintenance() != null) update = update.set("responsible_maintenance", dto.getResponsibleMaintenance());
-        return update;
+        Update u = Update.update("updated_at", java.time.LocalDateTime.now());
+        if (dto.getAttachment()             != null) u = u.set("attachment",              dto.getAttachment());
+        if (dto.getDueDate()                != null) u = u.set("due_date",                dto.getDueDate());
+        if (dto.getPlanDate()               != null) u = u.set("plan_date",               dto.getPlanDate());
+        if (dto.getStartDate()              != null) u = u.set("start_date",              dto.getStartDate());
+        if (dto.getActualDate()             != null) u = u.set("actual_date",             dto.getActualDate());
+        if (dto.getStatus()                 != null) u = u.set("status",                  dto.getStatus());
+        if (dto.getMaintenanceBy()          != null) u = u.set("maintenance_by",          dto.getMaintenanceBy());
+        if (dto.getNote()                   != null) u = u.set("note",                    dto.getNote());
+        if (dto.getResponsibleMaintenance() != null) u = u.set("responsible_maintenance", dto.getResponsibleMaintenance());
+        return u;
     }
 
     private MaintenanceDepartmentSummaryDTO mapDepartmentSummary(io.r2dbc.spi.Row row) {
         try {
             return MaintenanceDepartmentSummaryDTO.builder()
-                    .department(row.get("department", String.class))
+                    .department(row.get("department",      String.class))
                     .departmentName(row.get("department_name", String.class))
                     .total(getLongValue(row, "total"))
                     .totalPass(getLongValue(row, "total_pass"))
