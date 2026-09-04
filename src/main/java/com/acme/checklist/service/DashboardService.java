@@ -25,7 +25,6 @@ import java.util.Objects;
 public class DashboardService {
     private final R2dbcEntityTemplate template;
 
-    // machine_status ที่นับได้ (OPERATIONAL, NON-OPERATIONAL, UNDER MAINTENANCE)
     private static final String ACTIVE_STATUS_IN = MachineStatus.sqlInClause();
 
     private Mono<MemberPrincipal> getPrincipal() {
@@ -51,21 +50,14 @@ public class DashboardService {
         };
     }
 
-    // =========================================================================
-    //  SUMMARY
-    //  นับเฉพาะ machine ที่ machine_status IN (OPERATIONAL, NON-OPERATIONAL, UNDER MAINTENANCE)
-    // =========================================================================
-
     public Mono<SummaryDTO> getSummary() {
         return getPrincipal().flatMap(principal -> {
             MachineFilter f = buildMachineFilter(
                     principal.role(), principal.memberId(), principal.departmentId());
 
-            // WHERE สำหรับ machine หลัก (FROM machine m)
             String machineWhere = "WHERE m.machine_status IN (" + ACTIVE_STATUS_IN + ")"
                     + (f.clause() != null ? " AND " + f.clause() : "");
 
-            // WHERE สำหรับ subquery (JOIN machine mc)
             String subWhere = "WHERE mc.machine_status IN (" + ACTIVE_STATUS_IN + ")"
                     + (f.clause() != null ? " AND " + f.clause().replace("m.", "mc.") : "");
 

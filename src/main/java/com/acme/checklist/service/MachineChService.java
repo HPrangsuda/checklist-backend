@@ -37,7 +37,7 @@ public class MachineChService {
     private final CommonService commonService;
 
     private static final String ACTIVE_STATUS_IN =
-            "'OPERATIONAL','NON-OPERATIONAL','UNDER MAINTENANCE'";
+            "'OPERATIONAL','UNDER MAINTENANCE'";
 
     // ─── CREATE ───────────────────────────────────────────────────────────────
 

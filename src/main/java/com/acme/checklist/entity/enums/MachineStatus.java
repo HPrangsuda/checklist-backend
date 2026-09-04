@@ -7,7 +7,6 @@ import java.util.stream.Collectors;
 public enum MachineStatus {
 
     OPERATIONAL("OPERATIONAL"),
-    NON_OPERATIONAL("NON-OPERATIONAL"),
     UNDER_MAINTENANCE("UNDER MAINTENANCE");
 
     private final String dbValue;

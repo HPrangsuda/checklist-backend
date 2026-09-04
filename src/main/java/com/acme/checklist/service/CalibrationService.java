@@ -50,7 +50,7 @@ public class CalibrationService {
     }
 
     private static String roleFilterExists(MemberPrincipal p) {
-        String statusCond = "AND m2.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')";
+        String statusCond = "AND m2.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')";
         return switch (p.role()) {
             case "ADMIN"            -> "\nAND EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine_code = c.machine_code " + statusCond + ")";
             case "DEPARTMENT_ADMIN" -> p.departmentId() != null
@@ -111,7 +111,7 @@ public class CalibrationService {
 
                     String where = "\nWHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)"
                             + "\nAND EXTRACT(YEAR FROM c.due_date) = :year"
-                            + "\nAND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                            + "\nAND m.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')"
                             + roleFragment
                             + (hasKw   ? "\nAND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "")
                             + (hasDept ? "\nAND m.department = :department"                              : "")
@@ -238,7 +238,7 @@ public class CalibrationService {
                                     + "LEFT JOIN machine m ON m.machine_code = c.machine_code\n"
                                     + "LEFT JOIN department d ON d.department_code::text = m.department\n"
                                     + "WHERE c.due_date IS NOT NULL\n"
-                                    + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + "  AND m.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')"
                                     + roleFilterJoin(principal)
                                     + "\nORDER BY department_name ASC, division ASC";
 
@@ -323,7 +323,7 @@ public class CalibrationService {
                                     + "    LEFT JOIN department d ON m.department = d.department_code::text\n"
                                     + "    WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)\n"
                                     + "      AND EXTRACT(YEAR FROM c.due_date) = " + yr + "\n"
-                                    + "      AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + "      AND m.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')"
                                     + roleFilterJoin(principal)
                                     + "\n    ORDER BY c.id\n"
                                     + ") sub\n"
@@ -443,7 +443,7 @@ public class CalibrationService {
                                     + "WHERE (c.is_canceled = FALSE OR c.is_canceled IS NULL)\n"
                                     + "  AND EXTRACT(YEAR  FROM c.due_date) = :year\n"
                                     + "  AND EXTRACT(MONTH FROM c.due_date) = :month\n"
-                                    + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                    + "  AND m.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')"
                                     + roleFilterJoin(principal)
                                     + "\nORDER BY c.id, c.due_date ASC";
 

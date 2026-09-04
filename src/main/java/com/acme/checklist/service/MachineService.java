@@ -607,11 +607,6 @@ public class MachineService {
                 });
     }
 
-    // =========================================================================
-    //  DEPARTMENT SUMMARY WITH ROLE
-    //  นับเฉพาะ machine ที่ machine_status IN (OPERATIONAL, NON-OPERATIONAL, UNDER MAINTENANCE)
-    // =========================================================================
-
     public Flux<MachineSummaryDTO> getDepartmentSummaryWithRole() {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
@@ -639,7 +634,6 @@ public class MachineService {
     }
 
     private Flux<MachineSummaryDTO> buildDepartmentSummary(String roleFilter) {
-        // ── นับเฉพาะ machine ที่ active (OPERATIONAL / NON-OPERATIONAL / UNDER MAINTENANCE) ──
         String activeInClause = MachineStatus.sqlInClause();
         String sql = """
                 SELECT
@@ -647,7 +641,6 @@ public class MachineService {
                     d.department as department_name,
                     COUNT(m.id) as total,
                     COUNT(CASE WHEN m.machine_status = 'OPERATIONAL'       THEN 1 END) as total_ready_to_use,
-                    COUNT(CASE WHEN m.machine_status = 'NON-OPERATIONAL'   THEN 1 END) as total_repair,
                     COUNT(CASE WHEN m.machine_status = 'UNDER MAINTENANCE' THEN 1 END) as total_not_in_use,
                     COUNT(CASE WHEN UPPER(m.check_status) = 'COMPLETED'      THEN 1 END) as total_completed,
                     COUNT(CASE WHEN UPPER(m.check_status) LIKE '%%PENDING%%' THEN 1 END) as total_pending,

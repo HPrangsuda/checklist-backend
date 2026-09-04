@@ -462,7 +462,7 @@ public class MaintenanceService {
                                 + "WHERE (r.is_canceled = FALSE OR r.is_canceled IS NULL)\n"
                                 + "  AND r.years::int = :year\n"
                                 + "  AND EXTRACT(MONTH FROM r.due_date)::int = :month\n"
-                                + "  AND m.machine_status IN ('OPERATIONAL', 'NON-OPERATIONAL', 'UNDER MAINTENANCE')"
+                                + "  AND m.machine_status IN ('OPERATIONAL', 'UNDER MAINTENANCE')"
                                 + roleFilter
                                 + mbFragment(maintenanceBy, "r")
                                 + "\nORDER BY r.id, r.due_date ASC";
