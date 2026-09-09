@@ -154,6 +154,7 @@ public class LarkService {
 
     public Mono<Void> upsertMachineRecord(Machine machine) {
         return Mono.fromCallable(() -> {
+                    log.info("=== upsert machine id={} code={} ===", machine.getId(), machine.getMachineCode());
 
                     Map<String, Object> fields = new HashMap<>();
                     fields.put("app id",            String.valueOf(machine.getId()));
@@ -182,6 +183,7 @@ public class LarkService {
                             String.valueOf(machine.getId()),
                             nullSafe(machine.getMachineCode())
                     );
+                    log.info("=== recordId found: {} ===", recordId);
 
                     if (recordId != null) {
                         updateRecord(recordId, fields);
@@ -196,7 +198,8 @@ public class LarkService {
                                 .build();
                         CreateAppTableRecordResp resp = client.bitable().appTableRecord().create(req);
                         if (!resp.success()) {
-                            log.error("Failed machine {} (id={}): {}", machine.getMachineCode(), machine.getId(), resp.getMsg());
+                            log.error("Failed machine {} (id={}): code={} msg={}",
+                                    machine.getMachineCode(), machine.getId(), resp.getCode(), resp.getMsg());
                             return null;
                         }
                         log.info("Created machine {} (id={}) in Lark Base", machine.getMachineCode(), machine.getId());
@@ -243,9 +246,10 @@ public class LarkService {
 
     public Mono<Void> upsertDepartmentRecord(Department department) {
         return Mono.fromCallable(() -> {
+                    log.info("=== upsert department id={} name={} ===", department.getId(), department.getDepartment());
 
                     Map<String, Object> fields = new HashMap<>();
-                    fields.put("id",             department.getId());
+                    fields.put("id",             String.valueOf(department.getId()));
                     fields.put("businessUnit",   nullSafe(department.getBusinessUnit()));
                     fields.put("department",     nullSafe(department.getDepartment()));
                     fields.put("departmentCode", nullSafe(department.getDepartmentCode()));
@@ -253,6 +257,7 @@ public class LarkService {
                     fields.put("status",         nullSafe(department.getStatus()));
 
                     String recordId = findRecordIdByDepartmentId(String.valueOf(department.getId()));
+                    log.info("=== department recordId found: {} ===", recordId);
 
                     if (recordId != null) {
                         updateDepartmentRecord(recordId, fields);
@@ -268,8 +273,8 @@ public class LarkService {
                                 .build();
                         CreateAppTableRecordResp resp = client.bitable().appTableRecord().create(req);
                         if (!resp.success()) {
-                            log.error("Failed department {} (id={}): {}",
-                                    department.getDepartment(), department.getId(), resp.getMsg());
+                            log.error("Failed department {} (id={}): code={} msg={}",
+                                    department.getDepartment(), department.getId(), resp.getCode(), resp.getMsg());
                             return null;
                         }
                         log.info("Created department {} (id={}) in Lark Base",
