@@ -2,7 +2,6 @@ package com.acme.checklist.service;
 
 import com.acme.checklist.entity.Department;
 import com.acme.checklist.entity.Machine;
-import com.acme.checklist.entity.RegisterRequest;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.request.RequestOptions;
 import com.lark.oapi.service.contact.v3.model.BatchGetIdUserReq;
@@ -106,34 +105,6 @@ public class LarkService {
                 .then();
     }
 
-    // ── Register notification ──────────────────────────────────────────────────
-
-    public Mono<Void> sendRegisterNotification(String openId, RegisterRequest registerRequest) {
-        String cardJson = buildRegisterCardJson(registerRequest);
-        return sendCardMessage(openId, cardJson);
-    }
-
-    private String buildRegisterCardJson(RegisterRequest req) {
-        String machineName = req.getMachineName()  != null ? req.getMachineName()  : "-";
-        String department  = req.getDepartment()   != null ? req.getDepartment()   : "-";
-        String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
-
-        return """
-                {
-                  "type": "template",
-                  "data": {
-                    "template_id": "AAqkOi53Gw8W5",
-                    "template_variable": {
-                      "title": "🔔 มีการลงทะเบียนเครื่องจักรใหม่",
-                      "machine_name": "%s",
-                      "department": "%s",
-                      "serial_number": "%s"
-                    }
-                  }
-                }
-                """.formatted(machineName, department, serialNo);
-    }
-
     // ── Machine notification ───────────────────────────────────────────────────
 
     public Mono<Void> sendMachineNotification(String openId, Machine machine) {
@@ -142,9 +113,9 @@ public class LarkService {
     }
 
     private String buildMachineCardJson(Machine machine) {
-        String machineCode     = machine.getMachineCode()            != null ? machine.getMachineCode()            : "-";
-        String machineName     = machine.getMachineName()            != null ? machine.getMachineName()            : "-";
-        String responsibleName = machine.getResponsiblePersonName()  != null ? machine.getResponsiblePersonName()  : "-";
+        String machineCode     = machine.getMachineCode()           != null ? machine.getMachineCode()           : "-";
+        String machineName     = machine.getMachineName()           != null ? machine.getMachineName()           : "-";
+        String responsibleName = machine.getResponsiblePersonName() != null ? machine.getResponsiblePersonName() : "-";
 
         return String.format(
                 "{"
@@ -163,38 +134,6 @@ public class LarkService {
                         +   "]}"
                         + "]}",
                 machineCode, machineName, responsibleName);
-    }
-
-    // update machine
-    public Mono<Void> sendMachineUpdateNotification(String openId, Machine machine) {
-        String cardJson = buildMachineUpdateCardJson(machine);
-        return sendCardMessage(openId, cardJson);
-    }
-
-    private String buildMachineUpdateCardJson(Machine machine) {
-        String machineCode     = machine.getMachineCode()           != null ? machine.getMachineCode()           : "-";
-        String machineName     = machine.getMachineName()           != null ? machine.getMachineName()           : "-";
-        String machineStatus   = machine.getMachineStatus()         != null ? machine.getMachineStatus()         : "-";
-        String responsibleName = machine.getResponsiblePersonName() != null ? machine.getResponsiblePersonName() : "-";
-
-        return String.format(
-                "{"
-                        + "\"config\":{\"wide_screen_mode\":true},"
-                        + "\"header\":{"
-                        +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"อัปเดตข้อมูลเครื่องจักร\"},"
-                        +   "\"template\":\"orange\""
-                        + "},"
-                        + "\"elements\":["
-                        +   "{\"tag\":\"div\",\"fields\":["
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n%s\"}},"
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n%s\"}}"
-                        +   "]},"
-                        +   "{\"tag\":\"div\",\"fields\":["
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**สถานะเครื่องจักร**\\n%s\"}},"
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n%s\"}}"
-                        +   "]}"
-                        + "]}",
-                machineCode, machineName, machineStatus, responsibleName);
     }
 
     // ==================== Machine Bitable ====================
@@ -217,7 +156,7 @@ public class LarkService {
         return Mono.fromCallable(() -> {
 
                     Map<String, Object> fields = new HashMap<>();
-                    fields.put("app id",               String.valueOf(machine.getId()));
+                    fields.put("app id",            String.valueOf(machine.getId()));
                     fields.put("รหัสเครื่องจักร",  nullSafe(machine.getMachineCode()));
                     fields.put("ชื่อเครื่องจักร",  nullSafe(machine.getMachineName()));
                     fields.put("กลุ่ม",            nullSafe(machine.getMachineGroupId()));
@@ -239,7 +178,10 @@ public class LarkService {
                         fields.put("วันที่ลงทะเบียน", timestamp);
                     }
 
-                    String recordId = findRecordIdByMachineId(String.valueOf(machine.getId()));
+                    String recordId = findRecordIdByMachineId(
+                            String.valueOf(machine.getId()),
+                            nullSafe(machine.getMachineCode())
+                    );
 
                     if (recordId != null) {
                         updateRecord(recordId, fields);
@@ -265,19 +207,24 @@ public class LarkService {
                 .then();
     }
 
-    public String findRecordIdByMachineId(String machineId) throws Exception {
+    public String findRecordIdByMachineId(String machineId, String machineCode) throws Exception {
         SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
                 .appToken(appToken)
                 .tableId(tableId)
                 .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
-                        .fieldNames(new String[]{"id"})
+                        .fieldNames(new String[]{"app id", "รหัสเครื่องจักร"})
                         .filter(FilterInfo.newBuilder()
                                 .conjunction("and")
                                 .conditions(new Condition[]{
                                         Condition.newBuilder()
-                                                .fieldName("id")
+                                                .fieldName("app id")
                                                 .operator("is")
                                                 .value(new String[]{machineId})
+                                                .build(),
+                                        Condition.newBuilder()
+                                                .fieldName("รหัสเครื่องจักร")
+                                                .operator("is")
+                                                .value(new String[]{machineCode})
                                                 .build()
                                 })
                                 .build())
