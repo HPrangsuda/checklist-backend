@@ -179,10 +179,8 @@ public class LarkService {
                         fields.put("วันที่ลงทะเบียน", timestamp);
                     }
 
-                    String recordId = findRecordIdByMachineId(
-                            String.valueOf(machine.getId()),
-                            nullSafe(machine.getMachineCode())
-                    );
+                    String recordId = findRecordIdByMachineId(String.valueOf(machine.getId()));
+
                     log.info("=== recordId found: {} ===", recordId);
 
                     if (recordId != null) {
@@ -210,12 +208,12 @@ public class LarkService {
                 .then();
     }
 
-    public String findRecordIdByMachineId(String machineId, String machineCode) throws Exception {
+    public String findRecordIdByMachineId(String machineId) throws Exception {
         SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
                 .appToken(appToken)
                 .tableId(tableId)
                 .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
-                        .fieldNames(new String[]{"app id", "รหัสเครื่องจักร"})
+                        .fieldNames(new String[]{"app id"})
                         .filter(FilterInfo.newBuilder()
                                 .conjunction("and")
                                 .conditions(new Condition[]{
@@ -223,11 +221,6 @@ public class LarkService {
                                                 .fieldName("app id")
                                                 .operator("is")
                                                 .value(new String[]{machineId})
-                                                .build(),
-                                        Condition.newBuilder()
-                                                .fieldName("รหัสเครื่องจักร")
-                                                .operator("is")
-                                                .value(new String[]{machineCode})
                                                 .build()
                                 })
                                 .build())
