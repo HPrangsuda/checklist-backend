@@ -60,6 +60,7 @@ public class SecurityConfig {
                         .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .pathMatchers("/api/auth/**").permitAll()
                         .pathMatchers("/uploads/**").permitAll()
+                        .pathMatchers("/api/machine/sync-all-to-lark").permitAll()
                         .anyExchange().authenticated()
                 )
                 .exceptionHandling(exception -> exception
