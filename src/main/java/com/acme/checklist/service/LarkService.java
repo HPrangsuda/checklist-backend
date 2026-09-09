@@ -34,7 +34,7 @@ public class LarkService {
     @Value("${lark.base-app-token}")
     private String appToken;
 
-    @Value("tbl7X9Bj8fWLoJYd")
+    @Value("${lark.table-id}")
     private String tableId;
 
     @Value("${lark.department-table-id}")
