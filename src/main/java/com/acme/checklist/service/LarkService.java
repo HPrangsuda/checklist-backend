@@ -176,7 +176,7 @@ public class LarkService {
                                 .atStartOfDay(ZoneId.of("Asia/Bangkok"))
                                 .toInstant()
                                 .toEpochMilli();
-                        fields.put("วันที่ลงทะเบียน", timestamp);
+                        //fields.put("วันที่ลงทะเบียน", timestamp);
                     }
 
                     String recordId = findRecordIdByMachineId(
