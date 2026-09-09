@@ -217,7 +217,7 @@ public class LarkService {
         return Mono.fromCallable(() -> {
 
                     Map<String, Object> fields = new HashMap<>();
-                    fields.put("id",               String.valueOf(machine.getId()));
+                    fields.put("app id",               String.valueOf(machine.getId()));
                     fields.put("รหัสเครื่องจักร",  nullSafe(machine.getMachineCode()));
                     fields.put("ชื่อเครื่องจักร",  nullSafe(machine.getMachineName()));
                     fields.put("กลุ่ม",            nullSafe(machine.getMachineGroupId()));
