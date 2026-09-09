@@ -106,16 +106,16 @@ public class MachineController {
 
     @PostMapping("/sync-all-to-lark")
     public Mono<ApiResponse<Void>> syncAllToLark() {
-        return machineService.getAll()
-                .delayElements(Duration.ofMillis(200))
-                .flatMap(machine -> larkService.upsertMachineRecord(machine)
+        machineService.getAll()
+                .concatMap(machine -> larkService.upsertMachineRecord(machine)
+                        .doOnSuccess(v -> log.info("✅ Synced machine id={} code={}", machine.getId(), machine.getMachineCode()))
                         .onErrorResume(e -> {
-                            log.error("Skip machine {} ({}): {}",
-                                    machine.getMachineCode(),
-                                    machine.getId(),
-                                    e.getMessage());
+                            log.error("❌ Failed machine id={} code={}: {}", machine.getId(), machine.getMachineCode(), e.getMessage());
                             return Mono.empty();
                         }))
-                .then(Mono.just(ApiResponse.<Void>success("MS001")));
+                .doOnComplete(() -> log.info("=== sync-all completed ==="))
+                .subscribe();
+
+        return Mono.just(ApiResponse.<Void>success("MS001"));
     }
 }
