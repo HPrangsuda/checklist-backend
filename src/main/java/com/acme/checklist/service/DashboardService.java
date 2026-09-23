@@ -152,6 +152,7 @@ public class DashboardService {
                 JOIN machine m ON mr.machine_code = m.machine_code
                 WHERE mr.due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
                   AND (mr.is_canceled = FALSE OR mr.is_canceled IS NULL)
+                  AND mr.actual_date IS NULL
                   %s
                   %s
                 ORDER BY mr.id, mr.due_date ASC
