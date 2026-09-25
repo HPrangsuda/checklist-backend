@@ -7,6 +7,7 @@ import com.acme.checklist.payload.ListResponse;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.audit.MemberListDTO;
 import com.acme.checklist.payload.member.MemberDTO;
+import com.acme.checklist.payload.member.MemberOptionDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -31,6 +32,8 @@ import java.util.*;
 @Service
 @RequiredArgsConstructor
 public class MemberService {
+
+    private static final int MAX_OPTION_SIZE = 200;
 
     private final R2dbcEntityTemplate template;
     private final CommonService commonService;
@@ -135,6 +138,51 @@ public class MemberService {
                             index, size, criteria, selectedItems,
                             pageable, Member.class, this::convertMemberListDTOs
                     );
+                });
+    }
+
+    // =========================
+    // GET BY DEPARTMENT PREFIX (ตัวเลือกผู้รับผิดชอบ)
+    // เอา 2 หลักแรกของ department_code ไปจับคู่ member.department_id
+    // เช่น 611 → department_id LIKE '61%' (ได้ทั้ง 611, 612)
+    // =========================
+    public Mono<ApiResponse<List<MemberOptionDTO>>> getByDepartmentPrefix(
+            String departmentCode, String keyword, int index, int size) {
+
+        if (!StringUtils.hasText(departmentCode)) {
+            return Mono.just(ApiResponse.success("MB050", List.of()));
+        }
+
+        String  code     = departmentCode.trim();
+        String  prefix   = code.substring(0, Math.min(2, code.length()));
+        int     safeSize = Math.max(1, Math.min(size, MAX_OPTION_SIZE));
+        long    offset   = (long) Math.max(0, index) * safeSize;
+        boolean hasKw    = StringUtils.hasText(keyword);
+
+        String sql = """
+                SELECT m.id, m.first_name, m.last_name, m.department_id
+                FROM member m
+                WHERE m.department_id LIKE $1
+                  AND m.status = 'ACTIVE'
+                """
+                + (hasKw ? " AND (m.first_name ILIKE $2 OR m.last_name ILIKE $2 OR m.employee_id ILIKE $2)" : "")
+                + " ORDER BY m.first_name, m.last_name"
+                + " LIMIT " + safeSize + " OFFSET " + offset;
+
+        var spec = template.getDatabaseClient().sql(sql).bind(0, prefix + "%");
+        if (hasKw) spec = spec.bind(1, "%" + keyword.trim() + "%");
+
+        return spec.map((row, meta) -> new MemberOptionDTO(
+                        row.get("id",            Long.class),
+                        row.get("first_name",    String.class),
+                        row.get("last_name",     String.class),
+                        row.get("department_id", String.class)))
+                .all()
+                .collectList()
+                .map(list -> ApiResponse.success("MB050", list))
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch members by department prefix {}: {}", prefix, e.getMessage(), e);
+                    return Mono.just(ApiResponse.<List<MemberOptionDTO>>error("MB051", e.getMessage()));
                 });
     }
 

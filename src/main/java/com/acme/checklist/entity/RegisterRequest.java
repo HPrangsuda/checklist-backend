@@ -80,4 +80,7 @@ public class RegisterRequest extends DataAudit {
 
     @Column("warranty_files")
     private String warrantyFiles;
+
+    @Column("is_new")
+    private Boolean isNew;
 }

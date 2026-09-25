@@ -5,6 +5,7 @@ import com.acme.checklist.payload.ListResponse;
 import com.acme.checklist.payload.PagedResponse;
 import com.acme.checklist.payload.audit.MemberListDTO;
 import com.acme.checklist.payload.member.MemberDTO;
+import com.acme.checklist.payload.member.MemberOptionDTO;
 import com.acme.checklist.service.MemberService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -58,6 +59,17 @@ public class MemberController {
     ) {
         log.debug("Get members list | keyword={}, ids={}", keyword, ids);
         return memberService.getList(keyword, ids, index, size);
+    }
+
+    @GetMapping("/get/by-department")
+    public Mono<ApiResponse<List<MemberOptionDTO>>> getByDepartment(
+            @RequestParam String departmentCode,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "0")   int index,
+            @RequestParam(defaultValue = "100") int size
+    ) {
+        log.debug("Get members by department prefix | departmentCode={}, keyword={}", departmentCode, keyword);
+        return memberService.getByDepartmentPrefix(departmentCode, keyword, index, size);
     }
 
     @GetMapping("/{id}")

@@ -42,4 +42,6 @@ public class RegisterDTO extends DataAudit {
 
     private Long createdBy;
     private Long updatedBy;
+
+    private Boolean isNew;
 }

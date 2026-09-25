@@ -60,6 +60,8 @@ public class MachineResponseDTO {
     private LocalDate warrantyExpireDate;
     private String    warrantyFiles;
 
+    private Boolean isNew;
+
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
 
@@ -103,6 +105,7 @@ public class MachineResponseDTO {
                 .warrantyNote(machine.getWarrantyNote())
                 .warrantyExpireDate(machine.getWarrantyExpireDate())
                 .warrantyFiles(machine.getWarrantyFiles())
+                .isNew(machine.getIsNew())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
                 .build();

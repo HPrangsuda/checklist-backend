@@ -48,6 +48,8 @@ public class RegisterResponseDTO {
     private AuditMemberDTO createdBy;
     private AuditMemberDTO updatedBy;
 
+    private Boolean isNew;
+
     public static RegisterResponseDTO from(RegisterRequest r,
                                            AuditMemberDTO createdBy,
                                            AuditMemberDTO updatedBy) {
@@ -75,6 +77,7 @@ public class RegisterResponseDTO {
                 .warrantyNote(r.getWarrantyNote())
                 .warrantyExpireDate(r.getWarrantyExpireDate())
                 .warrantyFiles(r.getWarrantyFiles())
+                .isNew(r.getIsNew())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
                 .build();

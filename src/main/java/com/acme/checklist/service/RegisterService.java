@@ -92,44 +92,48 @@ public class RegisterService {
     public Mono<PagedResponse<RegisterListDTO>> getWithRole(String keyword, int index, int size) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .switchIfEmpty(Mono.error(new ThrowException("RG030", "No authenticated principal")))
                 .flatMap(principal -> {
                     String role     = principal.role();
                     Long   memberId = principal.memberId();
 
-                    return switch (role) {
-                        case "ADMIN" -> {
-                            Criteria criteria = buildKeywordCriteria(keyword);
-                            Query    query    = Query.query(criteria)
-                                    .with(commonService.pageable(index, size, "created_at"));
-                            yield commonService.executePagedQuery(
-                                    index, size, query, criteria,
-                                    RegisterRequest.class, this::convertRegisterListDTOs);
-                        }
-                        case "MANAGER" -> {
-                            Criteria roleCriteria = Criteria
-                                    .where("created_by").is(memberId)
-                                    .or("manager_id").is(memberId);
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
-                        case "SUPERVISOR" -> {
-                            Criteria roleCriteria = Criteria
-                                    .where("created_by").is(memberId)
-                                    .or("supervisor_id").is(memberId);
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
-                        default -> {
-                            Criteria roleCriteria = Criteria.where("created_by").is(memberId);
-                            yield fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
-                        }
+                    log.info("getWithRole role={} memberId={}", role, memberId);
+
+                    // ── ADMIN: เห็นทั้งหมด ไม่ต้องใช้ memberId ───────────────────
+                    if ("ADMIN".equals(role)) {
+                        Criteria criteria = buildKeywordCriteria(keyword);
+                        Query    query    = Query.query(criteria)
+                                .with(commonService.pageable(index, size, "created_at"));
+                        return commonService.executePagedQuery(
+                                index, size, query, criteria,
+                                RegisterRequest.class, this::convertRegisterListDTOs);
+                    }
+
+                    // ── role อื่นต้องมี memberId (Criteria.is(null) จะ throw) ────
+                    if (memberId == null) {
+                        return Mono.error(new ThrowException("RG031", "Member id not found in token"));
+                    }
+
+                    // ── switch บน null จะ NPE → แปลงเป็น "" ก่อน ─────────────────
+                    Criteria roleCriteria = switch (role == null ? "" : role) {
+                        case "MANAGER"    -> Criteria.where("created_by").is(memberId)
+                                .or("manager_id").is(memberId);
+                        case "SUPERVISOR" -> Criteria.where("created_by").is(memberId)
+                                .or("supervisor_id").is(memberId);
+                        default           -> Criteria.where("created_by").is(memberId);
                     };
-                });
+                    return fetchWithRoleAndKeyword(roleCriteria, keyword, index, size);
+                })
+                .doOnError(e -> log.error("getWithRole failed: {}", e.getMessage(), e));
     }
 
     private Mono<PagedResponse<RegisterListDTO>> fetchWithRoleAndKeyword(
             Criteria roleCriteria, String keyword, int index, int size) {
         Criteria criteria = roleCriteria;
         if (StringUtils.hasText(keyword)) {
-            criteria = roleCriteria.and(
+            // ครอบ roleCriteria ด้วยวงเล็บ
+            // → (created_by = x OR manager_id = x) AND machine_name LIKE ...
+            criteria = Criteria.from(roleCriteria).and(
                     Criteria.where("machine_name").like("%" + keyword + "%").ignoreCase(true));
         }
         Query query = Query.query(criteria).with(commonService.pageable(index, size, "created_at"));
@@ -326,6 +330,8 @@ public class RegisterService {
         String machineName = req.getMachineName() != null ? req.getMachineName() : "-";
         String department  = req.getDepartment()  != null ? req.getDepartment()  : "-";
         String serialNo    = req.getSerialNumber() != null ? req.getSerialNumber() : "-";
+        String isNew       = Boolean.TRUE.equals(req.getIsNew())  ? "ใช่"
+                : Boolean.FALSE.equals(req.getIsNew()) ? "ไม่ใช่" : "-";
 
         return """
                 {
@@ -357,12 +363,16 @@ public class RegisterService {
                         {
                           "is_short": true,
                           "text": { "tag": "lark_md", "content": "**Serial No**\\n%s" }
+                        },
+                        {
+                          "is_short": true,
+                          "text": { "tag": "lark_md", "content": "**เครื่องซื้อใหม่**\\n%s" }
                         }
                       ]
                     }
                   ]
                 }
-                """.formatted(machineName, department, serialNo);
+                """.formatted(machineName, department, serialNo, isNew);
     }
 
     // ─── VALIDATE ─────────────────────────────────────────────────────────────
@@ -370,6 +380,9 @@ public class RegisterService {
     public Mono<RegisterDTO> validateData(RegisterDTO registerDTO) {
         if (registerDTO.getDepartment() == null || registerDTO.getDepartment().isEmpty()) {
             return Mono.error(new ThrowException("RG020", "Department is required"));
+        }
+        if (registerDTO.getIsNew() == null) {
+            return Mono.error(new ThrowException("RG021", "Is new machine is required"));
         }
         return Mono.just(registerDTO);
     }
@@ -431,6 +444,7 @@ public class RegisterService {
                     .warrantyNote("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null)
                     .warrantyExpireDate("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyExpireDate() : null)
                     .warrantyFiles(warrantyFilesJson)
+                    .isNew(dto.getIsNew())
                     .build();
         } catch (Exception e) {
             throw new RuntimeException("Failed to process data: " + e.getMessage());
@@ -453,6 +467,7 @@ public class RegisterService {
         addIfNotNull(params, "responsible_id", dto.getResponsibleId());
         addIfNotNull(params, "supervisor_id",  dto.getSupervisorId());
         addIfNotNull(params, "manager_id",     dto.getManagerId());
+        addIfNotNull(params, "is_new",         dto.getIsNew());
 
         if (dto.getAttachments() != null) {
             try {

@@ -782,6 +782,8 @@ public class MachineService {
         if (dto.getResetPeriod()         == null || dto.getResetPeriod().isEmpty())    return Mono.error(new ThrowException("MS013", "Reset period is required"));
         if (dto.getResponsiblePersonId() == null)                                      return Mono.error(new ThrowException("MS014", "Responsible person is required"));
         if (dto.getMachineGroupId()      == null || dto.getMachineGroupId().isEmpty()) return Mono.error(new ThrowException("MS016", "Machine group is required"));
+        // บังคับเฉพาะตอนสร้าง — หน้า edit ที่ยังไม่ส่ง isNew จะไม่พัง
+        if (!isUpdate && dto.getIsNew()  == null)                                      return Mono.error(new ThrowException("MS021", "Is new machine is required"));
         if (dto.getRegisterId() != null) dto.setNote("REF:REGISTER-" + dto.getRegisterId());
 
         String prefix = dto.getMachineCode().substring(0, Math.min(8, dto.getMachineCode().length()));
@@ -821,6 +823,7 @@ public class MachineService {
                 .warrantyExpireDate("YES".equals(dto.getHasWarranty()) && dto.getWarrantyExpireDate() != null
                         ? dto.getWarrantyExpireDate().toLocalDate() : null)
                 .warrantyFiles("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyFiles() : null)
+                .isNew(dto.getIsNew())
                 .build();
     }
 
@@ -849,6 +852,7 @@ public class MachineService {
         addIfNotNull(p, "register_date",           dto.getRegisterDate());
         addIfNotNull(p, "note",                    dto.getNote());
         addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
+        addIfNotNull(p, "is_new",                  dto.getIsNew());
         if (dto.getCheckStatus() != null) p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
         p.put(SqlIdentifier.quoted("updated_at"),           java.time.LocalDateTime.now());
         p.put(SqlIdentifier.quoted("warranty_note"),        "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);

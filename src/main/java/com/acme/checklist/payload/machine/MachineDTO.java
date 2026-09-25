@@ -52,6 +52,8 @@ public class MachineDTO {
     private LocalDateTime warrantyExpireDate;
     private String        warrantyFiles;
 
+    private Boolean isNew;
+
     private CalibrationDTO calibration;
     private List<MaintenanceDTO> maintenanceList;
 }
