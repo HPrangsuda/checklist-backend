@@ -108,14 +108,17 @@ public class CalibrationService {
     /**
      * สิทธิ์แก้ไข:
      *   ADMIN            → ทุก record
-     *   DEPARTMENT_ADMIN → เครื่องในแผนกตัวเอง หรือเครื่องที่ตัวเองเป็น responsible_person
-     *   role อื่น         → เฉพาะเครื่องที่ตัวเองเป็น responsible_person
+     *   DEPARTMENT_ADMIN → เครื่องในแผนกตัวเอง หรือเครื่องที่ตัวเองเป็น responsible / supervisor / manager
+     *   role อื่น         → เครื่องที่ตัวเองเป็น responsible_person, supervisor หรือ manager
      */
     private Mono<Boolean> canEdit(MemberPrincipal p, Long recordId) {
         if ("ADMIN".equals(p.role())) return Mono.just(true);
         if (p.memberId() == null)     return Mono.just(false);
 
-        String cond = "m.responsible_person_id = " + p.memberId();
+        Long me = p.memberId();
+        String cond = "(m.responsible_person_id = " + me
+                + " OR m.supervisor_id = " + me
+                + " OR m.manager_id = "    + me + ")";
         if ("DEPARTMENT_ADMIN".equals(p.role()) && p.departmentId() != null) {
             cond = "(" + cond + " OR m.department LIKE " + deptPrefixSubquery(p.departmentId()) + ")";
         }

@@ -175,10 +175,31 @@ public class MaintenanceService {
                 });
     }
 
-    /** ตรงกับ canEdit ฝั่งหน้าบ้าน: ADMIN หรือเป็นผู้รับผิดชอบ maintenance ของ record นั้น */
-    private static boolean canEdit(MemberPrincipal p, MaintenanceRecord record) {
-        return "ADMIN".equals(p.role())
-                || (p.memberId() != null && Objects.equals(record.getResponsibleMaintenance(), p.memberId()));
+    /**
+     * สิทธิ์แก้ไข maintenance record:
+     *   ADMIN → ทุก record
+     *   อื่น ๆ → เป็นผู้รับผิดชอบ maintenance ของ record นี้
+     *            หรือเป็น supervisor / manager ของเครื่องนี้
+     */
+    private Mono<Boolean> canEdit(MemberPrincipal p, Long recordId) {
+        if ("ADMIN".equals(p.role())) return Mono.just(true);
+        if (p.memberId() == null)     return Mono.just(false);
+
+        long me = p.memberId();
+        String sql = "SELECT COUNT(*) "
+                + "FROM maintenance_record mr "
+                + "LEFT JOIN machine m ON m.machine_code = mr.machine_code "
+                + "WHERE mr.id = :id "
+                + "AND (mr.responsible_maintenance = " + me
+                + " OR m.supervisor_id = " + me
+                + " OR m.manager_id = "    + me + ")";
+
+        return template.getDatabaseClient().sql(sql)
+                .bind("id", recordId)
+                .map((row, meta) -> row.get(0) instanceof Number n ? n.longValue() : 0L)
+                .one()
+                .map(c -> c > 0)
+                .defaultIfEmpty(false);
     }
 
     /** ใช้ role filter ชุดเดียวกับหน้า list ตรวจว่ามองเห็น record นี้ได้หรือไม่ */
@@ -220,8 +241,8 @@ public class MaintenanceService {
         return currentPrincipal()
                 .switchIfEmpty(Mono.error(new ThrowException("MS401", "Unauthenticated")))
                 .flatMap(p -> validateData(dto, true)
-                        .flatMap(v -> template.selectOne(Query.query(Criteria.where("id").is(dto.getId())), MaintenanceRecord.class)
-                                .flatMap(existing -> canEdit(p, existing)
+                        .flatMap(v -> canEdit(p, dto.getId())
+                                .flatMap(allowed -> allowed
                                         ? Mono.just(v)
                                         : Mono.error(new ThrowException("MS403", "No permission to edit this maintenance record")))))
                 .flatMap(v -> commonService.update(dto.getId(), buildUpdateFromDTO(v), MaintenanceRecord.class)
