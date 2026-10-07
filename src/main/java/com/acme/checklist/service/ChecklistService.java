@@ -477,57 +477,192 @@ public class ChecklistService {
     // =========================================================================
     //  STATS
     //
-    //  DEPARTMENT_ADMIN → filter machine ด้วย department_code (LIKE pattern)
-    //  เหมือน DashboardService และ CalibrationService
+    //  ตรรกะเดียวกับ KpiService.recalculateKpiForPerson และ KpiService.roleFilter
+    //  - รอบเดือน KPI: จันทร์ของสัปดาห์ที่มีศุกร์แรก ถึง ศุกร์สุดท้าย (Asia/Bangkok)
+    //  - ประชากร: แถวในตาราง kpi ที่ผู้ใช้มองเห็นตาม role
+    //  - แผนก: kpi.member_id → member.department_id → department.department
     // =========================================================================
+
+    private static final String STATS_SQL = """
+        WITH kp AS (
+            SELECT
+                k.member_id,
+                k.months,
+                k.check_all,
+                k.checked,
+                COALESCE(dep.department, 'UNASSIGNED') AS department
+            FROM kpi k
+            LEFT JOIN member mb ON mb.id = k.member_id
+            LEFT JOIN LATERAL (
+                SELECT d.department
+                FROM department d
+                WHERE d.department_code = mb.department_id
+                LIMIT 1
+            ) dep ON true
+            WHERE k.years = :year
+              AND (CAST(:deptName AS text) IS NULL OR dep.department = :deptName)
+              AND (
+                    :role = 'ADMIN'
+                 OR (:role = 'DEPARTMENT_ADMIN' AND mb.department_id IN (
+                        SELECT d2.department_code FROM department d2
+                        WHERE d2.department = (
+                            SELECT d1.department FROM department d1 WHERE d1.id = :deptId
+                        )
+                    ))
+                 OR (:role = 'MANAGER'    AND (k.member_id = :memberId OR k.manager_id    = :memberId))
+                 OR (:role = 'SUPERVISOR' AND (k.member_id = :memberId OR k.supervisor_id = :memberId))
+                 OR (:role NOT IN ('ADMIN', 'DEPARTMENT_ADMIN', 'MANAGER', 'SUPERVISOR')
+                     AND k.member_id = :memberId)
+              )
+        ),
+        rec AS (
+            SELECT DISTINCT ON (cr.id)
+                cr.id,
+                cr.checklist_status,
+                kp.department,
+                (
+                    COALESCE(cr.machine_note, '') = 'Automatic recording'
+                    AND UPPER(COALESCE(cr.reason_not_checked, ''))
+                        IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
+                ) AS is_auto,
+                (
+                    cr.recheck = true
+                    AND cr.created_by = rh.responsible_person_id
+                    AND NOT (
+                        COALESCE(cr.machine_note, '') = 'Automatic recording'
+                        AND UPPER(COALESCE(cr.reason_not_checked, ''))
+                            IN ('NO ACTION TAKEN', 'RESPONSIBLE PERSON DID NOT PERFORM')
+                    )
+                ) AS counts_for_kpi,
+                to_char(w.kpi_friday, 'MM') AS kpi_month
+            FROM checklist_record cr
+            CROSS JOIN LATERAL (
+                SELECT (cr.created_at AT TIME ZONE 'Asia/Bangkok')::date AS local_date
+            ) ld
+            CROSS JOIN LATERAL (
+                SELECT ld.local_date + (5 - EXTRACT(ISODOW FROM ld.local_date)::int) AS kpi_friday
+            ) w
+            JOIN machine m
+                 ON m.machine_code = cr.machine_code
+                AND m.machine_status = ANY(:activeStatuses)
+            JOIN responsible_history rh
+                 ON rh.machine_code = cr.machine_code
+                AND ld.local_date >= rh.effective_from
+                AND (rh.effective_to IS NULL OR ld.local_date <= rh.effective_to)
+            JOIN kp
+                 ON kp.member_id = rh.responsible_person_id
+                AND kp.months    = to_char(w.kpi_friday, 'MM')
+            WHERE cr.check_type = 'GENERAL'
+              AND cr.created_at >= :fromTs
+              AND cr.created_at <  :toTs
+              AND to_char(w.kpi_friday, 'YYYY') = :year
+              AND NOT (
+                  ld.local_date > w.kpi_friday
+                  AND EXTRACT(MONTH FROM w.kpi_friday + 7) <> EXTRACT(MONTH FROM w.kpi_friday)
+              )
+            ORDER BY cr.id, (cr.created_by = rh.responsible_person_id) DESC
+        ),
+        agg AS (
+            SELECT
+                department,
+                kpi_month,
+                COUNT(*)                                                                           AS daily_use,
+                COUNT(*) FILTER (WHERE counts_for_kpi)                                             AS checked,
+                COUNT(*) FILTER (WHERE counts_for_kpi AND checklist_status = 'COMPLETED')          AS approved,
+                COUNT(*) FILTER (WHERE counts_for_kpi AND checklist_status = 'PENDING SUPERVISOR') AS wait_supervisor,
+                COUNT(*) FILTER (WHERE counts_for_kpi AND checklist_status = 'PENDING MANAGER')    AS wait_manager,
+                COUNT(*) FILTER (WHERE is_auto)                                                    AS auto_not_performed,
+                COUNT(*) FILTER (WHERE NOT counts_for_kpi AND NOT is_auto)                         AS off_cycle
+            FROM rec
+            GROUP BY department, kpi_month
+        ),
+        tgt AS (
+            SELECT
+                department,
+                months,
+                COUNT(*)                    AS members,
+                COALESCE(SUM(check_all), 0) AS check_all,
+                COALESCE(SUM(checked),   0) AS kpi_checked
+            FROM kp
+            GROUP BY department, months
+        ),
+        grid AS (
+            SELECT dep.department, gs.m AS month, lpad(gs.m::text, 2, '0') AS mm
+            FROM (SELECT DISTINCT department FROM kp) dep
+            CROSS JOIN generate_series(1, 12) AS gs(m)
+        ),
+        joined AS (
+            SELECT
+                g.department,
+                g.month,
+                COALESCE(t.members,            0) AS members,
+                COALESCE(t.check_all,          0) AS check_all,
+                COALESCE(t.kpi_checked,        0) AS kpi_checked,
+                COALESCE(a.checked,            0) AS checked,
+                COALESCE(a.approved,           0) AS approved,
+                COALESCE(a.wait_supervisor,    0) AS wait_supervisor,
+                COALESCE(a.wait_manager,       0) AS wait_manager,
+                COALESCE(a.auto_not_performed, 0) AS auto_not_performed,
+                COALESCE(a.off_cycle,          0) AS off_cycle,
+                COALESCE(a.daily_use,          0) AS daily_use
+            FROM grid g
+            LEFT JOIN tgt t ON t.department = g.department AND t.months    = g.mm
+            LEFT JOIN agg a ON a.department = g.department AND a.kpi_month = g.mm
+        )
+        SELECT
+            CASE WHEN GROUPING(department) = 1 THEN '__ALL__' ELSE department END AS department,
+            month,
+            SUM(members)            AS members,
+            SUM(check_all)          AS check_all,
+            SUM(kpi_checked)        AS kpi_checked,
+            SUM(checked)            AS checked,
+            SUM(approved)           AS approved,
+            SUM(wait_supervisor)    AS wait_supervisor,
+            SUM(wait_manager)       AS wait_manager,
+            SUM(auto_not_performed) AS auto_not_performed,
+            SUM(off_cycle)          AS off_cycle,
+            SUM(daily_use)          AS daily_use
+        FROM joined
+        GROUP BY GROUPING SETS ((department, month), (month))
+        ORDER BY GROUPING(department) DESC, department, month
+        """;
 
     public Mono<List<ChecklistStatsDTO>> getChecklistStats(Integer year, String department) {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    int    targetYear = (year != null) ? year : LocalDate.now(ZONE).getYear();
-                    String roleFilter = buildRoleFilter(principal);
-                    String deptFilter = StringUtils.hasText(department)
-                            ? "AND d.department_code = :department" : "";
+                    int y = (year != null) ? year : LocalDate.now(ZONE).getYear();
 
-                    String sql = buildStatsSQL(roleFilter, deptFilter);
+                    // รอบ KPI ม.ค. อาจเริ่มปลาย ธ.ค. ปีก่อน → เผื่อช่วง แล้วกรองด้วยปีของวันศุกร์
+                    Instant fromTs = LocalDate.of(y - 1, 12, 20).atStartOfDay(ZONE).toInstant();
+                    Instant toTs   = LocalDate.of(y + 1, 1, 10).atStartOfDay(ZONE).toInstant();
 
-                    var spec = template.getDatabaseClient()
-                            .sql(sql)
-                            .bind("year", targetYear);
+                    var spec = template.getDatabaseClient().sql(STATS_SQL)
+                            .bind("year",           String.valueOf(y))
+                            .bind("role",           principal.role() != null ? principal.role() : "")
+                            .bind("activeStatuses", activeStatuses())
+                            .bind("fromTs",         fromTs)
+                            .bind("toTs",           toTs);
 
-                    if (StringUtils.hasText(department)) {
-                        spec = spec.bind("department", department);
-                    }
+                    spec = principal.memberId() != null
+                            ? spec.bind("memberId", principal.memberId())
+                            : spec.bindNull("memberId", Long.class);
+                    spec = principal.departmentId() != null
+                            ? spec.bind("deptId", principal.departmentId())
+                            : spec.bindNull("deptId", Long.class);
+                    spec = StringUtils.hasText(department)
+                            ? spec.bind("deptName", department)
+                            : spec.bindNull("deptName", String.class);
 
-                    return spec.map((row, metadata) -> mapRowToStatsDTO(row)).all().collectList();
+                    return spec.map((row, meta) -> mapRowToStatsDTO(row, y)).all().collectList();
                 });
     }
 
-    // =========================================================================
-    //  ROLE FILTER FOR STATS
-    //
-    //  เดิม: MEMBER / SUPERVISOR / MANAGER / default
-    //  เพิ่ม: DEPARTMENT_ADMIN → filter m.department LIKE ... (ใน buildStatsSQL JOIN machine m)
-    // =========================================================================
-
-    private static String buildRoleFilter(MemberPrincipal principal) {
-        String role     = principal.role();
-        Long   memberId = principal.memberId();
-        Long   deptId   = principal.departmentId();
-
-        return switch (role) {
-            case "ADMIN"            -> "";
-            case "DEPARTMENT_ADMIN" -> deptId != null
-                    ? "AND m.department LIKE (SELECT LEFT(d2.department_code, LENGTH(d2.department_code) - 1) || '%' FROM department d2 WHERE d2.id = " + deptId + ")"
-                    : "AND 1=0";
-            case "MEMBER"           -> "AND m.responsible_person_id = " + memberId;
-            case "SUPERVISOR"       -> "AND (m.responsible_person_id = " + memberId
-                    + " OR m.supervisor_id = "  + memberId + ")";
-            case "MANAGER"          -> "AND (m.responsible_person_id = " + memberId
-                    + " OR m.manager_id = "     + memberId + ")";
-            default                 -> "";
-        };
+    private static String[] activeStatuses() {
+        // ถ้า activeDbValues() คืนค่าเป็น String[] อยู่แล้ว ให้ return ตรงๆ
+        return MachineStatus.activeDbValues().stream()
+                .map(String::valueOf)
+                .toArray(String[]::new);
     }
 
     // =========================================================================
@@ -630,34 +765,6 @@ public class ChecklistService {
         return Update.from(params);
     }
 
-    private String buildStatsSQL(String roleFilter, String deptFilter) {
-        return """
-            SELECT
-                d.department,
-                EXTRACT(MONTH FROM cr.created_at)::int AS month,
-                EXTRACT(YEAR  FROM cr.created_at)::int AS year,
-                COUNT(cr.id) AS daily_use,
-                COUNT(CASE WHEN cr.recheck = true  AND cr.checklist_status = 'COMPLETED'          THEN 1 END) AS weekly_check_done,
-                COUNT(CASE WHEN cr.recheck = true  AND cr.checklist_status = 'PENDING SUPERVISOR' THEN 1 END) AS weekly_check_wait_leader,
-                COUNT(CASE WHEN cr.recheck = true  AND cr.checklist_status = 'PENDING MANAGER'   THEN 1 END) AS weekly_check_wait_manager,
-                COUNT(CASE WHEN cr.recheck = false AND cr.checklist_status = 'COMPLETED' AND cr.reason_not_checked IS NULL     THEN 1 END) AS not_check_done,
-                COUNT(CASE WHEN cr.recheck = false AND cr.checklist_status = 'COMPLETED' AND cr.reason_not_checked IS NOT NULL THEN 1 END) AS not_check_done_not_check,
-                COUNT(CASE WHEN cr.recheck = false AND cr.checklist_status = 'PENDING SUPERVISOR' THEN 1 END) AS not_check_wait_leader,
-                COUNT(CASE WHEN cr.recheck = false AND cr.checklist_status = 'PENDING MANAGER'   THEN 1 END) AS not_check_wait_manager,
-                COUNT(CASE WHEN cr.recheck = false AND cr.checklist_status = 'COMPLETED'         THEN 1 END) AS not_check_final_done,
-                COUNT(CASE WHEN cr.recheck = false THEN 1 END) AS not_check_total
-            FROM checklist_record cr
-            JOIN machine m ON cr.machine_code = m.machine_code
-            JOIN department d ON m.department = d.department_code
-            WHERE EXTRACT(YEAR FROM cr.created_at) = :year
-              AND cr.check_type = 'GENERAL'
-              %s
-              %s
-            GROUP BY d.department, EXTRACT(MONTH FROM cr.created_at), EXTRACT(YEAR FROM cr.created_at)
-            ORDER BY d.department, month
-        """.formatted(roleFilter, deptFilter);
-    }
-
     // =========================================================================
     //  HELPERS
     // =========================================================================
@@ -701,59 +808,59 @@ public class ChecklistService {
     }
 
     // =========================================================================
-    //  STATS MAPPING
+    //  STATS MAPPING — ใช้ ChecklistStatsDTO เดิม (ไม่แก้ DTO)
+    //
+    //  ความหมายของ field:
+    //    weeklyCheckDone            = อนุมัติแล้ว (COMPLETED)
+    //    weeklyCheckWaitLeader      = รอหัวหน้า
+    //    weeklyCheckWaitManager     = รอผู้จัดการ
+    //    weeklyCheckPercent         = ตรวจแล้ว ÷ ต้องตรวจ   (= ตาราง KPI)
+    //    weeklyApprovePercent       = อนุมัติแล้ว ÷ ตรวจแล้ว
+    //    notCheckDone               = ขาดตรวจ (ต้องตรวจ − ตรวจแล้ว)
+    //    notCheckDoneNotCheck       = ระบบบันทึกว่าไม่ได้ทำ (Automatic recording)
+    //    notCheckApprovePercent     = % ขาดตรวจ (ขาดตรวจ ÷ ต้องตรวจ)
+    //    notCheckWaitLeader/Manager = 0, notCheckApprovePercentFinal = null (ไม่ใช้แล้ว)
+    //
+    //  frontend คำนวณต่อได้:
+    //    ตรวจแล้ว    = weeklyCheckDone + weeklyCheckWaitLeader + weeklyCheckWaitManager
+    //    ต้องตรวจ    = ตรวจแล้ว + notCheckDone
+    //    ตรวจนอกรอบ = dailyUse − ตรวจแล้ว − notCheckDoneNotCheck
+    //    ไม่มี KPI เดือนนั้น ⇔ weeklyCheckPercent == null
     // =========================================================================
 
-    private ChecklistStatsDTO mapRowToStatsDTO(io.r2dbc.spi.Row row) {
-        Long done        = row.get("weekly_check_done",         Long.class);
-        Long waitLeader  = row.get("weekly_check_wait_leader",  Long.class);
-        Long waitManager = row.get("weekly_check_wait_manager", Long.class);
-        Long ncDone      = row.get("not_check_done",            Long.class);
-        Long ncDoneNc    = row.get("not_check_done_not_check",  Long.class);
-        Long ncLeader    = row.get("not_check_wait_leader",     Long.class);
-        Long ncManager   = row.get("not_check_wait_manager",    Long.class);
-        Long ncFinalDone = row.get("not_check_final_done",      Long.class);
-        Long ncTotal     = row.get("not_check_total",           Long.class);
+    private ChecklistStatsDTO mapRowToStatsDTO(io.r2dbc.spi.Row row, int year) {
+        long checkAll    = statsLong(row, "check_all");
+        long approved    = statsLong(row, "approved");
+        long waitLeader  = statsLong(row, "wait_supervisor");
+        long waitManager = statsLong(row, "wait_manager");
+        long checked     = approved + waitLeader + waitManager;
+        long missed      = Math.max(checkAll - checked, 0);
 
         return ChecklistStatsDTO.builder()
-                .department(row.get("department",  String.class))
-                .month(row.get("month",  Integer.class))
-                .year(row.get("year",    Integer.class))
-                .dailyUse(row.get("daily_use", Long.class))
-                .weeklyCheckDone(done)
+                .department(row.get("department", String.class))
+                .month(row.get("month", Integer.class))
+                .year(year)
+                .dailyUse(statsLong(row, "daily_use"))
+                .weeklyCheckDone(approved)
                 .weeklyCheckWaitLeader(waitLeader)
                 .weeklyCheckWaitManager(waitManager)
-                .weeklyCheckPercent(calculateWeeklyCheckPercent(done, waitLeader, waitManager))
-                .weeklyApprovePercent(calculateWeeklyApprovePercent(done, waitManager))
-                .notCheckDone(ncDone)
-                .notCheckDoneNotCheck(ncDoneNc)
-                .notCheckWaitLeader(ncLeader)
-                .notCheckWaitManager(ncManager)
-                .notCheckApprovePercent(calculateNotCheckApprovePercent(ncDone, ncDoneNc, ncLeader, ncManager))
-                .notCheckApprovePercentFinal(calculateNotCheckApprovePercentFinal(ncFinalDone, ncTotal))
+                .weeklyCheckPercent(statsPct(checked, checkAll))
+                .weeklyApprovePercent(statsPct(approved, checked))
+                .notCheckDone(missed)
+                .notCheckDoneNotCheck(statsLong(row, "auto_not_performed"))
+                .notCheckWaitLeader(0L)
+                .notCheckWaitManager(0L)
+                .notCheckApprovePercent(statsPct(missed, checkAll))
+                .notCheckApprovePercentFinal(null)
                 .build();
     }
 
-    private int calculateWeeklyCheckPercent(Long done, Long waitLeader, Long waitManager) {
-        long total = safe(done) + safe(waitLeader) + safe(waitManager);
-        return total > 0 ? (int) Math.round((safe(done) * 100.0) / total) : 0;
+    private static Integer statsPct(long num, long den) {
+        return den > 0 ? (int) Math.round(num * 100.0 / den) : null;
     }
 
-    private int calculateWeeklyApprovePercent(Long done, Long waitManager) {
-        long total = safe(done) + safe(waitManager);
-        return total > 0 ? (int) Math.round((safe(done) * 100.0) / total) : 0;
-    }
-
-    private int calculateNotCheckApprovePercent(Long done, Long doneNotCheck, Long waitLeader, Long waitManager) {
-        long total = safe(done) + safe(doneNotCheck) + safe(waitLeader) + safe(waitManager);
-        return total > 0 ? (int) Math.round((safe(done) * 100.0) / total) : 0;
-    }
-
-    private int calculateNotCheckApprovePercentFinal(Long finalDone, Long total) {
-        return safe(total) > 0 ? (int) Math.round((safe(finalDone) * 100.0) / safe(total)) : 0;
-    }
-
-    private long safe(Long val) {
-        return val != null ? val : 0L;
+    private static long statsLong(io.r2dbc.spi.Row row, String col) {
+        Object v = row.get(col);
+        return v instanceof Number n ? n.longValue() : 0L;
     }
 }
