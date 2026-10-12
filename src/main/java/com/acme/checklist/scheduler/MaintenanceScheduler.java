@@ -17,7 +17,9 @@ import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -31,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -51,6 +54,10 @@ public class MaintenanceScheduler {
     private final LarkService larkService;
     private final ReactiveTransactionManager transactionManager;
 
+    /** cron ของการแจ้ง ADMIN / DEPARTMENT_ADMIN — ใช้ทั้งตั้งเวลา และเช็คว่า "วันนี้เป็นวันแจ้ง admin" หรือไม่ */
+    @Value("${scheduler.maintenance.admins-cron:0 0 9 * * MON}")
+    private String adminsCron;
+
     // ======================================================================
     // Config
     // ======================================================================
@@ -59,7 +66,7 @@ public class MaintenanceScheduler {
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     /** เริ่มแจ้งเตือนเมื่อเหลือไม่เกินกี่วันก่อนถึง due date */
-    private static final int DUE_WITHIN_DAYS = 45;
+    private static final int DUE_WITHIN_DAYS = 30;
     private static final int RED_WITHIN_DAYS = 7;
     private static final int YELLOW_WITHIN_DAYS = 14;
 
@@ -339,7 +346,9 @@ public class MaintenanceScheduler {
                         log.warn("[M-{}] No recipients resolved — nothing to send", role);
                         return Mono.empty();
                     }
-                    return sendToMembers(byPerson, role);
+                    // วันที่มีแจ้ง admin: คนที่เป็น ADMIN / DEPARTMENT_ADMIN จะได้ชุดรวมจาก job admin แทน
+                    return excludeAdminsOnAdminDay(byPerson, role)
+                            .flatMap(filtered -> filtered.isEmpty() ? Mono.<Void>empty() : sendToMembers(filtered, role));
                 });
     }
 
@@ -415,27 +424,79 @@ public class MaintenanceScheduler {
                     Map<Long, List<MaintenanceRecord>> byPerson = new HashMap<>();
 
                     admins.forEach(admin -> {
+                        // เครื่องในแผนก + เครื่องที่ตัวเองเป็นผู้รับผิดชอบ/หัวหน้างาน/ผู้จัดการ
+                        // → วันแจ้ง admin ได้ข้อความชุดเดียวที่ครบทุกรายการ
+                        Set<String> codes = new HashSet<>(personalMachineCodes(machines, admin.getId()));
+
                         String deptKey = matcher.resolve(admin.getDepartmentId());
                         if (deptKey == null) {
-                            log.warn("[M-{}] memberId={} department_id='{}' not found in department table — skipped",
+                            log.warn("[M-{}] memberId={} department_id='{}' not found in department table — only personal machines included",
                                     role, admin.getId(), admin.getDepartmentId());
-                            return;
+                        } else {
+                            codes.addAll(codesByDept.getOrDefault(deptKey, Set.of()));
                         }
-                        Set<String> deptCodes = codesByDept.getOrDefault(deptKey, Set.of());
-                        List<MaintenanceRecord> deptRecords = records.stream()
-                                .filter(r -> r.getMachineCode() != null && deptCodes.contains(r.getMachineCode()))
+
+                        List<MaintenanceRecord> adminRecords = records.stream()
+                                .filter(r -> r.getMachineCode() != null && codes.contains(r.getMachineCode()))
                                 .toList();
-                        if (deptRecords.isEmpty()) {
-                            log.info("[M-{}] memberId={} (department_id={}) — nothing due in department",
+                        if (adminRecords.isEmpty()) {
+                            log.info("[M-{}] memberId={} (department_id={}) — nothing due",
                                     role, admin.getId(), admin.getDepartmentId());
                             return;
                         }
-                        byPerson.put(admin.getId(), deptRecords);
+                        byPerson.put(admin.getId(), adminRecords);
                     });
 
                     if (byPerson.isEmpty()) return Mono.empty();
                     return sendToMembers(byPerson, role);
                 });
+    }
+
+    private Set<String> personalMachineCodes(List<Machine> machines, Long memberId) {
+        return machines.stream()
+                .filter(m -> m.getMachineCode() != null && (
+                        memberId.equals(m.getResponsiblePersonId())
+                                || memberId.equals(m.getSupervisorId())
+                                || memberId.equals(m.getManagerId())))
+                .map(Machine::getMachineCode)
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * วันที่มีแจ้ง admin: ตัด ADMIN / DEPARTMENT_ADMIN ออกจากการแจ้งตาม role อื่น
+     * เพราะชุดของ admin ครอบคลุมรายการเหล่านั้นอยู่แล้ว → ได้รับแค่ชุดเดียว
+     * วันอื่น (เช่น พุธของ MANAGER) ส่งตามปกติ
+     */
+    private Mono<Map<Long, List<MaintenanceRecord>>> excludeAdminsOnAdminDay(Map<Long, List<MaintenanceRecord>> byPerson, Role role) {
+        if (!isAdminNotifyDay()) return Mono.just(byPerson);
+
+        return template.select(
+                        Query.query(Criteria.where("id").in(byPerson.keySet())
+                                .and("role_type").in(RoleType.ADMIN.name(), RoleType.DEPARTMENT_ADMIN.name())
+                                .and("status").is("ACTIVE")),
+                        Member.class)
+                .map(Member::getId)
+                .collect(Collectors.toSet())
+                .map(adminIds -> {
+                    if (adminIds.isEmpty()) return byPerson;
+                    log.info("[M-{}] Admin notification day — skip {} admin member(s) here (they get the combined admin message): {}",
+                            role, adminIds.size(), adminIds);
+                    Map<Long, List<MaintenanceRecord>> filtered = new HashMap<>(byPerson);
+                    filtered.keySet().removeAll(adminIds);
+                    return filtered;
+                });
+    }
+
+    /** วันนี้ตรงกับ cron ของการแจ้ง admin หรือไม่ */
+    private boolean isAdminNotifyDay() {
+        try {
+            LocalDate today = LocalDate.now(ZONE);
+            ZonedDateTime next = CronExpression.parse(adminsCron).next(today.atStartOfDay(ZONE).minusSeconds(1));
+            return next != null && next.toLocalDate().equals(today);
+        } catch (IllegalArgumentException e) {
+            log.warn("[M-ADMIN] invalid admins cron '{}' — admins will also get role-based messages: {}", adminsCron, e.getMessage());
+            return false;
+        }
     }
 
     private RoleType toRoleType(Role role) {
@@ -480,9 +541,10 @@ public class MaintenanceScheduler {
                     SendStats stats = new SendStats();
                     LocalDate today = LocalDate.now(ZONE);
 
-                    return Mono.when(
-                                    sendEmails(members, byPerson, role, today, stats),
-                                    sendLarkMessages(members, byPerson, role, today, stats))
+                    return resolveResponsibleNames(byPerson, role)
+                            .flatMap(responsible -> Mono.when(
+                                    sendEmails(members, byPerson, role, today, stats, responsible),
+                                    sendLarkMessages(members, byPerson, role, today, stats, responsible)))
                             .doFinally(signal -> log.info(
                                     "[M-SEND][{}] SUMMARY members={} | email ok={} fail={} skip={} | lark cards ok={} fail={} | lark members skip={}",
                                     role, members.size(),
@@ -497,7 +559,8 @@ public class MaintenanceScheduler {
                                   Map<Long, List<MaintenanceRecord>> byPerson,
                                   Role role,
                                   LocalDate today,
-                                  SendStats stats) {
+                                  SendStats stats,
+                                  Map<Long, String> responsible) {
         String subject = "Maintenance Due Date Reminder - " + today.format(DateTimeFormatter.ISO_DATE);
 
         return Flux.fromIterable(members)
@@ -511,7 +574,7 @@ public class MaintenanceScheduler {
                         return Mono.empty();
                     }
 
-                    String content = buildEmailContent(records, today);
+                    String content = buildEmailContent(records, today, responsible);
 
                     return emailService.sendReminder(member.getEmail(), subject, content)
                             .retryWhen(retrySpec("email memberId=" + member.getId()))
@@ -536,7 +599,8 @@ public class MaintenanceScheduler {
                                         Map<Long, List<MaintenanceRecord>> byPerson,
                                         Role role,
                                         LocalDate today,
-                                        SendStats stats) {
+                                        SendStats stats,
+                                        Map<Long, String> responsible) {
 
         Map<String, List<Long>> memberIdsByMobileKey = new LinkedHashMap<>();
         Map<String, String> e164ByMobileKey = new LinkedHashMap<>();
@@ -591,20 +655,21 @@ public class MaintenanceScheduler {
                                         + "(check app availability scope / mobile in Lark directory) — skipped", role, memberId);
                                 return Mono.empty();
                             }
-                            return sendLarkCards(openId, memberId, byPerson.get(memberId), role, today, stats);
+                            return sendLarkCards(openId, memberId, byPerson.get(memberId), role, today, stats, responsible);
                         }, SEND_CONCURRENCY)
                         .then());
     }
 
     private Mono<Void> sendLarkCards(String openId, Long memberId, List<MaintenanceRecord> records,
-                                     Role role, LocalDate today, SendStats stats) {
+                                     Role role, LocalDate today, SendStats stats,
+                                     Map<Long, String> responsible) {
         List<List<MaintenanceRecord>> pages = partition(records, MAX_RECORDS_PER_CARD);
         int totalPages = pages.size();
 
         return Flux.range(0, totalPages)
                 .concatMap(i -> {
                     int page = i + 1;
-                    String card = buildLarkCard(pages.get(i), role, page, totalPages, records.size(), today);
+                    String card = buildLarkCard(pages.get(i), role, page, totalPages, records.size(), today, responsible);
                     String dedupeKey = idempotencyKey(today, role, memberId, page);
 
                     return larkService.sendCardMessage(openId, card, dedupeKey)
@@ -625,17 +690,100 @@ public class MaintenanceScheduler {
     }
 
     // ======================================================================
+    // ผู้รับผิดชอบของแต่ละรายการ (แสดงใน Email / Lark)
+    // Maintenance: maintenance_record.responsible_maintenance เก็บ member id
+    //              (รองรับหลาย id คั่นด้วย , ; หรือช่องว่าง) → แปลงเป็นชื่อจากตาราง member
+    // ======================================================================
+
+    /** คืน map: maintenance record id → ชื่อผู้รับผิดชอบ */
+    private Mono<Map<Long, String>> resolveResponsibleNames(Map<Long, List<MaintenanceRecord>> byPerson, Role role) {
+        Map<Long, MaintenanceRecord> recordsById = distinctRecords(byPerson);
+
+        Map<Long, List<Long>> memberIdsByRecord = new HashMap<>();
+        recordsById.forEach((id, r) -> {
+            List<Long> ids = parseMemberIds(r.getResponsibleMaintenance());
+            if (!ids.isEmpty()) memberIdsByRecord.put(id, ids);
+        });
+
+        Set<Long> memberIds = memberIdsByRecord.values().stream()
+                .flatMap(List::stream)
+                .collect(Collectors.toSet());
+        if (memberIds.isEmpty()) return Mono.just(new HashMap<>());
+
+        return template.select(Query.query(Criteria.where("id").in(memberIds)), Member.class)
+                .collectMap(Member::getId, this::displayName)
+                .map(nameById -> {
+                    Map<Long, String> out = new HashMap<>();
+                    memberIdsByRecord.forEach((recordId, ids) -> {
+                        String names = ids.stream()
+                                .map(nameById::get)
+                                .filter(Objects::nonNull)
+                                .distinct()
+                                .collect(Collectors.joining(", "));
+                        if (!names.isBlank()) out.put(recordId, names);
+                    });
+                    Set<Long> missing = new TreeSet<>(memberIds);
+                    missing.removeAll(nameById.keySet());
+                    if (!missing.isEmpty()) {
+                        log.warn("[M-SEND][{}] responsible_maintenance member ids not found: {}", role, missing);
+                    }
+                    return out;
+                })
+                .onErrorResume(e -> {
+                    log.warn("[M-SEND][{}] Cannot load responsible names — sending without them: {}", role, e.getMessage());
+                    return Mono.just(new HashMap<>());
+                });
+    }
+
+    /** แปลงค่าใน responsible_maintenance เป็นรายการ member id (ข้ามค่าที่ไม่ใช่ตัวเลข) */
+    private List<Long> parseMemberIds(Object value) {
+        if (value == null) return List.of();
+        if (value instanceof Number n) return List.of(n.longValue());
+        List<Long> ids = new ArrayList<>();
+        for (String part : String.valueOf(value).split("[,;\\s]+")) {
+            if (part.isBlank()) continue;
+            try {
+                ids.add(Long.parseLong(part.trim()));
+            } catch (NumberFormatException e) {
+                log.debug("[M-SEND] responsible_maintenance value '{}' is not a member id — ignored", part);
+            }
+        }
+        return ids;
+    }
+
+    private String displayName(Member m) {
+        String name = ((m.getFirstName() != null ? m.getFirstName() : "") + " "
+                + (m.getLastName() != null ? m.getLastName() : "")).trim();
+        if (!name.isEmpty()) return name;
+        return m.getUserName() != null ? m.getUserName() : String.valueOf(m.getId());
+    }
+
+    private Map<Long, MaintenanceRecord> distinctRecords(Map<Long, List<MaintenanceRecord>> byPerson) {
+        Map<Long, MaintenanceRecord> out = new LinkedHashMap<>();
+        byPerson.values().forEach(list -> list.forEach(r -> {
+            if (r.getId() != null) out.putIfAbsent(r.getId(), r);
+        }));
+        return out;
+    }
+
+    private String responsibleOf(MaintenanceRecord r, Map<Long, String> responsible) {
+        if (r.getId() == null) return "-";
+        String name = responsible.get(r.getId());
+        return (name == null || name.isBlank()) ? "-" : name;
+    }
+
+    // ======================================================================
     // Content builders
     // ======================================================================
 
-    private String buildEmailContent(List<MaintenanceRecord> records, LocalDate today) {
+    private String buildEmailContent(List<MaintenanceRecord> records, LocalDate today, Map<Long, String> responsible) {
         StringBuilder html = new StringBuilder();
         html.append("<html><body>")
                 .append("<h2>Maintenance Due Date Reminder</h2>")
                 .append("<p>The following maintenance tasks are due within the next ").append(DUE_WITHIN_DAYS).append(" days:</p>")
                 .append("<table border='1' cellpadding='10' cellspacing='0' style='border-collapse: collapse;'>")
                 .append("<thead><tr style='background-color: #f2f2f2;'>")
-                .append("<th>Machine Code</th><th>Machine Name</th><th>Due Date</th><th>Days Remaining</th>")
+                .append("<th>Machine Code</th><th>Machine Name</th><th>Responsible Person</th><th>Due Date</th><th>Days Remaining</th>")
                 .append("</tr></thead><tbody>");
 
         for (MaintenanceRecord r : records) {
@@ -643,6 +791,7 @@ public class MaintenanceScheduler {
             html.append("<tr>")
                     .append("<td>").append(escapeHtml(r.getMachineCode())).append("</td>")
                     .append("<td>").append(escapeHtml(r.getMachineName())).append("</td>")
+                    .append("<td>").append(escapeHtml(responsibleOf(r, responsible))).append("</td>")
                     .append("<td>").append(r.getDueDate().format(FMT)).append("</td>")
                     .append("<td>").append(s.emoji()).append(' ').append(escapeHtml(s.label())).append("</td>")
                     .append("</tr>");
@@ -659,7 +808,8 @@ public class MaintenanceScheduler {
     }
 
     private String buildLarkCard(List<MaintenanceRecord> records, Role role,
-                                 int page, int totalPages, int totalCount, LocalDate today) {
+                                 int page, int totalPages, int totalCount, LocalDate today,
+                                 Map<Long, String> responsible) {
 
         String title = totalPages > 1
                 ? role.cardTitle + " (" + page + "/" + totalPages + ")"
@@ -671,6 +821,7 @@ public class MaintenanceScheduler {
         for (MaintenanceRecord r : records) {
             DueStatus s = dueStatus(r.getDueDate(), today);
             String content = "**" + nullToDash(r.getMachineCode()) + " - " + nullToDash(r.getMachineName()) + "**\n"
+                    + "👤 ผู้รับผิดชอบ: " + responsibleOf(r, responsible) + "\n"
                     + "<font color='" + s.color() + "'>Due: " + r.getDueDate().format(FMT) + " (" + s.label() + ")</font>";
             rows.add("{\"tag\":\"column_set\",\"flex_mode\":\"none\",\"background_style\":\"grey\","
                     + "\"columns\":[{\"tag\":\"column\",\"width\":\"weighted\",\"weight\":1,"

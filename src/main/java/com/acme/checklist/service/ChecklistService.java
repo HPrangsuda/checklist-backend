@@ -446,15 +446,15 @@ public class ChecklistService {
         return ReactiveSecurityContextHolder.getContext()
                 .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
                 .flatMap(principal -> {
-                    Long   memberId = principal.memberId();
-                    String role     = principal.role();
+                    Long memberId = principal.memberId();
+                    log.info("[CHECKLIST] getPendingApprovals — role={} memberId={}", principal.role(), memberId);
 
-                    log.info("[CHECKLIST] getPendingApprovals — role={} memberId={}", role, memberId);
-
-                    if (!role.equals("SUPERVISOR") && !role.equals("MANAGER")) {
+                    if (memberId == null) {
                         return Mono.just(ListResponse.success("MS022", false, List.<ChecklistListDTO>of()));
                     }
 
+                    // สิทธิ์อนุมัติมาจากการถูกตั้งเป็น supervisor/manager ของ record ไม่ใช่จาก role
+                    // → ADMIN / DEPARTMENT_ADMIN ที่เป็นผู้อนุมัติด้วย ก็เห็นงานของตัวเอง
                     Criteria criteria = Criteria
                             .where("checklist_status").is("PENDING SUPERVISOR").and("supervisor").is(memberId)
                             .or(Criteria.where("checklist_status").is("PENDING MANAGER").and("manager").is(memberId));
@@ -476,11 +476,6 @@ public class ChecklistService {
 
     // =========================================================================
     //  STATS
-    //
-    //  ตรรกะเดียวกับ KpiService.recalculateKpiForPerson และ KpiService.roleFilter
-    //  - รอบเดือน KPI: จันทร์ของสัปดาห์ที่มีศุกร์แรก ถึง ศุกร์สุดท้าย (Asia/Bangkok)
-    //  - ประชากร: แถวในตาราง kpi ที่ผู้ใช้มองเห็นตาม role
-    //  - แผนก: kpi.member_id → member.department_id → department.department
     // =========================================================================
 
     private static final String STATS_SQL = """

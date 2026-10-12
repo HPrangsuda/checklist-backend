@@ -16,7 +16,9 @@ import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -30,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -49,6 +52,10 @@ public class CalibrationScheduler {
     private final EmailService emailService;
     private final R2dbcEntityTemplate template;
     private final ReactiveTransactionManager transactionManager;
+
+    /** cron ของการแจ้ง ADMIN / DEPARTMENT_ADMIN — ใช้ทั้งตั้งเวลา และเช็คว่า "วันนี้เป็นวันแจ้ง admin" หรือไม่ */
+    @Value("${scheduler.calibration.admins-cron:0 0 9 * * MON}")
+    private String adminsCron;
 
     // ======================================================================
     // Config
@@ -207,7 +214,7 @@ public class CalibrationScheduler {
      * - DEPARTMENT_ADMIN : เฉพาะเครื่องที่อยู่แผนกเดียวกับตัวเอง
      * ทำทีละ role และแยก error กัน
      */
-    @Scheduled(cron = "0 0 9 * * MON", zone = "Asia/Bangkok")
+    @Scheduled(cron = "${scheduler.calibration.admins-cron:0 0 9 * * MON}", zone = "Asia/Bangkok")
     @SchedulerLock(name = CALIBRATION_NOTIFY_ADMINS,
             lockAtLeastFor = NOTIFY_LOCK_AT_LEAST, lockAtMostFor = NOTIFY_LOCK_AT_MOST)
     public void sendWeeklyToAdmins() {
@@ -328,7 +335,9 @@ public class CalibrationScheduler {
                         log.warn("[{}] No recipients resolved — nothing to send", role);
                         return Mono.empty();
                     }
-                    return sendToMembers(byPerson, role);
+                    // วันที่มีแจ้ง admin: คนที่เป็น ADMIN / DEPARTMENT_ADMIN จะได้ชุดรวมจาก job admin แทน
+                    return excludeAdminsOnAdminDay(byPerson, role)
+                            .flatMap(filtered -> filtered.isEmpty() ? Mono.<Void>empty() : sendToMembers(filtered, role));
                 });
     }
 
@@ -404,27 +413,79 @@ public class CalibrationScheduler {
                     Map<Long, List<CalibrationRecord>> byPerson = new HashMap<>();
 
                     admins.forEach(admin -> {
+                        // เครื่องในแผนก + เครื่องที่ตัวเองเป็นผู้รับผิดชอบ/หัวหน้างาน/ผู้จัดการ
+                        // → วันแจ้ง admin ได้ข้อความชุดเดียวที่ครบทุกรายการ
+                        Set<String> codes = new HashSet<>(personalMachineCodes(machines, admin.getId()));
+
                         String deptKey = matcher.resolve(admin.getDepartmentId());
                         if (deptKey == null) {
-                            log.warn("[{}] memberId={} department_id='{}' not found in department table — skipped",
+                            log.warn("[{}] memberId={} department_id='{}' not found in department table — only personal machines included",
                                     role, admin.getId(), admin.getDepartmentId());
-                            return;
+                        } else {
+                            codes.addAll(codesByDept.getOrDefault(deptKey, Set.of()));
                         }
-                        Set<String> deptCodes = codesByDept.getOrDefault(deptKey, Set.of());
-                        List<CalibrationRecord> deptRecords = records.stream()
-                                .filter(r -> r.getMachineCode() != null && deptCodes.contains(r.getMachineCode()))
+
+                        List<CalibrationRecord> adminRecords = records.stream()
+                                .filter(r -> r.getMachineCode() != null && codes.contains(r.getMachineCode()))
                                 .toList();
-                        if (deptRecords.isEmpty()) {
-                            log.info("[{}] memberId={} (department_id={}) — nothing due in department",
+                        if (adminRecords.isEmpty()) {
+                            log.info("[{}] memberId={} (department_id={}) — nothing due",
                                     role, admin.getId(), admin.getDepartmentId());
                             return;
                         }
-                        byPerson.put(admin.getId(), deptRecords);
+                        byPerson.put(admin.getId(), adminRecords);
                     });
 
                     if (byPerson.isEmpty()) return Mono.empty();
                     return sendToMembers(byPerson, role);
                 });
+    }
+
+    private Set<String> personalMachineCodes(List<Machine> machines, Long memberId) {
+        return machines.stream()
+                .filter(m -> m.getMachineCode() != null && (
+                        memberId.equals(m.getResponsiblePersonId())
+                                || memberId.equals(m.getSupervisorId())
+                                || memberId.equals(m.getManagerId())))
+                .map(Machine::getMachineCode)
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * วันที่มีแจ้ง admin: ตัด ADMIN / DEPARTMENT_ADMIN ออกจากการแจ้งตาม role อื่น
+     * เพราะชุดของ admin ครอบคลุมรายการเหล่านั้นอยู่แล้ว → ได้รับแค่ชุดเดียว
+     * วันอื่น (เช่น พุธของ MANAGER) ส่งตามปกติ
+     */
+    private Mono<Map<Long, List<CalibrationRecord>>> excludeAdminsOnAdminDay(Map<Long, List<CalibrationRecord>> byPerson, Role role) {
+        if (!isAdminNotifyDay()) return Mono.just(byPerson);
+
+        return template.select(
+                        Query.query(Criteria.where("id").in(byPerson.keySet())
+                                .and("role_type").in(RoleType.ADMIN.name(), RoleType.DEPARTMENT_ADMIN.name())
+                                .and("status").is("ACTIVE")),
+                        Member.class)
+                .map(Member::getId)
+                .collect(Collectors.toSet())
+                .map(adminIds -> {
+                    if (adminIds.isEmpty()) return byPerson;
+                    log.info("[{}] Admin notification day — skip {} admin member(s) here (they get the combined admin message): {}",
+                            role, adminIds.size(), adminIds);
+                    Map<Long, List<CalibrationRecord>> filtered = new HashMap<>(byPerson);
+                    filtered.keySet().removeAll(adminIds);
+                    return filtered;
+                });
+    }
+
+    /** วันนี้ตรงกับ cron ของการแจ้ง admin หรือไม่ */
+    private boolean isAdminNotifyDay() {
+        try {
+            LocalDate today = LocalDate.now(ZONE);
+            ZonedDateTime next = CronExpression.parse(adminsCron).next(today.atStartOfDay(ZONE).minusSeconds(1));
+            return next != null && next.toLocalDate().equals(today);
+        } catch (IllegalArgumentException e) {
+            log.warn("[ADMIN] invalid admins cron '{}' — admins will also get role-based messages: {}", adminsCron, e.getMessage());
+            return false;
+        }
     }
 
     private RoleType toRoleType(Role role) {
@@ -470,9 +531,10 @@ public class CalibrationScheduler {
                     SendStats stats = new SendStats();
                     LocalDate today = LocalDate.now(ZONE);
 
-                    return Mono.when(
-                                    sendEmails(members, byPerson, role, today, stats),
-                                    sendLarkMessages(members, byPerson, role, today, stats))
+                    return resolveResponsibleNames(byPerson, role)
+                            .flatMap(responsible -> Mono.when(
+                                    sendEmails(members, byPerson, role, today, stats, responsible),
+                                    sendLarkMessages(members, byPerson, role, today, stats, responsible)))
                             .doFinally(signal -> log.info(
                                     "[SEND][{}] SUMMARY members={} | email ok={} fail={} skip={} | lark cards ok={} fail={} | lark members skip={}",
                                     role, members.size(),
@@ -487,7 +549,8 @@ public class CalibrationScheduler {
                                   Map<Long, List<CalibrationRecord>> byPerson,
                                   Role role,
                                   LocalDate today,
-                                  SendStats stats) {
+                                  SendStats stats,
+                                  Map<Long, String> responsible) {
         String subject = "Calibration Due Date Reminder - " + today.format(DateTimeFormatter.ISO_DATE);
 
         return Flux.fromIterable(members)
@@ -501,7 +564,7 @@ public class CalibrationScheduler {
                         return Mono.empty();
                     }
 
-                    String content = buildEmailContent(records, today);
+                    String content = buildEmailContent(records, today, responsible);
 
                     return emailService.sendReminder(member.getEmail(), subject, content)
                             .retryWhen(retrySpec("email memberId=" + member.getId()))
@@ -526,7 +589,8 @@ public class CalibrationScheduler {
                                         Map<Long, List<CalibrationRecord>> byPerson,
                                         Role role,
                                         LocalDate today,
-                                        SendStats stats) {
+                                        SendStats stats,
+                                        Map<Long, String> responsible) {
 
         // key = เบอร์แบบตัวเลขล้วน (ใช้เทียบกับผลจาก Lark), เบอร์เดียวอาจมีหลาย member
         Map<String, List<Long>> memberIdsByMobileKey = new LinkedHashMap<>();
@@ -583,20 +647,21 @@ public class CalibrationScheduler {
                                         + "(check app availability scope / mobile in Lark directory) — skipped", role, memberId);
                                 return Mono.empty();
                             }
-                            return sendLarkCards(openId, memberId, byPerson.get(memberId), role, today, stats);
+                            return sendLarkCards(openId, memberId, byPerson.get(memberId), role, today, stats, responsible);
                         }, SEND_CONCURRENCY)
                         .then());
     }
 
     private Mono<Void> sendLarkCards(String openId, Long memberId, List<CalibrationRecord> records,
-                                     Role role, LocalDate today, SendStats stats) {
+                                     Role role, LocalDate today, SendStats stats,
+                                     Map<Long, String> responsible) {
         List<List<CalibrationRecord>> pages = partition(records, MAX_RECORDS_PER_CARD);
         int totalPages = pages.size();
 
         return Flux.range(0, totalPages)
                 .concatMap(i -> {
                     int page = i + 1;
-                    String card = buildLarkCard(pages.get(i), role, page, totalPages, records.size(), today);
+                    String card = buildLarkCard(pages.get(i), role, page, totalPages, records.size(), today, responsible);
                     // uuid คงที่ต่อ (วัน, role, member, หน้า) → retry หลัง timeout จะไม่ส่งซ้ำ
                     String dedupeKey = idempotencyKey(today, role, memberId, page);
 
@@ -618,17 +683,63 @@ public class CalibrationScheduler {
     }
 
     // ======================================================================
+    // ผู้รับผิดชอบของแต่ละรายการ (แสดงใน Email / Lark)
+    // Calibration: machine.responsible_person_name ของเครื่องนั้น
+    // ======================================================================
+
+    /** คืน map: calibration record id → ชื่อผู้รับผิดชอบ */
+    private Mono<Map<Long, String>> resolveResponsibleNames(Map<Long, List<CalibrationRecord>> byPerson, Role role) {
+        Map<Long, CalibrationRecord> recordsById = distinctRecords(byPerson);
+        Set<String> codes = recordsById.values().stream()
+                .map(CalibrationRecord::getMachineCode)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (codes.isEmpty()) return Mono.just(new HashMap<>());
+
+        return template.select(Query.query(Criteria.where("machine_code").in(codes)), Machine.class)
+                .filter(m -> m.getMachineCode() != null
+                        && m.getResponsiblePersonName() != null && !m.getResponsiblePersonName().isBlank())
+                .collectMap(Machine::getMachineCode, m -> m.getResponsiblePersonName().trim())
+                .map(nameByCode -> {
+                    Map<Long, String> out = new HashMap<>();
+                    recordsById.forEach((id, r) -> {
+                        String name = nameByCode.get(r.getMachineCode());
+                        if (name != null) out.put(id, name);
+                    });
+                    return out;
+                })
+                .onErrorResume(e -> {
+                    log.warn("[SEND][{}] Cannot load responsible names — sending without them: {}", role, e.getMessage());
+                    return Mono.just(new HashMap<>());
+                });
+    }
+
+    private Map<Long, CalibrationRecord> distinctRecords(Map<Long, List<CalibrationRecord>> byPerson) {
+        Map<Long, CalibrationRecord> out = new LinkedHashMap<>();
+        byPerson.values().forEach(list -> list.forEach(r -> {
+            if (r.getId() != null) out.putIfAbsent(r.getId(), r);
+        }));
+        return out;
+    }
+
+    private String responsibleOf(CalibrationRecord r, Map<Long, String> responsible) {
+        if (r.getId() == null) return "-";
+        String name = responsible.get(r.getId());
+        return (name == null || name.isBlank()) ? "-" : name;
+    }
+
+    // ======================================================================
     // Content builders
     // ======================================================================
 
-    private String buildEmailContent(List<CalibrationRecord> records, LocalDate today) {
+    private String buildEmailContent(List<CalibrationRecord> records, LocalDate today, Map<Long, String> responsible) {
         StringBuilder html = new StringBuilder();
         html.append("<html><body>")
                 .append("<h2>Calibration Due Date Reminder</h2>")
                 .append("<p>The following calibrations are due within the next ").append(DUE_WITHIN_DAYS).append(" days:</p>")
                 .append("<table border='1' cellpadding='10' cellspacing='0' style='border-collapse: collapse;'>")
                 .append("<thead><tr style='background-color: #f2f2f2;'>")
-                .append("<th>Machine Code</th><th>Machine Name</th><th>Due Date</th><th>Days Remaining</th>")
+                .append("<th>Machine Code</th><th>Machine Name</th><th>Responsible Person</th><th>Due Date</th><th>Days Remaining</th>")
                 .append("</tr></thead><tbody>");
 
         for (CalibrationRecord r : records) {
@@ -636,6 +747,7 @@ public class CalibrationScheduler {
             html.append("<tr>")
                     .append("<td>").append(escapeHtml(r.getMachineCode())).append("</td>")
                     .append("<td>").append(escapeHtml(r.getMachineName())).append("</td>")
+                    .append("<td>").append(escapeHtml(responsibleOf(r, responsible))).append("</td>")
                     .append("<td>").append(r.getDueDate().format(FMT)).append("</td>")
                     .append("<td>").append(s.emoji()).append(' ').append(escapeHtml(s.label())).append("</td>")
                     .append("</tr>");
@@ -652,7 +764,8 @@ public class CalibrationScheduler {
     }
 
     private String buildLarkCard(List<CalibrationRecord> records, Role role,
-                                 int page, int totalPages, int totalCount, LocalDate today) {
+                                 int page, int totalPages, int totalCount, LocalDate today,
+                                 Map<Long, String> responsible) {
 
         String title = totalPages > 1
                 ? role.cardTitle + " (" + page + "/" + totalPages + ")"
@@ -664,6 +777,7 @@ public class CalibrationScheduler {
         for (CalibrationRecord r : records) {
             DueStatus s = dueStatus(r.getDueDate(), today);
             String content = "**" + nullToDash(r.getMachineCode()) + " - " + nullToDash(r.getMachineName()) + "**\n"
+                    + "👤 ผู้รับผิดชอบ: " + responsibleOf(r, responsible) + "\n"
                     + "<font color='" + s.color() + "'>Due: " + r.getDueDate().format(FMT) + " (" + s.label() + ")</font>";
             rows.add("{\"tag\":\"column_set\",\"flex_mode\":\"none\",\"background_style\":\"grey\","
                     + "\"columns\":[{\"tag\":\"column\",\"width\":\"weighted\",\"weight\":1,"
