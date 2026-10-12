@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS machine_type (
     machine_type_id VARCHAR(2),
     machine_type_name VARCHAR(200),
     status VARCHAR(25),
+    is_maintenance BOOLEAN,
+    is_calibration BOOLEAN,
     created_by BIGINT,
     updated_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

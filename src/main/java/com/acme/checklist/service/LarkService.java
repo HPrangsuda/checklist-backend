@@ -10,9 +10,11 @@ import com.lark.oapi.service.contact.v3.model.BatchGetIdUserResp;
 import com.lark.oapi.service.im.v1.model.*;
 import com.lark.oapi.service.bitable.v1.model.*;
 import jakarta.annotation.PostConstruct;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -23,13 +25,16 @@ import java.util.*;
 @Service
 public class LarkService {
 
+    /** จำนวนเบอร์สูงสุดต่อ 1 request ของ contact batchGetId */
+    public static final int MAX_MOBILES_PER_REQUEST = 50;
+
+    private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
+
     @Value("${lark.app-id}")
     private String appId;
 
     @Value("${lark.app-secret}")
     private String appSecret;
-
-    private Client client;
 
     @Value("${lark.base-app-token}")
     private String appToken;
@@ -40,17 +45,37 @@ public class LarkService {
     @Value("${lark.department-table-id}")
     private String departmentTableId;
 
+    private Client client;
+
     @PostConstruct
     public void init() {
         this.client = Client.newBuilder(appId, appSecret).build();
     }
 
-    // ==================== Messaging ====================
+    // ======================================================================
+    // Messaging
+    // ======================================================================
 
+    /**
+     * แปลงเบอร์โทร → open_id
+     * คืน map ของ (เบอร์ตามที่ Lark ส่งกลับ → open_id) เฉพาะเบอร์ที่หาเจอ
+     * เบอร์ที่ไม่อยู่ใน Lark directory หรืออยู่นอก availability scope ของแอปจะไม่อยู่ใน map
+     */
     public Mono<Map<String, String>> batchGetOpenIdsByMobile(List<String> mobiles) {
-        return Mono.fromCallable(() -> {
-                    log.info("=== Lark batchGetId mobiles input: {} ===", mobiles);
+        if (mobiles == null || mobiles.isEmpty()) {
+            return Mono.just(Map.of());
+        }
 
+        // เกิน limit → แบ่งเป็นหลาย request เรียงกัน
+        if (mobiles.size() > MAX_MOBILES_PER_REQUEST) {
+            return Flux.fromIterable(mobiles)
+                    .buffer(MAX_MOBILES_PER_REQUEST)
+                    .concatMap(this::batchGetOpenIdsByMobile)
+                    .collect(() -> new HashMap<String, String>(), Map::putAll)
+                    .map(Collections::unmodifiableMap);
+        }
+
+        return Mono.fromCallable(() -> {
                     BatchGetIdUserReq req = BatchGetIdUserReq.newBuilder()
                             .userIdType("open_id")
                             .batchGetIdUserReqBody(BatchGetIdUserReqBody.newBuilder()
@@ -62,99 +87,124 @@ public class LarkService {
                             .batchGetId(req, RequestOptions.newBuilder().build());
 
                     if (!resp.success()) {
-                        log.error("Lark batchGetId failed: code={}, msg={}", resp.getCode(), resp.getMsg());
-                        throw new RuntimeException("Lark batchGetId error: " + resp.getMsg());
+                        throw new LarkApiException("contact.user.batchGetId",
+                                resp.getCode(), resp.getMsg(), resp.getRequestId());
                     }
 
                     Map<String, String> result = new HashMap<>();
                     if (resp.getData() != null && resp.getData().getUserList() != null) {
                         Arrays.stream(resp.getData().getUserList()).forEach(user -> {
-                            log.info("  → mobile={}, open_id={}", user.getMobile(), user.getUserId());
                             if (user.getMobile() != null && user.getUserId() != null) {
                                 result.put(user.getMobile(), user.getUserId());
+                            } else {
+                                log.debug("[LARK] mobile={} not resolved", maskMobile(user.getMobile()));
                             }
                         });
                     }
 
-                    log.info("Resolved {} open_ids from {} mobiles", result.size(), mobiles.size());
+                    if (result.size() < mobiles.size()) {
+                        log.warn("[LARK] batchGetId resolved {}/{} mobiles — the rest are not in Lark "
+                                + "or outside the app's availability scope", result.size(), mobiles.size());
+                    } else {
+                        log.info("[LARK] batchGetId resolved {}/{} mobiles", result.size(), mobiles.size());
+                    }
                     return result;
                 })
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
     public Mono<Void> sendCardMessage(String openId, String cardJson) {
+        return sendCardMessage(openId, cardJson, null);
+    }
+
+    /**
+     * ส่งการ์ดข้อความ
+     * @param uuid idempotency key (≤50 ตัวอักษร) — ส่ง uuid เดิมซ้ำภายใน 1 ชม. Lark จะไม่ส่งข้อความซ้ำ
+     *             ช่วยกันข้อความเบิ้ลตอน retry หลัง timeout; ส่ง null ได้ถ้าไม่ต้องการ
+     */
+    public Mono<Void> sendCardMessage(String openId, String cardJson, String uuid) {
         return Mono.fromCallable(() -> {
+                    if (openId == null || openId.isBlank()) {
+                        throw new IllegalArgumentException("openId is blank");
+                    }
+                    if (cardJson == null || cardJson.isBlank()) {
+                        throw new IllegalArgumentException("cardJson is blank");
+                    }
+
+                    CreateMessageReqBody.Builder body = CreateMessageReqBody.newBuilder()
+                            .receiveId(openId)
+                            .msgType("interactive")
+                            .content(cardJson);
+                    if (uuid != null && !uuid.isBlank()) {
+                        body.uuid(uuid);
+                    }
+
                     CreateMessageReq req = CreateMessageReq.newBuilder()
                             .receiveIdType("open_id")
-                            .createMessageReqBody(CreateMessageReqBody.newBuilder()
-                                    .receiveId(openId)
-                                    .msgType("interactive")
-                                    .content(cardJson)
-                                    .build())
+                            .createMessageReqBody(body.build())
                             .build();
 
                     CreateMessageResp resp = client.im().message().create(req);
 
                     if (!resp.success()) {
-                        throw new RuntimeException("Lark API error: " + resp.getMsg());
+                        throw new LarkApiException("im.message.create",
+                                resp.getCode(), resp.getMsg(), resp.getRequestId());
                     }
-
                     return resp;
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .then();
     }
 
-    // ── Machine notification ───────────────────────────────────────────────────
+    // ── Machine notification ─────────────────────────────────────────────
 
     public Mono<Void> sendMachineNotification(String openId, Machine machine) {
-        String cardJson = buildMachineCardJson(machine);
-        return sendCardMessage(openId, cardJson);
+        return sendCardMessage(openId, buildMachineCardJson(machine));
     }
 
     private String buildMachineCardJson(Machine machine) {
-        String machineCode     = machine.getMachineCode()           != null ? machine.getMachineCode()           : "-";
-        String machineName     = machine.getMachineName()           != null ? machine.getMachineName()           : "-";
-        String responsibleName = machine.getResponsiblePersonName() != null ? machine.getResponsiblePersonName() : "-";
+        String machineCode     = escapeJson(orDash(machine.getMachineCode()));
+        String machineName     = escapeJson(orDash(machine.getMachineName()));
+        String responsibleName = escapeJson(orDash(machine.getResponsiblePersonName()));
 
-        return String.format(
-                "{"
-                        + "\"config\":{\"wide_screen_mode\":true},"
-                        + "\"header\":{"
-                        +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"เพิ่มเครื่องจักรใหม่\"},"
-                        +   "\"template\":\"blue\""
-                        + "},"
-                        + "\"elements\":["
-                        +   "{\"tag\":\"div\",\"fields\":["
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n%s\"}},"
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n%s\"}}"
-                        +   "]},"
-                        +   "{\"tag\":\"div\",\"fields\":["
-                        +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n%s\"}}"
-                        +   "]}"
-                        + "]}",
-                machineCode, machineName, responsibleName);
+        return "{"
+                + "\"config\":{\"wide_screen_mode\":true},"
+                + "\"header\":{"
+                +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"เพิ่มเครื่องจักรใหม่\"},"
+                +   "\"template\":\"blue\""
+                + "},"
+                + "\"elements\":["
+                +   "{\"tag\":\"div\",\"fields\":["
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**รหัสเครื่องจักร**\\n" + machineCode + "\"}},"
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n" + machineName + "\"}}"
+                +   "]},"
+                +   "{\"tag\":\"div\",\"fields\":["
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n" + responsibleName + "\"}}"
+                +   "]}"
+                + "]}";
     }
 
-    // ==================== Machine Bitable ====================
+    // ======================================================================
+    // Machine Bitable
+    // ======================================================================
 
     public void updateRecord(String recordId, Map<String, Object> fields) throws Exception {
         UpdateAppTableRecordReq req = UpdateAppTableRecordReq.newBuilder()
                 .appToken(appToken)
                 .tableId(tableId)
                 .recordId(recordId)
-                .appTableRecord(AppTableRecord.newBuilder()
-                        .fields(fields)
-                        .build())
+                .appTableRecord(AppTableRecord.newBuilder().fields(fields).build())
                 .build();
 
         UpdateAppTableRecordResp resp = client.bitable().appTableRecord().update(req);
-        if (!resp.success()) throw new RuntimeException("Update failed: " + resp.getMsg());
+        if (!resp.success()) {
+            throw new LarkApiException("bitable.machine.update", resp.getCode(), resp.getMsg(), resp.getRequestId());
+        }
     }
 
     public Mono<Void> upsertMachineRecord(Machine machine) {
         return Mono.fromCallable(() -> {
-                    log.info("=== upsert machine id={} code={} ===", machine.getId(), machine.getMachineCode());
+                    log.info("[LARK][BASE] upsert machine id={} code={}", machine.getId(), machine.getMachineCode());
 
                     Map<String, Object> fields = new HashMap<>();
                     fields.put("app id",            String.valueOf(machine.getId()));
@@ -173,7 +223,7 @@ public class LarkService {
                     fields.put("หมายเหตุ",         nullSafe(machine.getNote()));
                     if (machine.getRegisterDate() != null) {
                         long timestamp = machine.getRegisterDate()
-                                .atStartOfDay(ZoneId.of("Asia/Bangkok"))
+                                .atStartOfDay(ZONE)
                                 .toInstant()
                                 .toEpochMilli();
                         fields.put("วันที่ลงทะเบียน", timestamp);
@@ -181,65 +231,40 @@ public class LarkService {
 
                     String recordId = findRecordIdByMachineId(String.valueOf(machine.getId()));
 
-                    log.info("=== recordId found: {} ===", recordId);
-
                     if (recordId != null) {
                         updateRecord(recordId, fields);
-                        log.info("Updated machine {} (id={}) in Lark Base", machine.getMachineCode(), machine.getId());
+                        log.info("[LARK][BASE] Updated machine {} (id={})", machine.getMachineCode(), machine.getId());
                     } else {
                         CreateAppTableRecordReq req = CreateAppTableRecordReq.newBuilder()
                                 .appToken(appToken)
                                 .tableId(tableId)
-                                .appTableRecord(AppTableRecord.newBuilder()
-                                        .fields(fields)
-                                        .build())
+                                .appTableRecord(AppTableRecord.newBuilder().fields(fields).build())
                                 .build();
                         CreateAppTableRecordResp resp = client.bitable().appTableRecord().create(req);
                         if (!resp.success()) {
-                            log.error("Failed machine {} (id={}): code={} msg={}",
-                                    machine.getMachineCode(), machine.getId(), resp.getCode(), resp.getMsg());
-                            return null;
+                            // เดิม log แล้ว return เงียบ → ตอนนี้ throw ให้ caller รู้ว่าไม่สำเร็จ
+                            throw new LarkApiException("bitable.machine.create",
+                                    resp.getCode(), resp.getMsg(), resp.getRequestId());
                         }
-                        log.info("Created machine {} (id={}) in Lark Base", machine.getMachineCode(), machine.getId());
+                        log.info("[LARK][BASE] Created machine {} (id={})", machine.getMachineCode(), machine.getId());
                     }
-                    return null;
+                    return Boolean.TRUE;
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .then();
     }
 
     public String findRecordIdByMachineId(String machineId) throws Exception {
-        SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
-                .appToken(appToken)
-                .tableId(tableId)
-                .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
-                        .fieldNames(new String[]{"app id"})
-                        .filter(FilterInfo.newBuilder()
-                                .conjunction("and")
-                                .conditions(new Condition[]{
-                                        Condition.newBuilder()
-                                                .fieldName("app id")
-                                                .operator("is")
-                                                .value(new String[]{machineId})
-                                                .build()
-                                })
-                                .build())
-                        .build())
-                .build();
-
-        SearchAppTableRecordResp resp = client.bitable().appTableRecord().search(req);
-        if (!resp.success()) throw new RuntimeException("Search failed: " + resp.getMsg());
-
-        AppTableRecord[] items = resp.getData().getItems();
-        if (items == null || items.length == 0) return null;
-        return items[0].getRecordId();
+        return findRecordId(tableId, "app id", machineId, "bitable.machine.search");
     }
 
-    // ==================== Department Bitable ====================
+    // ======================================================================
+    // Department Bitable
+    // ======================================================================
 
     public Mono<Void> upsertDepartmentRecord(Department department) {
         return Mono.fromCallable(() -> {
-                    log.info("=== upsert department id={} name={} ===", department.getId(), department.getDepartment());
+                    log.info("[LARK][BASE] upsert department id={} name={}", department.getId(), department.getDepartment());
 
                     Map<String, Object> fields = new HashMap<>();
                     fields.put("id",             String.valueOf(department.getId()));
@@ -250,60 +275,31 @@ public class LarkService {
                     fields.put("status",         nullSafe(department.getStatus()));
 
                     String recordId = findRecordIdByDepartmentId(String.valueOf(department.getId()));
-                    log.info("=== department recordId found: {} ===", recordId);
 
                     if (recordId != null) {
                         updateDepartmentRecord(recordId, fields);
-                        log.info("Updated department {} (id={}) in Lark Base",
-                                department.getDepartment(), department.getId());
+                        log.info("[LARK][BASE] Updated department {} (id={})", department.getDepartment(), department.getId());
                     } else {
                         CreateAppTableRecordReq req = CreateAppTableRecordReq.newBuilder()
                                 .appToken(appToken)
                                 .tableId(departmentTableId)
-                                .appTableRecord(AppTableRecord.newBuilder()
-                                        .fields(fields)
-                                        .build())
+                                .appTableRecord(AppTableRecord.newBuilder().fields(fields).build())
                                 .build();
                         CreateAppTableRecordResp resp = client.bitable().appTableRecord().create(req);
                         if (!resp.success()) {
-                            log.error("Failed department {} (id={}): code={} msg={}",
-                                    department.getDepartment(), department.getId(), resp.getCode(), resp.getMsg());
-                            return null;
+                            throw new LarkApiException("bitable.department.create",
+                                    resp.getCode(), resp.getMsg(), resp.getRequestId());
                         }
-                        log.info("Created department {} (id={}) in Lark Base",
-                                department.getDepartment(), department.getId());
+                        log.info("[LARK][BASE] Created department {} (id={})", department.getDepartment(), department.getId());
                     }
-                    return null;
+                    return Boolean.TRUE;
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .then();
     }
 
     public String findRecordIdByDepartmentId(String departmentId) throws Exception {
-        SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
-                .appToken(appToken)
-                .tableId(departmentTableId)
-                .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
-                        .fieldNames(new String[]{"id"})
-                        .filter(FilterInfo.newBuilder()
-                                .conjunction("and")
-                                .conditions(new Condition[]{
-                                        Condition.newBuilder()
-                                                .fieldName("id")
-                                                .operator("is")
-                                                .value(new String[]{departmentId})
-                                                .build()
-                                })
-                                .build())
-                        .build())
-                .build();
-
-        SearchAppTableRecordResp resp = client.bitable().appTableRecord().search(req);
-        if (!resp.success()) throw new RuntimeException("Search department failed: " + resp.getMsg());
-
-        AppTableRecord[] items = resp.getData().getItems();
-        if (items == null || items.length == 0) return null;
-        return items[0].getRecordId();
+        return findRecordId(departmentTableId, "id", departmentId, "bitable.department.search");
     }
 
     public void updateDepartmentRecord(String recordId, Map<String, Object> fields) throws Exception {
@@ -311,18 +307,111 @@ public class LarkService {
                 .appToken(appToken)
                 .tableId(departmentTableId)
                 .recordId(recordId)
-                .appTableRecord(AppTableRecord.newBuilder()
-                        .fields(fields)
-                        .build())
+                .appTableRecord(AppTableRecord.newBuilder().fields(fields).build())
                 .build();
 
         UpdateAppTableRecordResp resp = client.bitable().appTableRecord().update(req);
-        if (!resp.success()) throw new RuntimeException("Update department failed: " + resp.getMsg());
+        if (!resp.success()) {
+            throw new LarkApiException("bitable.department.update", resp.getCode(), resp.getMsg(), resp.getRequestId());
+        }
     }
 
-    // ==================== Helper ====================
+    // ======================================================================
+    // Shared Bitable helper
+    // ======================================================================
+
+    private String findRecordId(String table, String fieldName, String value, String operation) throws Exception {
+        SearchAppTableRecordReq req = SearchAppTableRecordReq.newBuilder()
+                .appToken(appToken)
+                .tableId(table)
+                .searchAppTableRecordReqBody(SearchAppTableRecordReqBody.newBuilder()
+                        .fieldNames(new String[]{fieldName})
+                        .filter(FilterInfo.newBuilder()
+                                .conjunction("and")
+                                .conditions(new Condition[]{
+                                        Condition.newBuilder()
+                                                .fieldName(fieldName)
+                                                .operator("is")
+                                                .value(new String[]{value})
+                                                .build()
+                                })
+                                .build())
+                        .build())
+                .build();
+
+        SearchAppTableRecordResp resp = client.bitable().appTableRecord().search(req);
+        if (!resp.success()) {
+            throw new LarkApiException(operation, resp.getCode(), resp.getMsg(), resp.getRequestId());
+        }
+
+        if (resp.getData() == null) return null;
+        AppTableRecord[] items = resp.getData().getItems();
+        if (items == null || items.length == 0) return null;
+        if (items.length > 1) {
+            log.warn("[LARK][BASE] {} found {} records for {}={} — using the first one",
+                    operation, items.length, fieldName, value);
+        }
+        return items[0].getRecordId();
+    }
+
+    // ======================================================================
+    // Helpers
+    // ======================================================================
 
     private String nullSafe(String value) {
         return value != null ? value : "";
+    }
+
+    private String orDash(String value) {
+        return (value == null || value.isBlank()) ? "-" : value;
+    }
+
+    /** escape ครบตามสเปก JSON (รวม newline / tab / control chars) */
+    private String escapeJson(String text) {
+        if (text == null) return "";
+        StringBuilder sb = new StringBuilder(text.length() + 16);
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                default -> {
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** +66812345678 → +66****678 (ไม่ให้เบอร์เต็มหลุดลง log) */
+    private String maskMobile(String mobile) {
+        if (mobile == null) return "null";
+        if (mobile.length() <= 6) return "***";
+        return mobile.substring(0, 3) + "****" + mobile.substring(mobile.length() - 3);
+    }
+
+    // ======================================================================
+    // Exception
+    // ======================================================================
+
+    /** error จาก Lark API พร้อม code และ requestId (ใช้แจ้ง Lark support ได้) */
+    @Getter
+    public static class LarkApiException extends RuntimeException {
+        private final String operation;
+        private final int code;
+        private final String requestId;
+
+        public LarkApiException(String operation, int code, String msg, String requestId) {
+            super("Lark " + operation + " failed: code=" + code + ", msg=" + msg + ", requestId=" + requestId);
+            this.operation = operation;
+            this.code = code;
+            this.requestId = requestId;
+        }
     }
 }

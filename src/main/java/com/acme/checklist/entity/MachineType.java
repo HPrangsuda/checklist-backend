@@ -30,4 +30,10 @@ public class MachineType extends DataAudit {
 
     @Column("status")
     private String status;
+
+    @Column("is_maintenance")
+    private Boolean isMaintenance;
+
+    @Column("is_calibration")
+    private Boolean isCalibration;
 }
