@@ -7,73 +7,85 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 
 @Data
 @Builder
-@AllArgsConstructor
 @NoArgsConstructor
+@AllArgsConstructor
 public class CalibrationResponseDTO {
-    private Long      id;
-    private String    machineCode;
-    private String    machineName;
-    private String   years;
+
+    public static final String STATUS_ON_TIME = "On Time";
+    public static final String STATUS_OVERDUE = "Overdue";
+    public static final String STATUS_PENDING = "Pending";
+
+    private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
+
+    private Long id;
+    private String machineCode;
+    private String machineName;
+    private String years;
+
     private LocalDate dueDate;
     private LocalDate startDate;
     private LocalDate certificateDate;
-    private String    results;
-    private String    criteria;
-    private String    measuringRange;
-    private String    accuracy;
-    private String    calibrationRange;
-    private String    calibrationStatus;
-    private String    attachment;
-    private String    note;
-    private String    permissibleCapacity;
-    private String    comment;
-    private String    resolution;
-    private String    maxUncertainty;
-    private String    mpe;
-    private String    checkMpe;
-    private String    checkResolution;
-    private String    checkResult;
-    private String    reasonNotPass;
-    private String    responsibleMaintenanceName;  // ★ machine.responsible_person_name
-    private String    machineDepartmentCode;        // ★ machine.department
-    private String    machineDepartmentName;        // ★ department.department
 
-    public static CalibrationResponseDTO from(CalibrationRecord r) {
-        if (r == null) return null;
+    private String mpe;
+    private String internalMpe;
+    private String maxRepeatability;
+    private String resolution;
+    private String minCapacity;
+    private String maxCapacity;
+    private String mpeRefer;
+    private String referStandard;
+    private String calibrationBy;
+    private String result;
+    private String correctionFactor;
+    private String measurementRange;
+    private String remark;
+    private String attachment;
+
+    private Boolean isCanceled;
+    private LocalDate canceledAt;
+
+    private String calibrationStatus;
+
+    private String responsibleMaintenanceName;
+    private String machineDepartmentCode;
+    private String machineDepartmentName;
+
+    public static CalibrationResponseDTO from(CalibrationRecord c) {
         return CalibrationResponseDTO.builder()
-                .id(r.getId())
-                .machineCode(r.getMachineCode())
-                .machineName(r.getMachineName())
-                .years(r.getYears())
-                .dueDate(r.getDueDate())
-                .startDate(r.getStartDate())
-                .certificateDate(r.getCertificateDate())
-                .results(r.getResults())
-                .criteria(r.getCriteria())
-                .measuringRange(r.getMeasuringRange())
-                .accuracy(r.getAccuracy())
-                .calibrationRange(r.getCalibrationRange())
-                .calibrationStatus(r.getCalibrationStatus())
-                .attachment(r.getAttachment())
-                .note(r.getNote())
-                .permissibleCapacity(r.getPermissibleCapacity())
-                .comment(r.getComment())
-                .resolution(r.getResolution())
-                .maxUncertainty(r.getMaxUncertainty())
-                .mpe(r.getMpe())
-                .checkMpe(r.getCheckMpe())
-                .checkResolution(r.getCheckResolution())
-                .checkResult(r.getCheckResult())
-                .reasonNotPass(r.getReasonNotPass())
+                .id(c.getId())
+                .machineCode(c.getMachineCode())
+                .machineName(c.getMachineName())
+                .years(c.getYears())
+                .dueDate(c.getDueDate())
+                .startDate(c.getStartDate())
+                .certificateDate(c.getCertificateDate())
+                .mpe(c.getMpe())
+                .internalMpe(c.getInternalMpe())
+                .maxRepeatability(c.getMaxRepeatability())
+                .resolution(c.getResolution())
+                .minCapacity(c.getMinCapacity())
+                .maxCapacity(c.getMaxCapacity())
+                .mpeRefer(c.getMpeRefer())
+                .referStandard(c.getReferStandard())
+                .calibrationBy(c.getCalibrationBy())
+                .result(c.getResult())
+                .correctionFactor(c.getCorrectionFactor())
+                .measurementRange(c.getMeasurementRange())
+                .remark(c.getRemark())
+                .attachment(c.getAttachment())
+                .isCanceled(c.getIsCanceled())
+                .canceledAt(c.getCanceledAt())
+                .calibrationStatus(statusOf(c.getDueDate(), c.getCertificateDate()))
                 .build();
     }
 
-    public static CalibrationResponseDTO from(CalibrationRecord r, String responsibleName) {
-        CalibrationResponseDTO dto = from(r);
-        if (dto != null) dto.setResponsibleMaintenanceName(responsibleName);
-        return dto;
+    public static String statusOf(LocalDate due, LocalDate cert) {
+        if (due == null) return null;
+        if (cert != null) return cert.isAfter(due) ? STATUS_OVERDUE : STATUS_ON_TIME;
+        return due.isBefore(LocalDate.now(ZONE)) ? STATUS_OVERDUE : STATUS_PENDING;
     }
 }

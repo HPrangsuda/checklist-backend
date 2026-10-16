@@ -36,56 +36,47 @@ public class CalibrationRecord extends DataAudit {
     @Column("certificate_date")
     private LocalDate certificateDate;
 
-    @Column("results")
-    private String results;
+    @Column("mpe")
+    private String mpe;
 
-    @Column("criteria")
-    private String criteria;
+    @Column("internal_mpe")
+    private String internalMpe;
 
-    @Column("measuring_range")
-    private String measuringRange;
-
-    @Column("accuracy")
-    private String accuracy;
-
-    @Column("calibration_range")
-    private String calibrationRange;
-
-    @Column("calibration_status")
-    private String calibrationStatus;
-
-    @Column("attachment")
-    private String attachment;
-
-    @Column("note")
-    private String note;
-
-    @Column("permissible_capacity")
-    private String permissibleCapacity;
-
-    @Column("comment")
-    private String comment;
+    @Column("max_repeatability")
+    private String maxRepeatability;
 
     @Column("resolution")
     private String resolution;
 
-    @Column("max_uncertainty")
-    private String maxUncertainty;
+    @Column("min_capacity")
+    private String minCapacity;
 
-    @Column("mpe")
-    private String mpe;
+    @Column("max_capacity")
+    private String maxCapacity;
 
-    @Column("check_mpe")
-    private String checkMpe;
+    @Column("mpe_refer")
+    private String mpeRefer;
 
-    @Column("check_resolution")
-    private String checkResolution;
+    @Column("refer_standard")
+    private String referStandard;
 
-    @Column("check_result")
-    private String checkResult;
+    @Column("calibration_by")
+    private String calibrationBy;
 
-    @Column("reason_not_pass")
-    private String reasonNotPass;
+    @Column("result")
+    private String result;
+
+    @Column("correction_factor")
+    private String correctionFactor;
+
+    @Column("measurement_range")
+    private String measurementRange;
+
+    @Column("remark")
+    private String remark;
+
+    @Column("attachment")
+    private String attachment;
 
     @Column("is_canceled")
     private Boolean isCanceled = false;

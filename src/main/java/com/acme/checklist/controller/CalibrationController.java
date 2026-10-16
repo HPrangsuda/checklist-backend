@@ -30,11 +30,11 @@ public class CalibrationController {
             @RequestParam(required = false) String  keyword,
             @RequestParam(required = false) Integer year,
             @RequestParam(required = false) String  department,
-            @RequestParam(required = false) String  results,
+            @RequestParam(required = false) String  result,
             @RequestParam(required = false) String  calibrationStatus,
             @RequestParam(defaultValue = "0")  int index,
             @RequestParam(defaultValue = "10") int size) {
-        return calibrationService.getPage(keyword, year, department, results, calibrationStatus, index, size);
+        return calibrationService.getPage(keyword, year, department, result, calibrationStatus, index, size);
     }
 
     @GetMapping("/filter-options")

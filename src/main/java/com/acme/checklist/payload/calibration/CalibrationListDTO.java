@@ -20,8 +20,10 @@ public class CalibrationListDTO {
     private LocalDate dueDate;
     private LocalDate startDate;
     private LocalDate certificateDate;
-    private String    results;
+    private String    result;
+    /** ไม่ได้เก็บใน DB แล้ว — คำนวณจาก due date + certificate date (On Time / Overdue / Pending) */
     private String    calibrationStatus;
+    private Boolean   isCanceled;
 
     public static CalibrationListDTO from(CalibrationRecord r) {
         if (r == null) return null;
@@ -33,8 +35,9 @@ public class CalibrationListDTO {
                 .dueDate(r.getDueDate())
                 .startDate(r.getStartDate())
                 .certificateDate(r.getCertificateDate())
-                .results(r.getResults())
-                .calibrationStatus(r.getCalibrationStatus())
+                .result(r.getResult())
+                .calibrationStatus(CalibrationResponseDTO.statusOf(r.getDueDate(), r.getCertificateDate()))
+                .isCanceled(r.getIsCanceled())
                 .build();
     }
 }

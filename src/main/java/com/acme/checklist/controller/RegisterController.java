@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -28,6 +29,11 @@ public class RegisterController {
     @PutMapping("/update")
     public Mono<ApiResponse<Void>> update(@RequestBody RegisterDTO dto) {
         return registerService.update(dto);
+    }
+
+    @PutMapping("/{id}/reject")
+    public Mono<ApiResponse<Void>> reject(@PathVariable Long id, @RequestBody Map<String, String> body) {
+        return registerService.reject(id, body.get("reason"));
     }
 
     @DeleteMapping("/delete")

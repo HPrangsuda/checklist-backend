@@ -31,6 +31,7 @@ import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.data.relational.core.query.Update;
 import org.springframework.data.relational.core.sql.SqlIdentifier;
+import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -87,7 +88,8 @@ public class MachineService {
 
     public Mono<ApiResponse<Map<String, Object>>> create(MachineDTO dto) {
         dto.setId(null);
-        return validateData(dto, false)
+        return ensureRegisterNotRejected(dto.getRegisterId())
+                .then(Mono.defer(() -> validateData(dto, false)))
                 .flatMap(validateDTO -> resolveDepartmentFields(validateDTO)
                         .flatMap(resolvedDTO -> {
                             Machine machine = buildFromDTO(resolvedDTO);
@@ -118,6 +120,18 @@ public class MachineService {
                     if (e instanceof NullPointerException) msg = "ข้อมูลบางส่วนเป็น null กรุณาตรวจสอบข้อมูล";
                     return Mono.just(ApiResponse.<Map<String, Object>>error("MS002", msg));
                 });
+    }
+
+    /** กันการสร้างเครื่องจักรจากรายการลงทะเบียนที่ถูก reject แล้ว */
+    private Mono<Void> ensureRegisterNotRejected(Object registerId) {
+        if (registerId == null) return Mono.empty();
+        return template.selectOne(
+                        Query.query(Criteria.where("id").is(registerId)),
+                        RegisterRequest.class)
+                .filter(reg -> RegisterService.STATUS_REJECT.equals(reg.getStatus()))
+                .flatMap(reg -> Mono.<Void>error(
+                        new ThrowException("MS022", "Register has been rejected and cannot be processed")))
+                .then();
     }
 
     private Mono<Void> createRelatedRecords(Machine machine, MachineDTO dto) {
@@ -163,24 +177,23 @@ public class MachineService {
         cal.setMachineName(machine.getMachineName());
         cal.setYears(String.valueOf(dto.getDueDate().getYear()));
         cal.setDueDate(dto.getDueDate());
+        cal.setStartDate(dto.getStartDate());
         cal.setCertificateDate(dto.getCertificateDate());
-        cal.setResults(dto.getResults());
-        cal.setCriteria(dto.getCriteria());
-        cal.setMeasuringRange(dto.getMeasuringRange());
-        cal.setAccuracy(dto.getAccuracy());
-        cal.setCalibrationRange(dto.getCalibrationRange());
-        cal.setCalibrationStatus(dto.getCalibrationStatus());
-        cal.setAttachment(dto.getAttachment());
-        cal.setNote(dto.getNote());
-        cal.setPermissibleCapacity(dto.getPermissibleCapacity());
-        cal.setComment(dto.getComment());
-        cal.setResolution(dto.getResolution());
-        cal.setMaxUncertainty(dto.getMaxUncertainty());
         cal.setMpe(dto.getMpe());
-        cal.setCheckMpe(dto.getCheckMpe());
-        cal.setCheckResolution(dto.getCheckResolution());
-        cal.setCheckResult(dto.getCheckResult());
-        cal.setReasonNotPass(dto.getReasonNotPass());
+        cal.setInternalMpe(dto.getInternalMpe());
+        cal.setMaxRepeatability(dto.getMaxRepeatability());
+        cal.setResolution(dto.getResolution());
+        cal.setMinCapacity(dto.getMinCapacity());
+        cal.setMaxCapacity(dto.getMaxCapacity());
+        cal.setMpeRefer(dto.getMpeRefer());
+        cal.setReferStandard(dto.getReferStandard());
+        cal.setCalibrationBy(dto.getCalibrationBy());
+        cal.setResult(dto.getResult());
+        cal.setCorrectionFactor(dto.getCorrectionFactor());
+        cal.setMeasurementRange(dto.getMeasurementRange());
+        cal.setRemark(dto.getRemark());
+        cal.setAttachment(dto.getAttachment());
+        cal.setIsCanceled(false);
         return commonService.save(cal, CalibrationRecord.class).then();
     }
 
@@ -307,6 +320,11 @@ public class MachineService {
                 });
     }
 
+    /**
+     * อัปเดต calibration record จากหน้าแก้ไขเครื่อง
+     * - due_date / years อัปเดตเสมอ
+     * - field อื่นอัปเดตเฉพาะที่ส่งมา (null = คงค่าเดิม) กันฟอร์มเครื่องที่ไม่มีช่องสเปกไปล้างข้อมูลที่กรอกจากหน้า calibration
+     */
     private Mono<Void> updateCalibrationRecord(String machineCode, MachineDTO dto) {
         if (dto.getCalibration() == null || dto.getCalibration().getDueDate() == null) {
             log.debug("No calibration in DTO for machine={}, skipping calibration update", machineCode);
@@ -315,34 +333,52 @@ public class MachineService {
         CalibrationDTO cal = dto.getCalibration();
 
         if (cal.getId() != null) {
-            var spec = template.getDatabaseClient()
+            DatabaseClient.GenericExecuteSpec spec = template.getDatabaseClient()
                     .sql("""
                         UPDATE calibration_record SET
-                            due_date           = $1,
-                            certificate_date   = $2,
-                            results            = $3,
-                            criteria           = $4,
-                            measuring_range    = $5,
-                            accuracy           = $6,
-                            calibration_range  = $7,
-                            calibration_status = $8,
-                            note               = $9,
-                            years              = $10
-                        WHERE id = $11 AND machine_code = $12
+                            due_date          = $1,
+                            years             = $2,
+                            start_date        = COALESCE($3,  start_date),
+                            certificate_date  = COALESCE($4,  certificate_date),
+                            mpe               = COALESCE($5,  mpe),
+                            internal_mpe      = COALESCE($6,  internal_mpe),
+                            max_repeatability = COALESCE($7,  max_repeatability),
+                            resolution        = COALESCE($8,  resolution),
+                            min_capacity      = COALESCE($9,  min_capacity),
+                            max_capacity      = COALESCE($10, max_capacity),
+                            mpe_refer         = COALESCE($11, mpe_refer),
+                            refer_standard    = COALESCE($12, refer_standard),
+                            calibration_by    = COALESCE($13, calibration_by),
+                            result            = COALESCE($14, result),
+                            correction_factor = COALESCE($15, correction_factor),
+                            measurement_range = COALESCE($16, measurement_range),
+                            remark            = COALESCE($17, remark),
+                            attachment        = COALESCE($18, attachment)
+                        WHERE id = $19 AND machine_code = $20
                     """)
-                    .bind(0, cal.getDueDate());
-            spec = cal.getCertificateDate()   != null ? spec.bind(1, cal.getCertificateDate())   : spec.bindNull(1, LocalDate.class);
-            spec = cal.getResults()           != null ? spec.bind(2, cal.getResults())           : spec.bindNull(2, String.class);
-            spec = cal.getCriteria()          != null ? spec.bind(3, cal.getCriteria())          : spec.bindNull(3, String.class);
-            spec = cal.getMeasuringRange()    != null ? spec.bind(4, cal.getMeasuringRange())    : spec.bindNull(4, String.class);
-            spec = cal.getAccuracy()          != null ? spec.bind(5, cal.getAccuracy())          : spec.bindNull(5, String.class);
-            spec = cal.getCalibrationRange()  != null ? spec.bind(6, cal.getCalibrationRange())  : spec.bindNull(6, String.class);
-            spec = cal.getCalibrationStatus() != null ? spec.bind(7, cal.getCalibrationStatus()) : spec.bindNull(7, String.class);
-            spec = cal.getNote()              != null ? spec.bind(8, cal.getNote())              : spec.bindNull(8, String.class);
+                    .bind(0, cal.getDueDate())
+                    .bind(1, String.valueOf(cal.getDueDate().getYear()));
+
+            spec = bindNullable(spec, 2,  cal.getStartDate(),        LocalDate.class);
+            spec = bindNullable(spec, 3,  cal.getCertificateDate(),  LocalDate.class);
+            spec = bindNullable(spec, 4,  cal.getMpe(),              String.class);
+            spec = bindNullable(spec, 5,  cal.getInternalMpe(),      String.class);
+            spec = bindNullable(spec, 6,  cal.getMaxRepeatability(), String.class);
+            spec = bindNullable(spec, 7,  cal.getResolution(),       String.class);
+            spec = bindNullable(spec, 8,  cal.getMinCapacity(),      String.class);
+            spec = bindNullable(spec, 9,  cal.getMaxCapacity(),      String.class);
+            spec = bindNullable(spec, 10, cal.getMpeRefer(),         String.class);
+            spec = bindNullable(spec, 11, cal.getReferStandard(),    String.class);
+            spec = bindNullable(spec, 12, cal.getCalibrationBy(),    String.class);
+            spec = bindNullable(spec, 13, cal.getResult(),           String.class);
+            spec = bindNullable(spec, 14, cal.getCorrectionFactor(), String.class);
+            spec = bindNullable(spec, 15, cal.getMeasurementRange(), String.class);
+            spec = bindNullable(spec, 16, cal.getRemark(),           String.class);
+            spec = bindNullable(spec, 17, cal.getAttachment(),       String.class);
+
             return spec
-                    .bind(9,  String.valueOf(cal.getDueDate().getYear()))
-                    .bind(10, cal.getId())
-                    .bind(11, machineCode)
+                    .bind(18, cal.getId())
+                    .bind(19, machineCode)
                     .then()
                     .onErrorResume(e -> {
                         log.error("Failed to update calibration id={} for machine={}: {}", cal.getId(), machineCode, e.getMessage(), e);
@@ -350,29 +386,50 @@ public class MachineService {
                     });
         }
 
+        // ไม่มี id → อัปเดต record ล่าสุดที่ยังไม่ถูกยกเลิก ถ้าไม่มีให้สร้างใหม่
         Machine machineRef = Machine.builder().machineCode(machineCode).machineName(dto.getMachineName()).build();
         return template.selectOne(
-                        Query.query(Criteria.where("machine_code").is(machineCode))
-                                .sort(Sort.by(Sort.Direction.DESC, "id")),
+                        Query.query(Criteria.where("machine_code").is(machineCode)
+                                        .and(Criteria.where("is_canceled").isFalse().or("is_canceled").isNull()))
+                                .sort(Sort.by(Sort.Direction.DESC, "id"))
+                                .limit(1),
                         CalibrationRecord.class)
                 .flatMap(existing -> {
                     existing.setDueDate(cal.getDueDate());
-                    existing.setCertificateDate(cal.getCertificateDate());
-                    existing.setResults(cal.getResults());
-                    existing.setCriteria(cal.getCriteria());
-                    existing.setMeasuringRange(cal.getMeasuringRange());
-                    existing.setAccuracy(cal.getAccuracy());
-                    existing.setCalibrationRange(cal.getCalibrationRange());
-                    existing.setCalibrationStatus(cal.getCalibrationStatus());
-                    existing.setNote(cal.getNote());
                     existing.setYears(String.valueOf(cal.getDueDate().getYear()));
+                    applyIfPresent(existing, cal);
                     return template.update(existing).then();
                 })
-                .switchIfEmpty(createCalibrationRecord(machineRef, cal))
+                .switchIfEmpty(Mono.defer(() -> createCalibrationRecord(machineRef, cal)))
                 .onErrorResume(e -> {
                     log.error("Failed to upsert calibration for machine={}: {}", machineCode, e.getMessage(), e);
                     return Mono.empty();
                 });
+    }
+
+    /** คัดลอกเฉพาะ field ที่ไม่เป็น null จาก DTO ลง entity (เกณฑ์เดียวกับ COALESCE ด้านบน) */
+    private void applyIfPresent(CalibrationRecord target, CalibrationDTO src) {
+        if (src.getStartDate()        != null) target.setStartDate(src.getStartDate());
+        if (src.getCertificateDate()  != null) target.setCertificateDate(src.getCertificateDate());
+        if (src.getMpe()              != null) target.setMpe(src.getMpe());
+        if (src.getInternalMpe()      != null) target.setInternalMpe(src.getInternalMpe());
+        if (src.getMaxRepeatability() != null) target.setMaxRepeatability(src.getMaxRepeatability());
+        if (src.getResolution()       != null) target.setResolution(src.getResolution());
+        if (src.getMinCapacity()      != null) target.setMinCapacity(src.getMinCapacity());
+        if (src.getMaxCapacity()      != null) target.setMaxCapacity(src.getMaxCapacity());
+        if (src.getMpeRefer()         != null) target.setMpeRefer(src.getMpeRefer());
+        if (src.getReferStandard()    != null) target.setReferStandard(src.getReferStandard());
+        if (src.getCalibrationBy()    != null) target.setCalibrationBy(src.getCalibrationBy());
+        if (src.getResult()           != null) target.setResult(src.getResult());
+        if (src.getCorrectionFactor() != null) target.setCorrectionFactor(src.getCorrectionFactor());
+        if (src.getMeasurementRange() != null) target.setMeasurementRange(src.getMeasurementRange());
+        if (src.getRemark()           != null) target.setRemark(src.getRemark());
+        if (src.getAttachment()       != null) target.setAttachment(src.getAttachment());
+    }
+
+    private <T> DatabaseClient.GenericExecuteSpec bindNullable(
+            DatabaseClient.GenericExecuteSpec spec, int index, T value, Class<T> type) {
+        return value != null ? spec.bind(index, value) : spec.bindNull(index, type);
     }
 
     private Mono<Void> cancelActiveRecords(String machineCode) {

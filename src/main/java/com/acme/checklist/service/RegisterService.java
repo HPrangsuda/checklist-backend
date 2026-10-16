@@ -21,8 +21,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -30,6 +33,9 @@ import java.util.stream.Collectors;
 @Service
 @AllArgsConstructor
 public class RegisterService {
+
+    public static final String STATUS_PENDING = "PENDING";
+    public static final String STATUS_REJECT  = "REJECT";
 
     private final LarkService larkService;
     private final R2dbcEntityTemplate template;
@@ -72,6 +78,54 @@ public class RegisterService {
                 .onErrorResume(e -> {
                     log.error("Failed to update the register: {}", e.getMessage());
                     return Mono.just(ApiResponse.<Void>error("RG004", e.getMessage()));
+                });
+    }
+
+    // ─── REJECT ───────────────────────────────────────────────────────────────
+
+    public Mono<ApiResponse<Void>> reject(Long id, String reason) {
+        if (!StringUtils.hasText(reason)) {
+            return Mono.just(ApiResponse.<Void>error("RG022", "Reject reason is required"));
+        }
+        String trimmedReason = reason.trim();
+
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .switchIfEmpty(Mono.error(new ThrowException("RG030", "No authenticated principal")))
+                .flatMap(principal -> template.selectOne(
+                                Query.query(Criteria.where("id").is(id)), RegisterRequest.class)
+                        .switchIfEmpty(Mono.error(new ThrowException("RG011", "Data not found")))
+                        .flatMap(reg -> {
+                            if (STATUS_REJECT.equals(reg.getStatus())) {
+                                return Mono.error(new ThrowException("RG015", "Register already rejected"));
+                            }
+
+                            Long    rejectedBy = principal.memberId();
+                            Instant now        = Instant.now();
+
+                            Update update = Update.update("status", STATUS_REJECT)
+                                    .set("reject_reason", trimmedReason)
+                                    .set("updated_by", rejectedBy)
+                                    .set("updated_at", now);
+
+                            return template.update(
+                                            Query.query(Criteria.where("id").is(id)),
+                                            update,
+                                            RegisterRequest.class)
+                                    .doOnSuccess(count -> {
+                                        reg.setStatus(STATUS_REJECT);
+                                        reg.setRejectReason(trimmedReason);
+                                        notifyRegistrantRejected(reg, rejectedBy, now);
+                                    });
+                        }))
+                .then(Mono.just(ApiResponse.<Void>success("RG013")))
+                .onErrorResume(ThrowException.class, e -> {
+                    log.warn("Business validation failed during register reject: {}", e.getMessage());
+                    return Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage()));
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to reject register {}: {}", id, e.getMessage(), e);
+                    return Mono.just(ApiResponse.<Void>error("RG014", e.getMessage()));
                 });
     }
 
@@ -202,6 +256,7 @@ public class RegisterService {
                         long count = machineCountMap.getOrDefault(r.getId(), 0L);
                         dto.setHasMachine(count > 0);
                         dto.setMachineCount(count);
+                        dto.setStatus(r.getStatus() != null ? r.getStatus() : STATUS_PENDING);
                         return dto;
                     });
                 });
@@ -253,6 +308,10 @@ public class RegisterService {
                                 dto.setResponsibleName(responsibleName);
                                 dto.setSupervisorName(supervisorName);
                                 dto.setManagerName(managerName);
+                                dto.setStatus(registerRequest.getStatus() != null
+                                        ? registerRequest.getStatus() : STATUS_PENDING);
+                                dto.setRejectReason(registerRequest.getRejectReason());
+                                dto.setUpdatedAt(registerRequest.getUpdatedAt());
 
                                 return ApiResponse.success("RG010", dto);
                             });
@@ -324,6 +383,46 @@ public class RegisterService {
                     log.error("Lark notify error: {}", e.getMessage(), e);
                     return Mono.empty();
                 });
+    }
+
+    /**
+     * แจ้งผู้ลงทะเบียน (created_by) ว่าถูก reject
+     * ส่งแยกออกไป ถ้า Lark ล่ม การ reject ยังบันทึกสำเร็จ
+     */
+    private void notifyRegistrantRejected(RegisterRequest reg, Long rejectedBy, Instant rejectedAt) {
+        if (reg.getCreatedBy() == null) {
+            log.warn("[REG-REJECT] registerId={} has no created_by, skip Lark", reg.getId());
+            return;
+        }
+
+        Mono<String> openIdMono = template.selectOne(
+                        Query.query(Criteria.where("id").is(reg.getCreatedBy())), Member.class)
+                .mapNotNull(Member::getMobiles)
+                .filter(StringUtils::hasText)
+                .flatMap(mobile -> {
+                    String alt = mobile.startsWith("+66")
+                            ? "0" + mobile.substring(3)
+                            : "+66" + mobile.substring(1);
+                    return larkService.batchGetOpenIdsByMobile(List.of(mobile, alt));
+                })
+                .flatMap(openIdMap -> Mono.justOrEmpty(openIdMap.values().stream().findFirst()));
+
+        openIdMono
+                .switchIfEmpty(Mono.fromRunnable(() -> log.warn(
+                        "[REG-REJECT] registerId={} — no Lark openId for registrant memberId={} — skipped",
+                        reg.getId(), reg.getCreatedBy())))
+                .zipWith(resolveMemberName(rejectedBy))
+                .flatMap(t -> larkService.sendRegisterRejectedNotification(t.getT1(), reg, t.getT2(), rejectedAt))
+                .retryWhen(Retry.backoff(3, Duration.ofSeconds(2))
+                        .maxBackoff(Duration.ofSeconds(10))
+                        .doBeforeRetry(s -> log.warn("[REG-REJECT] retry registerId={} attempt={}/3 cause={}",
+                                reg.getId(), s.totalRetries() + 1, s.failure().getMessage())))
+                .subscribe(
+                        v -> {},
+                        e -> log.error("[REG-REJECT] ✗ Lark FAILED registerId={}: {}", reg.getId(),
+                                e.getCause() != null ? e.getCause().getMessage() : e.getMessage()),
+                        () -> log.info("[REG-REJECT] done registerId={}", reg.getId())
+                );
     }
 
     private String buildRegisterCardJson(RegisterRequest req) {
@@ -445,6 +544,7 @@ public class RegisterService {
                     .warrantyExpireDate("YES".equals(dto.getHasWarranty()) ? dto.getWarrantyExpireDate() : null)
                     .warrantyFiles(warrantyFilesJson)
                     .isNew(dto.getIsNew())
+                    .status(STATUS_PENDING)
                     .build();
         } catch (Exception e) {
             throw new RuntimeException("Failed to process data: " + e.getMessage());

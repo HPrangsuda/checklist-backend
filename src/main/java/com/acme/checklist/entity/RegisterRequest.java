@@ -83,4 +83,11 @@ public class RegisterRequest extends DataAudit {
 
     @Column("is_new")
     private Boolean isNew;
+
+    @Builder.Default
+    @Column("status")
+    private String status = "PENDING";
+
+    @Column("reject_reason")
+    private String rejectReason;
 }

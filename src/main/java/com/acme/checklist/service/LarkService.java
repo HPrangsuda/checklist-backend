@@ -2,6 +2,7 @@ package com.acme.checklist.service;
 
 import com.acme.checklist.entity.Department;
 import com.acme.checklist.entity.Machine;
+import com.acme.checklist.entity.RegisterRequest;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.request.RequestOptions;
 import com.lark.oapi.service.contact.v3.model.BatchGetIdUserReq;
@@ -18,7 +19,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Instant;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Slf4j
@@ -29,6 +32,8 @@ public class LarkService {
     public static final int MAX_MOBILES_PER_REQUEST = 50;
 
     private static final ZoneId ZONE = ZoneId.of("Asia/Bangkok");
+
+    private static final DateTimeFormatter DATE_TIME_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm").withZone(ZONE);
 
     @Value("${lark.app-id}")
     private String appId;
@@ -181,6 +186,46 @@ public class LarkService {
                 +   "{\"tag\":\"div\",\"fields\":["
                 +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ผู้รับผิดชอบ**\\n" + responsibleName + "\"}}"
                 +   "]}"
+                + "]}";
+    }
+
+    // ── Register rejected notification ───────────────────────────────────
+
+    /**
+     * แจ้งผู้ลงทะเบียนว่าการลงทะเบียนถูกปฏิเสธ
+     * ใช้ uuid "register-reject-{id}" กันข้อความเบิ้ลตอน retry
+     */
+    public Mono<Void> sendRegisterRejectedNotification(String openId, RegisterRequest reg,
+                                                       String rejectedByName, Instant rejectedAt) {
+        return sendCardMessage(openId,
+                buildRegisterRejectedCardJson(reg, rejectedByName, rejectedAt),
+                "register-reject-" + reg.getId());
+    }
+
+    private String buildRegisterRejectedCardJson(RegisterRequest reg, String rejectedByName, Instant rejectedAt) {
+        String machineName  = escapeJson(orDash(reg.getMachineName()));
+        String serialNumber = escapeJson(orDash(reg.getSerialNumber()));
+        String rejectedBy   = escapeJson(orDash(rejectedByName));
+        String rejectedDate = rejectedAt != null ? DATE_TIME_FMT.format(rejectedAt) : "-";
+        String reason       = escapeJson(orDash(reg.getRejectReason()));
+
+        return "{"
+                + "\"config\":{\"wide_screen_mode\":true},"
+                + "\"header\":{"
+                +   "\"title\":{\"tag\":\"plain_text\",\"content\":\"❌ การลงทะเบียนเครื่องจักรถูกปฏิเสธ\"},"
+                +   "\"template\":\"red\""
+                + "},"
+                + "\"elements\":["
+                +   "{\"tag\":\"div\",\"fields\":["
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ชื่อเครื่องจักร**\\n" + machineName + "\"}},"
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**Serial No**\\n" + serialNumber + "\"}}"
+                +   "]},"
+                +   "{\"tag\":\"div\",\"fields\":["
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**ปฏิเสธโดย**\\n" + rejectedBy + "\"}},"
+                +     "{\"is_short\":true,\"text\":{\"tag\":\"lark_md\",\"content\":\"**วันที่ปฏิเสธ**\\n" + rejectedDate + "\"}}"
+                +   "]},"
+                +   "{\"tag\":\"hr\"},"
+                +   "{\"tag\":\"div\",\"text\":{\"tag\":\"lark_md\",\"content\":\"**เหตุผล**\\n" + reason + "\"}}"
                 + "]}";
     }
 

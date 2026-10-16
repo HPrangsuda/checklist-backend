@@ -51,10 +51,26 @@ public class CalibrationService {
                     + ") d ON TRUE\n";
 
     private static final String IS_ON_TIME =
-            "c.certificate_date IS NOT NULL AND c.certificate_date <= c.due_date";
+            "(c.certificate_date IS NOT NULL AND c.certificate_date <= c.due_date)";
     private static final String IS_OVERDUE =
-            "(c.certificate_date IS NOT NULL AND c.certificate_date > c.due_date)"
-                    + " OR (c.certificate_date IS NULL AND c.due_date < CURRENT_DATE)";
+            "((c.certificate_date IS NOT NULL AND c.certificate_date > c.due_date)"
+                    + " OR (c.certificate_date IS NULL AND c.due_date < CURRENT_DATE))";
+
+    /**
+     * ไม่มีคอลัมน์ calibration_status แล้ว → คำนวณจาก due_date + certificate_date
+     * (เกณฑ์เดียวกับ CalibrationResponseDTO.statusOf และ frontend)
+     */
+    private static final String STATUS_EXPR =
+            "(CASE"
+                    + " WHEN c.due_date IS NULL THEN NULL"
+                    + " WHEN " + IS_ON_TIME + " THEN '" + CalibrationResponseDTO.STATUS_ON_TIME + "'"
+                    + " WHEN " + IS_OVERDUE + " THEN '" + CalibrationResponseDTO.STATUS_OVERDUE + "'"
+                    + " ELSE '" + CalibrationResponseDTO.STATUS_PENDING + "'"
+                    + " END)";
+
+    /** result เก็บเป็นข้อความอิสระ (Pass / Not Pass / ข้อมูลเก่าอาจเป็น PASS / FAILED) */
+    private static final String RESULT_PASS     = "UPPER(TRIM(c.result)) = 'PASS'";
+    private static final String RESULT_NOT_PASS = "UPPER(TRIM(c.result)) IN ('NOT PASS', 'FAILED', 'FAIL')";
 
     private static final String MEMBER_NAME_EXPR =
             "COALESCE(NULLIF(TRIM(mb.first_name || ' ' || mb.last_name), ''), mb.first_name, mb.user_name, 'Unassigned')";
@@ -180,7 +196,7 @@ public class CalibrationService {
 
     public Mono<PagedResponse<CalibrationResponseDTO>> getPage(
             String keyword, Integer year, String department,
-            String results, String calibrationStatus,
+            String result, String calibrationStatus,
             int index, int size) {
 
         return currentPrincipal()
@@ -188,7 +204,7 @@ public class CalibrationService {
                     int     yr      = (year != null) ? year : LocalDate.now().getYear();
                     boolean hasKw   = StringUtils.hasText(keyword);
                     boolean hasDept = StringUtils.hasText(department);
-                    boolean hasRes  = StringUtils.hasText(results);
+                    boolean hasRes  = StringUtils.hasText(result);
                     boolean hasCal  = StringUtils.hasText(calibrationStatus);
 
                     String where = "\nWHERE " + NOT_CANCELED
@@ -197,8 +213,8 @@ public class CalibrationService {
                             + roleFilter(principal)
                             + (hasKw   ? "\nAND (c.machine_code ILIKE :kw OR c.machine_name ILIKE :kw)" : "")
                             + (hasDept ? "\nAND m.department = :department"                              : "")
-                            + (hasRes  ? "\nAND c.results = :results"                                    : "")
-                            + (hasCal  ? "\nAND c.calibration_status = :calibrationStatus"               : "");
+                            + (hasRes  ? "\nAND UPPER(TRIM(c.result)) = UPPER(:result)"                   : "")
+                            + (hasCal  ? "\nAND UPPER(" + STATUS_EXPR + ") = UPPER(:calibrationStatus)"   : "");
 
                     String countSql =
                             "SELECT COUNT(*)\n"
@@ -210,12 +226,12 @@ public class CalibrationService {
                             "SELECT\n"
                                     + "    c.id, c.machine_code, c.machine_name, c.years,\n"
                                     + "    c.due_date, c.start_date, c.certificate_date,\n"
-                                    + "    c.results, c.criteria, c.measuring_range, c.accuracy,\n"
-                                    + "    c.calibration_range, c.calibration_status,\n"
-                                    + "    c.attachment, c.note, c.permissible_capacity,\n"
-                                    + "    c.comment, c.resolution, c.max_uncertainty,\n"
-                                    + "    c.mpe, c.check_mpe, c.check_resolution,\n"
-                                    + "    c.check_result, c.reason_not_pass,\n"
+                                    + "    c.mpe, c.internal_mpe, c.max_repeatability, c.resolution,\n"
+                                    + "    c.min_capacity, c.max_capacity, c.mpe_refer,\n"
+                                    + "    c.refer_standard, c.calibration_by, c.result,\n"
+                                    + "    c.correction_factor, c.measurement_range,\n"
+                                    + "    c.remark, c.attachment,\n"
+                                    + "    " + STATUS_EXPR + "          AS calibration_status,\n"
                                     + "    m.responsible_person_name AS responsible_maintenance_name,\n"
                                     + "    m.department              AS machine_department_code,\n"
                                     + "    d.department              AS machine_department_name\n"
@@ -230,7 +246,7 @@ public class CalibrationService {
                         s = s.bind("year", yr);
                         if (hasKw)   s = s.bind("kw", "%" + keyword.trim() + "%");
                         if (hasDept) s = s.bind("department", department.trim());
-                        if (hasRes)  s = s.bind("results", results.trim());
+                        if (hasRes)  s = s.bind("result", result.trim());
                         if (hasCal)  s = s.bind("calibrationStatus", calibrationStatus.trim());
                         return s;
                     };
@@ -245,35 +261,7 @@ public class CalibrationService {
                             .one().defaultIfEmpty(0L);
 
                     Flux<CalibrationResponseDTO> dataFlux = dataSpec
-                            .map((row, meta) -> CalibrationResponseDTO.builder()
-                                    .id(row.get("id", Long.class))
-                                    .machineCode(row.get("machine_code", String.class))
-                                    .machineName(row.get("machine_name", String.class))
-                                    .years(row.get("years", String.class))
-                                    .dueDate(row.get("due_date", LocalDate.class))
-                                    .startDate(row.get("start_date", LocalDate.class))
-                                    .certificateDate(row.get("certificate_date", LocalDate.class))
-                                    .results(row.get("results", String.class))
-                                    .criteria(row.get("criteria", String.class))
-                                    .measuringRange(row.get("measuring_range", String.class))
-                                    .accuracy(row.get("accuracy", String.class))
-                                    .calibrationRange(row.get("calibration_range", String.class))
-                                    .calibrationStatus(row.get("calibration_status", String.class))
-                                    .attachment(row.get("attachment", String.class))
-                                    .note(row.get("note", String.class))
-                                    .permissibleCapacity(row.get("permissible_capacity", String.class))
-                                    .comment(row.get("comment", String.class))
-                                    .resolution(row.get("resolution", String.class))
-                                    .maxUncertainty(row.get("max_uncertainty", String.class))
-                                    .mpe(row.get("mpe", String.class))
-                                    .checkMpe(row.get("check_mpe", String.class))
-                                    .checkResolution(row.get("check_resolution", String.class))
-                                    .checkResult(row.get("check_result", String.class))
-                                    .reasonNotPass(row.get("reason_not_pass", String.class))
-                                    .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
-                                    .machineDepartmentCode(row.get("machine_department_code", String.class))
-                                    .machineDepartmentName(row.get("machine_department_name", String.class))
-                                    .build())
+                            .map((row, meta) -> mapPageRow(row))
                             .all();
 
                     return Mono.zip(countMono, dataFlux.collectList()).map(tuple -> {
@@ -308,8 +296,8 @@ public class CalibrationService {
                                     + "    m.department                             AS department_code,\n"
                                     + "    COALESCE(d.department, m.department, '') AS department_name,\n"
                                     + "    d.division                               AS division,\n"
-                                    + "    c.results                                AS results,\n"
-                                    + "    c.calibration_status                     AS calibration_status\n"
+                                    + "    c.result                                 AS result,\n"
+                                    + "    " + STATUS_EXPR + "                      AS calibration_status\n"
                                     + "FROM calibration_record c\n"
                                     + "JOIN machine m ON m.machine_code = c.machine_code\n"
                                     + DEPARTMENT_JOIN
@@ -325,7 +313,7 @@ public class CalibrationService {
                                     row.get("department_code",    String.class),
                                     row.get("department_name",    String.class),
                                     row.get("division",           String.class),
-                                    row.get("results",            String.class),
+                                    row.get("result",             String.class),
                                     row.get("calibration_status", String.class),
                             })
                             .all().collectList()
@@ -342,7 +330,7 @@ public class CalibrationService {
                                     String div   = (String) r[3];
                                     String label = StringUtils.hasText(div) ? dn + " - " + div : dn;
                                     if (StringUtils.hasText(dc))            depts.putIfAbsent(dc, label);
-                                    if (StringUtils.hasText((String) r[4])) resultSet.add((String) r[4]);
+                                    if (StringUtils.hasText((String) r[4])) resultSet.add(((String) r[4]).trim());
                                     if (StringUtils.hasText((String) r[5])) calStatusSet.add((String) r[5]);
                                 }
 
@@ -384,8 +372,8 @@ public class CalibrationService {
                                     + "        ELSE m.department\n"
                                     + "    END AS department_name,\n"
                                     + "    COUNT(*)                                                AS total,\n"
-                                    + "    COUNT(CASE WHEN c.results = 'PASS'   THEN 1 END)        AS total_pass,\n"
-                                    + "    COUNT(CASE WHEN c.results = 'FAILED' THEN 1 END)        AS total_not_pass,\n"
+                                    + "    COUNT(CASE WHEN " + RESULT_PASS     + " THEN 1 END)      AS total_pass,\n"
+                                    + "    COUNT(CASE WHEN " + RESULT_NOT_PASS + " THEN 1 END)      AS total_not_pass,\n"
                                     + "    COUNT(CASE WHEN " + IS_ON_TIME + " THEN 1 END)          AS total_on_time,\n"
                                     + "    COUNT(CASE WHEN " + IS_OVERDUE + " THEN 1 END)          AS total_overdue,\n"
                                     + "    COUNT(CASE WHEN c.certificate_date IS NOT NULL THEN 1 END) AS total_completed,\n"
@@ -493,7 +481,8 @@ public class CalibrationService {
                     String sql =
                             "SELECT\n"
                                     + "    c.id, c.machine_code, c.machine_name, c.years, c.due_date,\n"
-                                    + "    c.results, c.calibration_status,\n"
+                                    + "    c.certificate_date, c.result,\n"
+                                    + "    " + STATUS_EXPR + "                      AS calibration_status,\n"
                                     + "    m.department                             AS machine_department_code,\n"
                                     + "    COALESCE(d.department, m.department, '') AS machine_department_name\n"
                                     + "FROM calibration_record c\n"
@@ -514,7 +503,8 @@ public class CalibrationService {
                                     .machineName(row.get("machine_name", String.class))
                                     .years(row.get("years", String.class))
                                     .dueDate(row.get("due_date", LocalDate.class))
-                                    .results(row.get("results", String.class))
+                                    .certificateDate(row.get("certificate_date", LocalDate.class))
+                                    .result(row.get("result", String.class))
                                     .calibrationStatus(row.get("calibration_status", String.class))
                                     .machineDepartmentCode(row.get("machine_department_code", String.class))
                                     .machineDepartmentName(row.get("machine_department_name", String.class))
@@ -571,12 +561,31 @@ public class CalibrationService {
     // VALIDATE
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /** ค่า mpe_refer ที่บังคับต้องมีไฟล์ใน refer_standard (ตรงกับ MPE_REFER_STANDARD ฝั่ง frontend) */
+    public static final String MPE_REFER_STANDARD = "Standard";
+
     public Mono<CalibrationDTO> validateData(CalibrationDTO dto) {
         if (dto.getId() == null)
             return Mono.error(new ThrowException("MS018", "Calibration id is required"));
         return template.selectOne(Query.query(Criteria.where("id").is(dto.getId())), CalibrationRecord.class)
                 .switchIfEmpty(Mono.error(new ThrowException("MS018", "Calibration not found")))
-                .map(existing -> dto);
+                .flatMap(existing -> {
+                    // DTO field ที่เป็น null = ไม่แก้ → ใช้ค่าเดิมในการตรวจ
+                    String mpeRefer = dto.getMpeRefer()      != null ? dto.getMpeRefer()      : existing.getMpeRefer();
+                    String referStd = dto.getReferStandard() != null ? dto.getReferStandard() : existing.getReferStandard();
+                    if (mpeRefer != null && MPE_REFER_STANDARD.equalsIgnoreCase(mpeRefer.trim()) && !hasFiles(referStd)) {
+                        return Mono.error(new ThrowException("MS004",
+                                "Refer standard file is required when MPE refer is Standard"));
+                    }
+                    return Mono.just(dto);
+                });
+    }
+
+    /** refer_standard เก็บเป็น JSON array ของไฟล์ — ว่าง / "[]" / "null" = ไม่มีไฟล์ */
+    private static boolean hasFiles(String json) {
+        if (!StringUtils.hasText(json)) return false;
+        String s = json.trim();
+        return !s.equals("[]") && !s.equalsIgnoreCase("null") && s.startsWith("[");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -587,26 +596,23 @@ public class CalibrationService {
         List<String> sets   = new ArrayList<>();
         List<Object> values = new ArrayList<>();
 
-        addParam(sets, values, "due_date",             dto.getDueDate());
-        addParam(sets, values, "start_date",           dto.getStartDate());
-        addParam(sets, values, "certificate_date",     dto.getCertificateDate());
-        addParam(sets, values, "results",              dto.getResults());
-        addParam(sets, values, "criteria",             dto.getCriteria());
-        addParam(sets, values, "measuring_range",      dto.getMeasuringRange());
-        addParam(sets, values, "accuracy",             dto.getAccuracy());
-        addParam(sets, values, "calibration_range",    dto.getCalibrationRange());
-        addParam(sets, values, "calibration_status",   dto.getCalibrationStatus());
-        addParam(sets, values, "attachment",           dto.getAttachment());
-        addParam(sets, values, "note",                 dto.getNote());
-        addParam(sets, values, "permissible_capacity", dto.getPermissibleCapacity());
-        addParam(sets, values, "comment",              dto.getComment());
-        addParam(sets, values, "resolution",           dto.getResolution());
-        addParam(sets, values, "max_uncertainty",      dto.getMaxUncertainty());
-        addParam(sets, values, "mpe",                  dto.getMpe());
-        addParam(sets, values, "check_mpe",            dto.getCheckMpe());
-        addParam(sets, values, "check_resolution",     dto.getCheckResolution());
-        addParam(sets, values, "check_result",         dto.getCheckResult());
-        addParam(sets, values, "reason_not_pass",      dto.getReasonNotPass());
+        addParam(sets, values, "due_date",          dto.getDueDate());
+        addParam(sets, values, "start_date",        dto.getStartDate());
+        addParam(sets, values, "certificate_date",  dto.getCertificateDate());
+        addParam(sets, values, "mpe",               dto.getMpe());
+        addParam(sets, values, "internal_mpe",      dto.getInternalMpe());
+        addParam(sets, values, "max_repeatability", dto.getMaxRepeatability());
+        addParam(sets, values, "resolution",        dto.getResolution());
+        addParam(sets, values, "min_capacity",      dto.getMinCapacity());
+        addParam(sets, values, "max_capacity",      dto.getMaxCapacity());
+        addParam(sets, values, "mpe_refer",         dto.getMpeRefer());
+        addParam(sets, values, "refer_standard",    dto.getReferStandard());
+        addParam(sets, values, "calibration_by",    dto.getCalibrationBy());
+        addParam(sets, values, "result",            dto.getResult());
+        addParam(sets, values, "correction_factor", dto.getCorrectionFactor());
+        addParam(sets, values, "measurement_range", dto.getMeasurementRange());
+        addParam(sets, values, "remark",            dto.getRemark());
+        addParam(sets, values, "attachment",        dto.getAttachment());
 
         if (sets.isEmpty()) return null;
 
@@ -624,6 +630,36 @@ public class CalibrationService {
 
     private void addParam(List<String> sets, List<Object> values, String col, Object val) {
         if (val != null) { values.add(val); sets.add(col + " = $" + values.size()); }
+    }
+
+    private CalibrationResponseDTO mapPageRow(Row row) {
+        return CalibrationResponseDTO.builder()
+                .id(row.get("id", Long.class))
+                .machineCode(row.get("machine_code", String.class))
+                .machineName(row.get("machine_name", String.class))
+                .years(row.get("years", String.class))
+                .dueDate(row.get("due_date", LocalDate.class))
+                .startDate(row.get("start_date", LocalDate.class))
+                .certificateDate(row.get("certificate_date", LocalDate.class))
+                .mpe(row.get("mpe", String.class))
+                .internalMpe(row.get("internal_mpe", String.class))
+                .maxRepeatability(row.get("max_repeatability", String.class))
+                .resolution(row.get("resolution", String.class))
+                .minCapacity(row.get("min_capacity", String.class))
+                .maxCapacity(row.get("max_capacity", String.class))
+                .mpeRefer(row.get("mpe_refer", String.class))
+                .referStandard(row.get("refer_standard", String.class))
+                .calibrationBy(row.get("calibration_by", String.class))
+                .result(row.get("result", String.class))
+                .correctionFactor(row.get("correction_factor", String.class))
+                .measurementRange(row.get("measurement_range", String.class))
+                .remark(row.get("remark", String.class))
+                .attachment(row.get("attachment", String.class))
+                .calibrationStatus(row.get("calibration_status", String.class))
+                .responsibleMaintenanceName(row.get("responsible_maintenance_name", String.class))
+                .machineDepartmentCode(row.get("machine_department_code", String.class))
+                .machineDepartmentName(row.get("machine_department_name", String.class))
+                .build();
     }
 
     private CalibrationDepartmentSummaryDTO mapDepartmentSummary(Row row) {

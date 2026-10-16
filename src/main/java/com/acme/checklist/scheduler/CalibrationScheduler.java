@@ -103,7 +103,9 @@ public class CalibrationScheduler {
                     }
 
                     // อ่านให้ครบก่อน แล้วค่อย insert (ห้าม insert ระหว่างที่ยัง stream ผล SELECT บน connection เดียวกัน)
-                    return db.sql("SELECT * FROM calibration_record WHERE years = $1")
+                    // ข้ามรายการที่ถูกยกเลิกแล้ว
+                    return db.sql("SELECT * FROM calibration_record WHERE years = $1"
+                                    + " AND (is_canceled = FALSE OR is_canceled IS NULL)")
                             .bind(0, String.valueOf(currentYear))
                             .map((row, meta) -> toNextYearRecord(row, nextYear))
                             .all()
@@ -133,47 +135,57 @@ public class CalibrationScheduler {
                 .subscribe();
     }
 
+    /**
+     * คัดลอกเฉพาะ "สเปกเครื่อง" ไปปีถัดไป
+     * ไม่คัดลอกผลของปีนี้: result, correction_factor, certificate_date, start_date, attachment
+     */
     private CalibrationRecord toNextYearRecord(Row row, int nextYear) {
         CalibrationRecord r = new CalibrationRecord();
         r.setMachineCode(row.get("machine_code", String.class));
         r.setMachineName(row.get("machine_name", String.class));
-        r.setCriteria(row.get("criteria", String.class));
-        r.setMeasuringRange(row.get("measuring_range", String.class));
-        r.setAccuracy(row.get("accuracy", String.class));
-        r.setCalibrationRange(row.get("calibration_range", String.class));
-        r.setPermissibleCapacity(row.get("permissible_capacity", String.class));
-        r.setResolution(row.get("resolution", String.class));
-        r.setMaxUncertainty(row.get("max_uncertainty", String.class));
         r.setMpe(row.get("mpe", String.class));
-        r.setNote(row.get("note", String.class));
+        r.setInternalMpe(row.get("internal_mpe", String.class));
+        r.setMaxRepeatability(row.get("max_repeatability", String.class));
+        r.setResolution(row.get("resolution", String.class));
+        r.setMinCapacity(row.get("min_capacity", String.class));
+        r.setMaxCapacity(row.get("max_capacity", String.class));
+        r.setMpeRefer(row.get("mpe_refer", String.class));
+        r.setReferStandard(row.get("refer_standard", String.class));
+        r.setCalibrationBy(row.get("calibration_by", String.class));
+        r.setMeasurementRange(row.get("measurement_range", String.class));
+        r.setRemark(row.get("remark", String.class));
         LocalDate dueDate = row.get("due_date", LocalDate.class);
         r.setDueDate(dueDate != null ? dueDate.withYear(nextYear) : null); // 29 ก.พ. → 28 ก.พ. อัตโนมัติ
         r.setYears(String.valueOf(nextYear));
+        r.setIsCanceled(false);
         return r;
     }
 
     private Mono<Long> insertCopy(DatabaseClient db, CalibrationRecord r, int nextYear) {
         DatabaseClient.GenericExecuteSpec spec = db.sql("""
                 INSERT INTO calibration_record
-                (machine_code, machine_name, criteria, measuring_range, accuracy,
-                 calibration_range, permissible_capacity, resolution, max_uncertainty,
-                 mpe, note, due_date, years)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                (machine_code, machine_name, mpe, internal_mpe, max_repeatability, resolution,
+                 min_capacity, max_capacity, mpe_refer, refer_standard, calibration_by,
+                 measurement_range, remark, due_date, years, is_canceled)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 """);
 
-        spec = bindNullable(spec, 0, r.getMachineCode(), String.class);
-        spec = bindNullable(spec, 1, r.getMachineName(), String.class);
-        spec = bindNullable(spec, 2, r.getCriteria(), String.class);
-        spec = bindNullable(spec, 3, r.getMeasuringRange(), String.class);
-        spec = bindNullable(spec, 4, r.getAccuracy(), String.class);
-        spec = bindNullable(spec, 5, r.getCalibrationRange(), String.class);
-        spec = bindNullable(spec, 6, r.getPermissibleCapacity(), String.class);
-        spec = bindNullable(spec, 7, r.getResolution(), String.class);
-        spec = bindNullable(spec, 8, r.getMaxUncertainty(), String.class);
-        spec = bindNullable(spec, 9, r.getMpe(), String.class);
-        spec = bindNullable(spec, 10, r.getNote(), String.class);
-        spec = bindNullable(spec, 11, r.getDueDate(), LocalDate.class);
-        spec = spec.bind(12, String.valueOf(nextYear));
+        spec = bindNullable(spec, 0,  r.getMachineCode(),      String.class);
+        spec = bindNullable(spec, 1,  r.getMachineName(),      String.class);
+        spec = bindNullable(spec, 2,  r.getMpe(),              String.class);
+        spec = bindNullable(spec, 3,  r.getInternalMpe(),      String.class);
+        spec = bindNullable(spec, 4,  r.getMaxRepeatability(), String.class);
+        spec = bindNullable(spec, 5,  r.getResolution(),       String.class);
+        spec = bindNullable(spec, 6,  r.getMinCapacity(),      String.class);
+        spec = bindNullable(spec, 7,  r.getMaxCapacity(),      String.class);
+        spec = bindNullable(spec, 8,  r.getMpeRefer(),         String.class);
+        spec = bindNullable(spec, 9,  r.getReferStandard(),    String.class);
+        spec = bindNullable(spec, 10, r.getCalibrationBy(),    String.class);
+        spec = bindNullable(spec, 11, r.getMeasurementRange(), String.class);
+        spec = bindNullable(spec, 12, r.getRemark(),           String.class);
+        spec = bindNullable(spec, 13, r.getDueDate(),          LocalDate.class);
+        spec = spec.bind(14, String.valueOf(nextYear));
+        spec = spec.bind(15, Boolean.FALSE);
 
         return spec.then()
                 .doOnSuccess(v -> log.debug("[COPY] ✓ Inserted machineCode={}, year={}", r.getMachineCode(), nextYear))
@@ -253,6 +265,7 @@ public class CalibrationScheduler {
         return Mono.empty();
     }
 
+    /** รายการที่ใกล้ครบกำหนด ยังไม่เริ่มสอบเทียบ และไม่ถูกยกเลิก */
     private Flux<CalibrationRecord> fetchDueCalibrations() {
         LocalDate dueLimit = LocalDate.now(ZONE).plusDays(DUE_WITHIN_DAYS);
 
@@ -260,6 +273,8 @@ public class CalibrationScheduler {
                         Query.query(
                                 Criteria.where("due_date").lessThanOrEquals(dueLimit)
                                         .and("start_date").isNull()
+                                        .and(Criteria.where("is_canceled").isFalse()
+                                                .or("is_canceled").isNull())
                         ).sort(Sort.by("due_date").ascending()),
                         CalibrationRecord.class
                 )

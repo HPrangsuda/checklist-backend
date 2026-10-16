@@ -7,7 +7,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 @Data
 @Builder
@@ -50,6 +52,10 @@ public class RegisterResponseDTO {
 
     private Boolean isNew;
 
+    private String status;
+    private String rejectReason;
+    private Instant updatedAt;
+
     public static RegisterResponseDTO from(RegisterRequest r,
                                            AuditMemberDTO createdBy,
                                            AuditMemberDTO updatedBy) {
@@ -78,6 +84,9 @@ public class RegisterResponseDTO {
                 .warrantyExpireDate(r.getWarrantyExpireDate())
                 .warrantyFiles(r.getWarrantyFiles())
                 .isNew(r.getIsNew())
+                .status(r.getStatus())
+                .rejectReason(r.getRejectReason())
+                .updatedAt(r.getUpdatedAt())
                 .createdBy(createdBy)
                 .updatedBy(updatedBy)
                 .build();
