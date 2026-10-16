@@ -22,9 +22,9 @@ public class RegisterListDTO {
     private String       model;
     private String       serialNumber;
     private String       department;
+    private String status;
     private boolean      hasMachine;
     private long         machineCount;
-    private String status;
     private String       createdAt;
     private CreatedByDTO createdBy;
     private CreatedByDTO updatedBy;
