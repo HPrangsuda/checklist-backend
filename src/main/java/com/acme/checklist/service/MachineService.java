@@ -15,6 +15,9 @@ import com.acme.checklist.payload.machine.MachineDTO;
 import com.acme.checklist.payload.machine.MachineListDTO;
 import com.acme.checklist.payload.machine.MachineResponseDTO;
 import com.acme.checklist.payload.machine.MachineSummaryDTO;
+import com.acme.checklist.payload.machine.ReviewItemDTO;
+import com.acme.checklist.payload.machine.ReviewPageDTO;
+import com.acme.checklist.payload.machine.ReviewSummaryDTO;
 import com.acme.checklist.payload.maintenance.MaintenanceDTO;
 import com.acme.checklist.payload.maintenance.MaintenanceResponseDTO;
 import com.google.zxing.BarcodeFormat;
@@ -45,6 +48,7 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.List;
 
@@ -498,6 +502,195 @@ public class MachineService {
     }
 
     // =========================================================================
+    //  REVIEW (สุ่มตรวจรายเดือน)
+    //
+    //  quota = ceil( เครื่องที่ยังไม่ถูกตรวจในปีนี้ ณ ต้นเดือน / เดือนที่เหลือรวมเดือนนี้ )
+    //  - เครื่องเพิ่มกลางปี / เดือนที่ตรวจไม่ครบ → กระจายไปเดือนที่เหลืออัตโนมัติ
+    //  - ธันวาคม ตัวหาร = 1 → ทุกเครื่องที่เหลือต้องตรวจ
+    //  - สุ่มด้วย md5(machine_code || 'YYYY-MM') → ชุดเดิมตลอดเดือน ไม่สลับเมื่อรีเฟรช/เปลี่ยนหน้า
+    //
+    //  GET /review/summary   → ตัวเลขสรุป
+    //  GET /review/pending   → รายการรอตรวจเดือนนี้ (แบ่งหน้า, รวมทั้งหมด = quota - ตรวจแล้วเดือนนี้)
+    //  GET /review/reviewed  → รายการที่ตรวจแล้วทั้งปี (แบ่งหน้า)
+    // =========================================================================
+
+    private static final String REVIEW_SELECT = """
+            SELECT m.id, m.machine_code, m.machine_name, m.last_review, m.review_by,
+                   TRIM(CONCAT(mb.first_name, ' ', mb.last_name)) AS review_by_name
+            FROM machine m
+            LEFT JOIN member mb ON CAST(mb.id AS TEXT) = m.review_by
+            """;
+
+    private static final int REVIEW_MAX_PAGE_SIZE = 100;
+
+    /** ตัวเลขที่ใช้คำนวณโควตาของเดือนปัจจุบัน */
+    private record ReviewStats(
+            LocalDate today, LocalDate yearStart, LocalDate monthStart, int remainingMonths,
+            long totalActive, long pool, long reviewedYear, long reviewedMonth,
+            int quota, int pendingSlots) {
+
+        String seed() {
+            return "%d-%02d".formatted(today.getYear(), today.getMonthValue());
+        }
+    }
+
+    private Mono<ReviewStats> computeReviewStats() {
+        LocalDate today      = LocalDate.now();
+        LocalDate yearStart  = today.withDayOfYear(1);
+        LocalDate monthStart = today.withDayOfMonth(1);
+        int       remaining  = 13 - today.getMonthValue();   // รวมเดือนปัจจุบัน
+
+        // pool = ยังไม่ถูกตรวจในปีนี้ "ก่อนเดือนนี้" (รวมที่ตรวจในเดือนนี้) → ค่าคงที่ตลอดเดือน
+        String sql = """
+                SELECT COUNT(*) AS total_active,
+                       COUNT(*) FILTER (WHERE last_review IS NULL OR last_review < $1 OR last_review >= $2) AS pool,
+                       COUNT(*) FILTER (WHERE last_review >= $1) AS reviewed_year,
+                       COUNT(*) FILTER (WHERE last_review >= $2) AS reviewed_month
+                FROM machine
+                WHERE machine_status IN (%s)
+                """.formatted(MachineStatus.sqlInClause());
+
+        return template.getDatabaseClient().sql(sql)
+                .bind(0, yearStart)
+                .bind(1, monthStart)
+                .map((row, meta) -> new long[]{
+                        getLongValue(row, "total_active"),
+                        getLongValue(row, "pool"),
+                        getLongValue(row, "reviewed_year"),
+                        getLongValue(row, "reviewed_month")})
+                .one()
+                .defaultIfEmpty(new long[4])
+                .map(s -> {
+                    int quota        = (int) Math.ceil((double) s[1] / remaining);
+                    int pendingSlots = (int) Math.max(0, quota - s[3]);
+                    return new ReviewStats(today, yearStart, monthStart, remaining,
+                            s[0], s[1], s[2], s[3], quota, pendingSlots);
+                });
+    }
+
+    public Mono<ApiResponse<ReviewSummaryDTO>> getReviewSummary() {
+        return computeReviewStats()
+                .map(st -> ApiResponse.<ReviewSummaryDTO>success("MS050", new ReviewSummaryDTO(
+                        st.today().getYear(), st.today().getMonthValue(), st.remainingMonths(),
+                        st.totalActive(), st.pool(), st.quota(),
+                        st.reviewedYear(), st.reviewedMonth(), st.pendingSlots())))
+                .onErrorResume(e -> {
+                    log.error("Failed to build review summary: {}", e.getMessage(), e);
+                    return Mono.just(ApiResponse.<ReviewSummaryDTO>error("MS051", e.getMessage()));
+                });
+    }
+
+    /** รายการรอตรวจเดือนนี้ — ตัดชุดสุ่มที่ pendingSlots แล้วแบ่งหน้าภายในชุดนั้น */
+    public Mono<ApiResponse<ReviewPageDTO>> getReviewPending(int index, int size) {
+        int    safeIndex = Math.max(0, index);
+        int    safeSize  = clampReviewPageSize(size);
+        String activeIn  = MachineStatus.sqlInClause();
+
+        return computeReviewStats()
+                .flatMap(st -> {
+                    int total  = st.pendingSlots();
+                    int offset = safeIndex * safeSize;
+                    if (offset >= total) return Mono.just(ReviewPageDTO.of(List.of(), safeIndex, safeSize, total));
+
+                    int limit = Math.min(safeSize, total - offset);   // ไม่ให้เกินขอบเขตโควตา
+                    return mapReviewItems(template.getDatabaseClient().sql(REVIEW_SELECT + """
+                                    WHERE m.machine_status IN (%s)
+                                      AND (m.last_review IS NULL OR m.last_review < $1)
+                                    ORDER BY md5(m.machine_code || $2), m.id
+                                    LIMIT $3 OFFSET $4
+                                    """.formatted(activeIn))
+                            .bind(0, st.yearStart())
+                            .bind(1, st.seed())
+                            .bind(2, limit)
+                            .bind(3, offset))
+                            .map(items -> ReviewPageDTO.of(items, safeIndex, safeSize, total));
+                })
+                .map(page -> ApiResponse.<ReviewPageDTO>success("MS050", page))
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch pending review list: {}", e.getMessage(), e);
+                    return Mono.just(ApiResponse.<ReviewPageDTO>error("MS051", e.getMessage()));
+                });
+    }
+
+    /** รายการที่ตรวจแล้วตั้งแต่ต้นปีปัจจุบัน */
+    public Mono<ApiResponse<ReviewPageDTO>> getReviewedInYear(int index, int size) {
+        int            safeIndex = Math.max(0, index);
+        int            safeSize  = clampReviewPageSize(size);
+        LocalDate      yearStart = LocalDate.now().withDayOfYear(1);
+        String         activeIn  = MachineStatus.sqlInClause();
+        DatabaseClient db        = template.getDatabaseClient();
+
+        Mono<Long> countMono = db.sql("""
+                        SELECT COUNT(*) AS total
+                        FROM machine
+                        WHERE machine_status IN (%s)
+                          AND last_review >= $1
+                        """.formatted(activeIn))
+                .bind(0, yearStart)
+                .map((row, meta) -> getLongValue(row, "total"))
+                .one()
+                .defaultIfEmpty(0L);
+
+        Mono<List<ReviewItemDTO>> itemsMono = mapReviewItems(db.sql(REVIEW_SELECT + """
+                        WHERE m.machine_status IN (%s)
+                          AND m.last_review >= $1
+                        ORDER BY m.last_review DESC, m.id DESC
+                        LIMIT $2 OFFSET $3
+                        """.formatted(activeIn))
+                .bind(0, yearStart)
+                .bind(1, safeSize)
+                .bind(2, safeIndex * safeSize));
+
+        return Mono.zip(countMono, itemsMono)
+                .map(t -> ApiResponse.<ReviewPageDTO>success("MS050",
+                        ReviewPageDTO.of(t.getT2(), safeIndex, safeSize, t.getT1())))
+                .onErrorResume(e -> {
+                    log.error("Failed to fetch reviewed list: {}", e.getMessage(), e);
+                    return Mono.just(ApiResponse.<ReviewPageDTO>error("MS051", e.getMessage()));
+                });
+    }
+
+    private int clampReviewPageSize(int size) {
+        return Math.min(REVIEW_MAX_PAGE_SIZE, Math.max(1, size));
+    }
+
+    private Mono<List<ReviewItemDTO>> mapReviewItems(DatabaseClient.GenericExecuteSpec spec) {
+        return spec.map((row, meta) -> {
+                    String name = row.get("review_by_name", String.class);
+                    return new ReviewItemDTO(
+                            getLongValue(row, "id"),
+                            row.get("machine_code", String.class),
+                            row.get("machine_name", String.class),
+                            row.get("last_review",  LocalDate.class),
+                            row.get("review_by",    String.class),
+                            StringUtils.hasText(name) ? name : null);
+                })
+                .all()
+                .collectList();
+    }
+
+    /** กดปุ่ม "ตรวจสอบแล้ว" → last_review = วันนี้, review_by = member id ของผู้ใช้ปัจจุบัน */
+    public Mono<ApiResponse<Void>> markReviewed(Long id) {
+        return ReactiveSecurityContextHolder.getContext()
+                .mapNotNull(ctx -> (MemberPrincipal) Objects.requireNonNull(ctx.getAuthentication()).getPrincipal())
+                .switchIfEmpty(Mono.error(new ThrowException("MS054", "Unauthenticated")))
+                .flatMap(principal -> template.update(
+                        Query.query(Criteria.where("id").is(id)),
+                        Update.update("last_review", LocalDate.now())
+                                .set("review_by", String.valueOf(principal.memberId()))
+                                .set("updated_at", LocalDateTime.now()),
+                        Machine.class))
+                .map(count -> count > 0
+                        ? ApiResponse.<Void>success("MS052")
+                        : ApiResponse.<Void>error("MS053", "Machine not found with id: " + id))
+                .onErrorResume(ThrowException.class, e -> Mono.just(ApiResponse.<Void>error(e.getCode(), e.getMessage())))
+                .onErrorResume(e -> {
+                    log.error("Failed to mark machine {} reviewed: {}", id, e.getMessage(), e);
+                    return Mono.just(ApiResponse.<Void>error("MS053", e.getMessage()));
+                });
+    }
+
+    // =========================================================================
     //  GET BY ROLE
     // =========================================================================
 
@@ -762,10 +955,11 @@ public class MachineService {
                     List<Long> auditIds = new ArrayList<>();
                     if (machine.getCreatedBy() != null) auditIds.add(machine.getCreatedBy());
                     if (machine.getUpdatedBy() != null) auditIds.add(machine.getUpdatedBy());
-                    Mono<Map<Long, Member>> auditMono    = auditIds.isEmpty() ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(auditIds);
-                    Mono<String>            qrMono       = generateQRCodeReactive(machine.getQrCode(), machineCode);
-                    Mono<String>            supNameMono  = resolveMemberName(machine.getSupervisorId());
-                    Mono<String>            mgrNameMono  = resolveMemberName(machine.getManagerId());
+                    Mono<Map<Long, Member>> auditMono      = auditIds.isEmpty() ? Mono.just(new HashMap<>()) : commonService.fetchMembersByIds(auditIds);
+                    Mono<String>            qrMono         = generateQRCodeReactive(machine.getQrCode(), machineCode);
+                    Mono<String>            supNameMono    = resolveMemberName(machine.getSupervisorId());
+                    Mono<String>            mgrNameMono    = resolveMemberName(machine.getManagerId());
+                    Mono<String>            reviewNameMono = resolveMemberName(parseMemberId(machine.getReviewBy()));
 
                     Mono<String> groupNameMono = Mono.justOrEmpty(machineGroup)
                             .flatMap(gid -> template.getDatabaseClient()
@@ -788,8 +982,8 @@ public class MachineService {
                             .defaultIfEmpty(deptCode != null ? deptCode : "");
 
                     return Mono.zip(calibMono, maintMono, auditMono, qrMono, supNameMono, mgrNameMono)
-                            .flatMap(t6 -> Mono.zip(groupNameMono, typeNameMono, deptNameMono)
-                                    .map(t3 -> {
+                            .flatMap(t6 -> Mono.zip(groupNameMono, typeNameMono, deptNameMono, reviewNameMono)
+                                    .map(t4 -> {
                                         MachineResponseDTO dto = MachineResponseDTO.from(machine,
                                                 machine.getCreatedBy() != null ? AuditMemberDTO.from(t6.getT3().get(machine.getCreatedBy())) : null,
                                                 machine.getUpdatedBy() != null ? AuditMemberDTO.from(t6.getT3().get(machine.getUpdatedBy())) : null);
@@ -798,9 +992,10 @@ public class MachineService {
                                         dto.setQrCode(t6.getT4());
                                         dto.setSupervisorName(t6.getT5());
                                         dto.setManagerName(t6.getT6());
-                                        dto.setMachineGroupName(t3.getT1());
-                                        dto.setMachineTypeName(t3.getT2());
-                                        dto.setDepartmentName(t3.getT3());
+                                        dto.setMachineGroupName(t4.getT1());
+                                        dto.setMachineTypeName(t4.getT2());
+                                        dto.setDepartmentName(t4.getT3());
+                                        dto.setReviewByName(StringUtils.hasText(t4.getT4()) ? t4.getT4() : null);
                                         return ApiResponse.success("MS017", dto);
                                     }));
                 })
@@ -884,6 +1079,7 @@ public class MachineService {
                 .build();
     }
 
+    /** หมายเหตุ: ไม่แตะ last_review / review_by — แก้ได้ผ่าน markReviewed() เท่านั้น */
     private Update buildUpdateFromDTO(MachineDTO dto) {
         Map<SqlIdentifier, Object> p = new HashMap<>();
         addIfNotNull(p, "machine_code",            dto.getMachineCode());
@@ -911,7 +1107,7 @@ public class MachineService {
         addIfNotNull(p, "has_warranty",            dto.getHasWarranty());
         addIfNotNull(p, "is_new",                  dto.getIsNew());
         if (dto.getCheckStatus() != null) p.put(SqlIdentifier.quoted("check_status"), dto.getCheckStatus());
-        p.put(SqlIdentifier.quoted("updated_at"),           java.time.LocalDateTime.now());
+        p.put(SqlIdentifier.quoted("updated_at"),           LocalDateTime.now());
         p.put(SqlIdentifier.quoted("warranty_note"),        "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyNote() : null);
         p.put(SqlIdentifier.quoted("warranty_expire_date"), "YES".equals(dto.getHasWarranty()) && dto.getWarrantyExpireDate() != null ? dto.getWarrantyExpireDate().toLocalDate() : null);
         p.put(SqlIdentifier.quoted("warranty_files"),       "YES".equals(dto.getHasWarranty()) ? dto.getWarrantyFiles() : null);
@@ -939,6 +1135,13 @@ public class MachineService {
         if (memberId == null) return Mono.just("");
         return template.selectOne(Query.query(Criteria.where("id").is(memberId)), Member.class)
                 .map(m -> m.getFirstName() + " " + m.getLastName()).defaultIfEmpty("");
+    }
+
+    /** review_by เก็บเป็น String → แปลงเป็น member id (ค่าที่ไม่ใช่ตัวเลขคืน null) */
+    private Long parseMemberId(String value) {
+        if (!StringUtils.hasText(value)) return null;
+        try { return Long.valueOf(value.trim()); }
+        catch (NumberFormatException e) { return null; }
     }
 
     private Mono<MachineDTO> resolveDepartmentFields(MachineDTO dto) {

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS machine_type (
     status VARCHAR(25),
     is_maintenance BOOLEAN,
     is_calibration BOOLEAN,
+    equipment_category VARCHAR(30),
     created_by BIGINT,
     updated_by BIGINT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

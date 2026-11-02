@@ -4,12 +4,14 @@ import com.acme.checklist.entity.Machine;
 import com.acme.checklist.payload.ApiResponse;
 import com.acme.checklist.payload.ListResponse;
 import com.acme.checklist.payload.PagedResponse;
+import com.acme.checklist.payload.machine.ChangeResponsiblePersonRequest;
 import com.acme.checklist.payload.machine.FilterOptionsDTO;
 import com.acme.checklist.payload.machine.MachineDTO;
 import com.acme.checklist.payload.machine.MachineListDTO;
 import com.acme.checklist.payload.machine.MachineResponseDTO;
 import com.acme.checklist.payload.machine.MachineSummaryDTO;
-import com.acme.checklist.payload.machine.ChangeResponsiblePersonRequest;
+import com.acme.checklist.payload.machine.ReviewPageDTO;
+import com.acme.checklist.payload.machine.ReviewSummaryDTO;
 import com.acme.checklist.service.LarkService;
 import com.acme.checklist.service.MachineService;
 import lombok.RequiredArgsConstructor;
@@ -18,7 +20,6 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -80,6 +81,34 @@ public class MachineController {
         return machineService.getByMachineCode(machineCode);
     }
 
+    // ── Review (สุ่มตรวจรายเดือน) ───────────────────────────────────────────────
+
+    @GetMapping("/review/summary")
+    public Mono<ApiResponse<ReviewSummaryDTO>> getReviewSummary() {
+        return machineService.getReviewSummary();
+    }
+
+    @GetMapping("/review/pending")
+    public Mono<ApiResponse<ReviewPageDTO>> getReviewPending(
+            @RequestParam(defaultValue = "0")  int index,
+            @RequestParam(defaultValue = "10") int size) {
+        return machineService.getReviewPending(index, size);
+    }
+
+    @GetMapping("/review/reviewed")
+    public Mono<ApiResponse<ReviewPageDTO>> getReviewedInYear(
+            @RequestParam(defaultValue = "0")  int index,
+            @RequestParam(defaultValue = "10") int size) {
+        return machineService.getReviewedInYear(index, size);
+    }
+
+    @PostMapping("/{id}/review")
+    public Mono<ApiResponse<Void>> markReviewed(@PathVariable Long id) {
+        return machineService.markReviewed(id);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     @GetMapping("/{id}")
     public Mono<ApiResponse<MachineResponseDTO>> getById(@PathVariable Long id) {
         return machineService.getById(id);
@@ -110,7 +139,6 @@ public class MachineController {
                 .concatMap(machine -> larkService.upsertMachineRecord(machine)
                         .doOnSuccess(v -> log.info("✅ Synced machine id={} code={}", machine.getId(), machine.getMachineCode()))
                         .onErrorResume(e -> {
-                            log.error("❌ Failed machine id={} code={}: {}", machine.getId(), machine.getMachineCode(), e.getMessage());
                             return Mono.empty();
                         }))
                 .doOnComplete(() -> log.info("=== sync-all completed ==="))

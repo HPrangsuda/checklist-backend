@@ -51,8 +51,11 @@ public class MachineResponseDTO {
     private Long managerId;
     private String managerName;
     private String workInstruction;
+
+    // ── review ────────────────────────────────────────────────────────────────
     private LocalDate lastReview;
-    private String reviewBy;
+    private String    reviewBy;
+    private String    reviewByName;
 
     // ── warranty ──────────────────────────────────────────────────────────────
     private String    hasWarranty;
@@ -100,6 +103,9 @@ public class MachineResponseDTO {
                 .registerDate(machine.getRegisterDate())
                 .certificatePeriod(machine.getCertificatePeriod())
                 .reasonCancel(machine.getReasonCancel())
+                // ── review ────────────────────────────────────────────────────
+                .lastReview(machine.getLastReview())
+                .reviewBy(machine.getReviewBy())
                 // ── warranty ──────────────────────────────────────────────────
                 .hasWarranty(machine.getHasWarranty())
                 .warrantyNote(machine.getWarrantyNote())

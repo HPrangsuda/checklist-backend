@@ -1,6 +1,7 @@
 package com.acme.checklist.entity;
 
 import com.acme.checklist.entity.audit.DataAudit;
+import com.acme.checklist.entity.enums.EquipmentCategory;
 import lombok.*;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.relational.core.mapping.Column;
@@ -36,4 +37,7 @@ public class MachineType extends DataAudit {
 
     @Column("is_calibration")
     private Boolean isCalibration;
+
+    @Column("equipment_category")
+    private EquipmentCategory equipmentCategory;
 }

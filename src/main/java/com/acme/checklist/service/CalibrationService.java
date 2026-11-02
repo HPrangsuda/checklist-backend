@@ -69,7 +69,8 @@ public class CalibrationService {
                     + " END)";
 
     /** result เก็บเป็นข้อความอิสระ (Pass / Not Pass / ข้อมูลเก่าอาจเป็น PASS / FAILED) */
-    private static final String RESULT_PASS     = "UPPER(TRIM(c.result)) = 'PASS'";
+    /** Pass ISO17025 / Pass ISO9001 (และ Pass แบบเก่า) นับเป็นผ่าน; "Not Pass" ไม่ขึ้นต้นด้วย PASS จึงไม่ปน */
+    private static final String RESULT_PASS     = "UPPER(TRIM(c.result)) LIKE 'PASS%'";
     private static final String RESULT_NOT_PASS = "UPPER(TRIM(c.result)) IN ('NOT PASS', 'FAILED', 'FAIL')";
 
     private static final String MEMBER_NAME_EXPR =
