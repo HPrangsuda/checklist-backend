@@ -425,6 +425,10 @@ public class MachineTypeService {
                 .machineTypeId(dto.getMachineTypeId())
                 .machineTypeName(dto.getMachineTypeName())
                 .status(dto.getStatus())
+                // ไม่ส่งมา = ไม่บังคับ
+                .isMaintenance(Boolean.TRUE.equals(dto.getIsMaintenance()))
+                .isCalibration(Boolean.TRUE.equals(dto.getIsCalibration()))
+                .equipmentCategory(dto.getEquipmentCategory())
                 .build();
     }
 
@@ -435,7 +439,10 @@ public class MachineTypeService {
                 .machineGroupName(dto.getMachineGroupName())
                 .machineTypeId(dto.getMachineTypeId())
                 .machineTypeName(dto.getMachineTypeName())
-                .status(dto.getStatus());
+                .status(dto.getStatus())
+                .isMaintenance(dto.getIsMaintenance())
+                .isCalibration(dto.getIsCalibration())
+                .equipmentCategory(dto.getEquipmentCategory());
 
         if (dto.getId() != null && dto.getId() > 0) {
             builder.id(dto.getId());
@@ -444,11 +451,16 @@ public class MachineTypeService {
         return builder.build();
     }
 
+    /** อัปเดตเฉพาะ field ที่ส่งมา (null = คงค่าเดิม) */
     private Update buildUpdateFromDTO(MachineTypeDTO dto) {
         Map<SqlIdentifier, Object> params = new HashMap<>();
         addIfNotNull(params, "machine_group_name", dto.getMachineGroupName());
-        addIfNotNull(params, "machine_type_name", dto.getMachineTypeName());
-        addIfNotNull(params, "status", dto.getStatus());
+        addIfNotNull(params, "machine_type_name",  dto.getMachineTypeName());
+        addIfNotNull(params, "status",             dto.getStatus());
+        addIfNotNull(params, "is_maintenance",     dto.getIsMaintenance());
+        addIfNotNull(params, "is_calibration",     dto.getIsCalibration());
+        addIfNotNull(params, "equipment_category",
+                dto.getEquipmentCategory() != null ? dto.getEquipmentCategory().name() : null);
         return Update.from(params);
     }
 

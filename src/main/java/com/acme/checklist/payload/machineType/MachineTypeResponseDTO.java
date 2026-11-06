@@ -1,6 +1,7 @@
 package com.acme.checklist.payload.machineType;
 
 import com.acme.checklist.entity.MachineType;
+import com.acme.checklist.entity.enums.EquipmentCategory;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -18,11 +19,12 @@ public class MachineTypeResponseDTO {
     private String machineTypeName;
     private String status;
 
-    public static MachineTypeResponseDTO from(MachineType machineType) {
-        if (machineType == null) {
-            return null;
-        }
+    private Boolean isMaintenance;
+    private Boolean isCalibration;
+    private EquipmentCategory equipmentCategory;
 
+    public static MachineTypeResponseDTO from(MachineType machineType) {
+        if (machineType == null) return null;
         return MachineTypeResponseDTO.builder()
                 .id(machineType.getId())
                 .machineGroupId(machineType.getMachineGroupId())
@@ -30,6 +32,9 @@ public class MachineTypeResponseDTO {
                 .machineTypeId(machineType.getMachineTypeId())
                 .machineTypeName(machineType.getMachineTypeName())
                 .status(machineType.getStatus())
+                .isMaintenance(machineType.getIsMaintenance())
+                .isCalibration(machineType.getIsCalibration())
+                .equipmentCategory(machineType.getEquipmentCategory())
                 .build();
     }
 }

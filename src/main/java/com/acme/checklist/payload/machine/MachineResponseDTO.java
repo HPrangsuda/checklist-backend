@@ -24,6 +24,8 @@ public class MachineResponseDTO {
     private String machineGroupName;
     private String machineTypeId;
     private String machineTypeName;
+    /** มาจาก machine_type.equipment_category (set ใน MachineService.getById) */
+    private String equipmentCategory;
     private String machineStatus;
     private String checkStatus;
     private String model;

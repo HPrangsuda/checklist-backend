@@ -967,14 +967,18 @@ public class MachineService {
                                     .bind("$1", gid).map((row, meta) -> row.get("machine_group_name", String.class)).first())
                             .defaultIfEmpty(machineGroup != null ? machineGroup : "");
 
-                    Mono<String> typeNameMono = Mono.justOrEmpty(machineType)
-                            .flatMap(tid -> {
-                                assert machineGroup != null;
-                                return template.getDatabaseClient()
-                                        .sql("SELECT machine_type_name FROM machine_type WHERE machine_group_id = $1 AND machine_type_id = $2 LIMIT 1")
-                                        .bind("$1", machineGroup).bind("$2", tid).map((row, meta) -> row.get("machine_type_name", String.class)).first();
-                            })
-                            .defaultIfEmpty(machineType != null ? machineType : "");
+                    // [0] = machine_type_name, [1] = equipment_category (อาจเป็น null)
+                    Mono<String[]> typeInfoMono = Mono.justOrEmpty(machineType)
+                            .filter(tid -> machineGroup != null)
+                            .flatMap(tid -> template.getDatabaseClient()
+                                    .sql("SELECT machine_type_name, equipment_category FROM machine_type " +
+                                            "WHERE machine_group_id = $1 AND machine_type_id = $2 LIMIT 1")
+                                    .bind("$1", machineGroup).bind("$2", tid)
+                                    .map((row, meta) -> new String[]{
+                                            row.get("machine_type_name",  String.class),
+                                            row.get("equipment_category", String.class)})
+                                    .first())
+                            .defaultIfEmpty(new String[]{ machineType != null ? machineType : "", null });
 
                     Mono<String> deptNameMono = Mono.justOrEmpty(deptCode)
                             .flatMap(code -> template.selectOne(Query.query(Criteria.where("department_code").is(code)), Department.class)
@@ -982,7 +986,7 @@ public class MachineService {
                             .defaultIfEmpty(deptCode != null ? deptCode : "");
 
                     return Mono.zip(calibMono, maintMono, auditMono, qrMono, supNameMono, mgrNameMono)
-                            .flatMap(t6 -> Mono.zip(groupNameMono, typeNameMono, deptNameMono, reviewNameMono)
+                            .flatMap(t6 -> Mono.zip(groupNameMono, typeInfoMono, deptNameMono, reviewNameMono)
                                     .map(t4 -> {
                                         MachineResponseDTO dto = MachineResponseDTO.from(machine,
                                                 machine.getCreatedBy() != null ? AuditMemberDTO.from(t6.getT3().get(machine.getCreatedBy())) : null,
@@ -993,7 +997,8 @@ public class MachineService {
                                         dto.setSupervisorName(t6.getT5());
                                         dto.setManagerName(t6.getT6());
                                         dto.setMachineGroupName(t4.getT1());
-                                        dto.setMachineTypeName(t4.getT2());
+                                        dto.setMachineTypeName(t4.getT2()[0]);
+                                        dto.setEquipmentCategory(t4.getT2()[1]);
                                         dto.setDepartmentName(t4.getT3());
                                         dto.setReviewByName(StringUtils.hasText(t4.getT4()) ? t4.getT4() : null);
                                         return ApiResponse.success("MS017", dto);
@@ -1038,8 +1043,24 @@ public class MachineService {
         if (!isUpdate && dto.getIsNew()  == null)                                      return Mono.error(new ThrowException("MS021", "Is new machine is required"));
         if (dto.getRegisterId() != null) dto.setNote("REF:REGISTER-" + dto.getRegisterId());
 
+        // ── ตอนสร้าง: ประเภทเครื่องที่ตั้ง is_maintenance / is_calibration ต้องมีข้อมูลนั้นมาด้วย ──
+        Mono<MachineDTO> typeCheck = isUpdate ? Mono.just(dto) : template.selectOne(
+                        Query.query(Criteria.where("machine_group_id").is(dto.getMachineGroupId())
+                                .and("machine_type_id").is(dto.getMachineTypeId())),
+                        MachineType.class)
+                .flatMap(type -> {
+                    boolean noMaint = dto.getMaintenanceList() == null || dto.getMaintenanceList().isEmpty();
+                    boolean noCal   = dto.getCalibration() == null || dto.getCalibration().getDueDate() == null;
+                    if (Boolean.TRUE.equals(type.getIsMaintenance()) && noMaint)
+                        return Mono.<MachineDTO>error(new ThrowException("MS023", "Maintenance schedule is required for this machine type"));
+                    if (Boolean.TRUE.equals(type.getIsCalibration()) && noCal)
+                        return Mono.<MachineDTO>error(new ThrowException("MS024", "Calibration due date is required for this machine type"));
+                    return Mono.just(dto);
+                })
+                .defaultIfEmpty(dto);
+
         String prefix = dto.getMachineCode().substring(0, Math.min(8, dto.getMachineCode().length()));
-        return template.select(Query.query(Criteria.where("machine_code").like(prefix + "%")), Machine.class)
+        return typeCheck.then(template.select(Query.query(Criteria.where("machine_code").like(prefix + "%")), Machine.class)
                 .collectList()
                 .flatMap(existing -> {
                     if (!isUpdate) {
@@ -1053,7 +1074,7 @@ public class MachineService {
                         dto.setQrCode(String.format("{\"status\": true, \"code\": \"%s\"}", newCode));
                     }
                     return Mono.just(dto);
-                });
+                }));
     }
 
     public Machine buildFromDTO(MachineDTO dto) {
