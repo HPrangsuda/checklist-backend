@@ -66,7 +66,7 @@ public class MaintenanceScheduler {
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     /** เริ่มแจ้งเตือนเมื่อเหลือไม่เกินกี่วันก่อนถึง due date */
-    private static final int DUE_WITHIN_DAYS = 30;
+    private static final int DUE_WITHIN_DAYS = 45;
     private static final int RED_WITHIN_DAYS = 7;
     private static final int YELLOW_WITHIN_DAYS = 14;
 
@@ -80,6 +80,15 @@ public class MaintenanceScheduler {
     private static final int MAX_RETRIES = 3;
 
     private static final MaintenanceType DEFAULT_TYPE = MaintenanceType.PREVENTIVE;
+
+    /**
+     * machine.machine_status ที่ยังต้องแจ้งเตือน
+     * เทียบหลัง normalize (ตัวใหญ่, ช่องว่าง/ขีด → _) → "Under Maintenance" = "UNDER_MAINTENANCE"
+     */
+    private static final Set<String> NOTIFY_MACHINE_STATUSES = Set.of("OPERATIONAL", "UNDER_MAINTENANCE");
+
+    /** maintenance_record.status ที่ถือว่าดำเนินการแล้ว — ปรับให้ตรงกับค่าที่ระบบใช้จริง */
+    private static final Set<String> DONE_RECORD_STATUSES = Set.of("COMPLETED", "COMPLETE", "DONE", "CLOSED", "FINISHED");
 
     // ======================================================================
     // Job 1: คัดลอก maintenance record ไปปีถัดไป (25 ธ.ค. 01:00)
@@ -106,7 +115,9 @@ public class MaintenanceScheduler {
                     }
 
                     // อ่านให้ครบก่อน แล้วค่อย insert (ห้าม insert ระหว่างที่ยัง stream ผล SELECT บน connection เดียวกัน)
-                    return db.sql("SELECT * FROM maintenance_record WHERE years = $1")
+                    // ข้ามรายการที่ถูกยกเลิกแล้ว
+                    return db.sql("SELECT * FROM maintenance_record WHERE years = $1"
+                                    + " AND (is_canceled = FALSE OR is_canceled IS NULL)")
                             .bind(0, String.valueOf(currentYear))
                             .map((row, meta) -> toNextYearRecord(row, nextYear))
                             .all()
@@ -148,8 +159,9 @@ public class MaintenanceScheduler {
         LocalDate planDate = row.get("plan_date", LocalDate.class);
         r.setPlanDate(planDate != null ? planDate.withYear(nextYear) : null);
         r.setYears(String.valueOf(nextYear));
-        // start_date, actual_date, status, maintenance_by, responsible_maintenance, attachment
-        // ไม่ได้ถูก insert → เป็น null ในปีใหม่โดยอัตโนมัติ
+        r.setIsCanceled(false);
+        // start_date, actual_date, status, maintenance_by, responsible_maintenance, attachment,
+        // checklist_record_id, canceled_at ไม่ได้ถูก insert → เป็น null ในปีใหม่โดยอัตโนมัติ
         return r;
     }
 
@@ -167,8 +179,8 @@ public class MaintenanceScheduler {
     private Mono<Long> insertCopy(DatabaseClient db, MaintenanceRecord r, int nextYear) {
         DatabaseClient.GenericExecuteSpec spec = db.sql("""
                 INSERT INTO maintenance_record
-                (machine_code, machine_name, years, round, due_date, plan_date, note, maintenance_type)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (machine_code, machine_name, years, round, due_date, plan_date, note, maintenance_type, is_canceled)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """);
 
         spec = bindNullable(spec, 0, r.getMachineCode(), String.class);
@@ -179,6 +191,7 @@ public class MaintenanceScheduler {
         spec = bindNullable(spec, 5, r.getPlanDate(), LocalDate.class);
         spec = bindNullable(spec, 6, r.getNote(), String.class);
         spec = spec.bind(7, (r.getMaintenanceType() != null ? r.getMaintenanceType() : DEFAULT_TYPE).name());
+        spec = spec.bind(8, Boolean.FALSE);
 
         return spec.then()
                 .doOnSuccess(v -> log.debug("[M-COPY] ✓ Inserted machineCode={}, round={}, year={}",
@@ -217,7 +230,7 @@ public class MaintenanceScheduler {
 
     /**
      * ADMIN และ DEPARTMENT_ADMIN: ค่าเริ่มต้นทุกวันจันทร์ 09:00
-     * - ADMIN            : ได้รับทุกรายการ
+     * - ADMIN            : ได้รับทุกรายการ (ของเครื่องที่ยังต้องแจ้ง)
      * - DEPARTMENT_ADMIN : เฉพาะเครื่องที่อยู่แผนกเดียวกับตัวเอง
      * ทำทีละ role และแยก error กัน
      *
@@ -263,19 +276,95 @@ public class MaintenanceScheduler {
                 .subscribe();
     }
 
+    /**
+     * รายการที่ต้องแจ้ง:
+     * 1) due_date ภายใน DUE_WITHIN_DAYS วัน (รวมที่เลยกำหนด)
+     * 2) ยังไม่ดำเนินการ: start_date และ actual_date เป็น null และ status ไม่อยู่ใน DONE_RECORD_STATUSES
+     *    และ record ไม่ถูกยกเลิก (is_canceled = false / null)
+     * 3) เครื่องมีอยู่ในตาราง machine, machine_status อยู่ใน NOTIFY_MACHINE_STATUSES
+     *    และยังไม่ถูกยกเลิก (cancel_date ว่าง หรือยังไม่ถึง)
+     * กรองที่จุดนี้จุดเดียว → ทุก job / ทุก role ได้ผลเหมือนกัน
+     */
     private Flux<MaintenanceRecord> fetchDueMaintenances() {
-        LocalDate dueLimit = LocalDate.now(ZONE).plusDays(DUE_WITHIN_DAYS);
+        LocalDate today = LocalDate.now(ZONE);
+        LocalDate dueLimit = today.plusDays(DUE_WITHIN_DAYS);
 
         return template.select(
                         Query.query(
                                 Criteria.where("due_date").lessThanOrEquals(dueLimit)
                                         .and("start_date").isNull()
+                                        .and("actual_date").isNull()
+                                        .and(Criteria.where("is_canceled").isFalse()
+                                                .or("is_canceled").isNull())
                         ).sort(Sort.by("due_date").ascending()),
                         MaintenanceRecord.class
                 )
                 .filter(r -> r.getDueDate() != null)
+                .filter(r -> {
+                    boolean done = DONE_RECORD_STATUSES.contains(normalizeStatus(r.getStatus()));
+                    if (done) {
+                        log.debug("[M-FETCH] skip id={}, machineCode={} — record status={}",
+                                r.getId(), r.getMachineCode(), r.getStatus());
+                    }
+                    return !done;
+                })
+                .collectList()
+                .flatMapMany(records -> {
+                    Set<String> codes = records.stream()
+                            .map(MaintenanceRecord::getMachineCode)
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.toSet());
+                    if (codes.isEmpty()) return Flux.<MaintenanceRecord>empty();   // กัน IN () ว่าง
+
+                    return template.select(Query.query(Criteria.where("machine_code").in(codes)), Machine.class)
+                            .collectList()
+                            .flatMapMany(machines -> {
+                                Set<String> activeCodes = new HashSet<>();
+                                Map<String, String> inactive = new TreeMap<>();
+                                for (Machine m : machines) {
+                                    if (m.getMachineCode() == null) continue;
+                                    if (isNotifiableMachine(m, today)) {
+                                        activeCodes.add(m.getMachineCode());
+                                    } else {
+                                        inactive.putIfAbsent(m.getMachineCode(),
+                                                "status=" + m.getMachineStatus()
+                                                        + (m.getCancelDate() != null ? ", cancel_date=" + m.getCancelDate() : ""));
+                                    }
+                                }
+                                // machine_code ซ้ำ: ถ้ามีอย่างน้อย 1 แถวที่ยังใช้งาน ถือว่ายังต้องแจ้ง
+                                inactive.keySet().removeAll(activeCodes);
+
+                                Set<String> missing = new TreeSet<>(codes);
+                                missing.removeAll(activeCodes);
+                                missing.removeAll(inactive.keySet());
+
+                                if (!inactive.isEmpty()) {
+                                    log.info("[M-FETCH] skip {} machine(s) not in {} or cancelled: {}",
+                                            inactive.size(), NOTIFY_MACHINE_STATUSES, inactive);
+                                }
+                                if (!missing.isEmpty()) {
+                                    log.warn("[M-FETCH] skip {} machineCode(s) with maintenance due but no machine record: {}",
+                                            missing.size(), missing);
+                                }
+
+                                return Flux.fromIterable(records)   // ลำดับ due_date เดิมยังอยู่
+                                        .filter(r -> r.getMachineCode() != null && activeCodes.contains(r.getMachineCode()));
+                            });
+                })
                 .doOnNext(r -> log.debug("[M-FETCH] id={}, machineCode={}, round={}, dueDate={}",
                         r.getId(), r.getMachineCode(), r.getRound(), r.getDueDate()));
+    }
+
+    /** เครื่องยังต้องแจ้งเตือนหรือไม่: machine_status ถูกต้อง และยังไม่ถูกยกเลิก */
+    private boolean isNotifiableMachine(Machine m, LocalDate today) {
+        if (!NOTIFY_MACHINE_STATUSES.contains(normalizeStatus(m.getMachineStatus()))) return false;
+        return m.getCancelDate() == null || m.getCancelDate().isAfter(today);
+    }
+
+    /** "Under Maintenance", "under-maintenance", "UNDER_MAINTENANCE" → "UNDER_MAINTENANCE" (รองรับทั้ง String และ enum) */
+    private String normalizeStatus(Object status) {
+        if (status == null) return "";
+        return String.valueOf(status).trim().toUpperCase(Locale.ROOT).replaceAll("[\\s\\-]+", "_");
     }
 
     // ======================================================================
@@ -290,10 +379,14 @@ public class MaintenanceScheduler {
 
         if (byMachineCode.isEmpty()) return Mono.empty();
 
+        LocalDate today = LocalDate.now(ZONE);
+
         return template.select(
                         Query.query(Criteria.where("machine_code").in(byMachineCode.keySet())),
                         Machine.class
                 )
+                // machine_code ซ้ำ (เช่น เครื่องเก่าที่ยกเลิกแล้ว) → ใช้เฉพาะแถวที่ยังใช้งาน
+                .filter(m -> isNotifiableMachine(m, today))
                 .collectList()
                 .flatMap(machines -> {
                     Set<String> foundCodes = machines.stream()
@@ -302,7 +395,7 @@ public class MaintenanceScheduler {
                             .collect(Collectors.toSet());
                     byMachineCode.keySet().stream()
                             .filter(code -> !foundCodes.contains(code))
-                            .forEach(code -> log.warn("[M-{}] machineCode={} has maintenance due but no machine record — nobody notified",
+                            .forEach(code -> log.warn("[M-{}] machineCode={} has maintenance due but no active machine record — nobody notified",
                                     role, code));
 
                     Map<Long, Map<Long, MaintenanceRecord>> byPersonMap = new HashMap<>();
@@ -368,6 +461,7 @@ public class MaintenanceScheduler {
         ).collectList();
 
         if (role == Role.ADMIN) {
+            // records ผ่านการกรองสถานะเครื่อง / งานที่ทำแล้ว จาก fetchDueMaintenances มาแล้ว
             return adminsMono.flatMap(admins -> {
                 if (admins.isEmpty()) {
                     log.warn("[M-{}] No active members with this role — skipping", role);
@@ -386,10 +480,12 @@ public class MaintenanceScheduler {
 
         if (machineCodes.isEmpty()) return Mono.empty();
 
+        LocalDate today = LocalDate.now(ZONE);
+
         Mono<List<Machine>> machinesMono = template.select(
                 Query.query(Criteria.where("machine_code").in(machineCodes)),
                 Machine.class
-        ).collectList();
+        ).filter(m -> isNotifiableMachine(m, today)).collectList();
 
         Mono<List<Department>> departmentsMono = template.select(Query.empty(), Department.class).collectList();
 

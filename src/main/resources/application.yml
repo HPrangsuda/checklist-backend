@@ -78,7 +78,7 @@ jwt:
   refresh-token-expiry: 86400000
 #scheduler:
   #maintenance:
-    #admins-cron: "0 25 11 * * *"
+    #admins-cron: "0 20 17 * * *"
 #logging:
 #  level:
 #    org.springframework.r2dbc.core: DEBUG
