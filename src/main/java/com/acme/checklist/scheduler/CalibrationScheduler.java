@@ -78,6 +78,12 @@ public class CalibrationScheduler {
     /** retry สูงสุด 3 ครั้ง รอ 2s → 4s → 8s (ไม่เกิน 10s) */
     private static final int MAX_RETRIES = 3;
 
+    /**
+     * machine.machine_status ที่ยังต้องแจ้งเตือน
+     * เทียบหลัง normalize (ตัวใหญ่, ช่องว่าง/ขีด → _) → "Under Maintenance" = "UNDER_MAINTENANCE"
+     */
+    private static final Set<String> NOTIFY_MACHINE_STATUSES = Set.of("OPERATIONAL", "UNDER_MAINTENANCE");
+
     // ======================================================================
     // Job 1: คัดลอก calibration record ไปปีถัดไป (25 ธ.ค. 01:05)
     // ======================================================================
@@ -222,7 +228,7 @@ public class CalibrationScheduler {
 
     /**
      * ADMIN และ DEPARTMENT_ADMIN: ทุกวันจันทร์ 09:00
-     * - ADMIN            : ได้รับทุกรายการ
+     * - ADMIN            : ได้รับทุกรายการ (ของเครื่องที่ยังต้องแจ้ง)
      * - DEPARTMENT_ADMIN : เฉพาะเครื่องที่อยู่แผนกเดียวกับตัวเอง
      * ทำทีละ role และแยก error กัน
      */
@@ -265,22 +271,91 @@ public class CalibrationScheduler {
         return Mono.empty();
     }
 
-    /** รายการที่ใกล้ครบกำหนด ยังไม่เริ่มสอบเทียบ และไม่ถูกยกเลิก */
+    /**
+     * รายการที่ต้องแจ้ง:
+     * 1) due_date ภายใน DUE_WITHIN_DAYS วัน (รวมที่เลยกำหนด)
+     * 2) ยังไม่ดำเนินการ: start_date, certificate_date ว่าง และยังไม่มี result
+     * 3) record ไม่ถูกยกเลิก (is_canceled = false / null)
+     * 4) เครื่องมีอยู่ในตาราง machine, machine_status อยู่ใน NOTIFY_MACHINE_STATUSES
+     *    และยังไม่ถูกยกเลิก (cancel_date)
+     * กรองที่จุดนี้จุดเดียว → ทุก job / ทุก role ได้ผลเหมือนกัน
+     */
     private Flux<CalibrationRecord> fetchDueCalibrations() {
-        LocalDate dueLimit = LocalDate.now(ZONE).plusDays(DUE_WITHIN_DAYS);
+        LocalDate today = LocalDate.now(ZONE);
+        LocalDate dueLimit = today.plusDays(DUE_WITHIN_DAYS);
 
         return template.select(
                         Query.query(
                                 Criteria.where("due_date").lessThanOrEquals(dueLimit)
                                         .and("start_date").isNull()
+                                        .and("certificate_date").isNull()
+                                        .and(Criteria.where("result").isNull()
+                                                .or("result").is(""))
                                         .and(Criteria.where("is_canceled").isFalse()
                                                 .or("is_canceled").isNull())
                         ).sort(Sort.by("due_date").ascending()),
                         CalibrationRecord.class
                 )
                 .filter(c -> c.getDueDate() != null)
+                .collectList()
+                .flatMapMany(records -> {
+                    Set<String> codes = records.stream()
+                            .map(CalibrationRecord::getMachineCode)
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.toSet());
+                    if (codes.isEmpty()) return Flux.<CalibrationRecord>empty();   // กัน IN () ว่าง
+
+                    return template.select(Query.query(Criteria.where("machine_code").in(codes)), Machine.class)
+                            .collectList()
+                            .flatMapMany(machines -> {
+                                Set<String> activeCodes = new HashSet<>();
+                                Map<String, String> inactive = new TreeMap<>();
+                                for (Machine m : machines) {
+                                    if (m.getMachineCode() == null) continue;
+                                    if (isNotifiableMachine(m, today)) {
+                                        activeCodes.add(m.getMachineCode());
+                                    } else {
+                                        inactive.putIfAbsent(m.getMachineCode(),
+                                                "status=" + m.getMachineStatus()
+                                                        + (m.getCancelDate() != null ? ", cancel_date=" + m.getCancelDate() : ""));
+                                    }
+                                }
+                                // machine_code ซ้ำ: ถ้ามีอย่างน้อย 1 แถวที่ยังใช้งาน ถือว่ายังต้องแจ้ง
+                                inactive.keySet().removeAll(activeCodes);
+
+                                Set<String> missing = new TreeSet<>(codes);
+                                missing.removeAll(activeCodes);
+                                missing.removeAll(inactive.keySet());
+
+                                if (!inactive.isEmpty()) {
+                                    log.info("[FETCH] skip {} machine(s) not in {} or cancelled: {}",
+                                            inactive.size(), NOTIFY_MACHINE_STATUSES, inactive);
+                                }
+                                if (!missing.isEmpty()) {
+                                    log.warn("[FETCH] skip {} machineCode(s) with calibration due but no machine record: {}",
+                                            missing.size(), missing);
+                                }
+
+                                return Flux.fromIterable(records)   // ลำดับ due_date เดิมยังอยู่
+                                        .filter(r -> r.getMachineCode() != null && activeCodes.contains(r.getMachineCode()));
+                            });
+                })
                 .doOnNext(c -> log.debug("[FETCH] id={}, machineCode={}, dueDate={}",
                         c.getId(), c.getMachineCode(), c.getDueDate()));
+    }
+
+    /**
+     * เครื่องยังต้องแจ้งสอบเทียบหรือไม่: machine_status ถูกต้อง และยังไม่ถูกยกเลิก
+     */
+    private boolean isNotifiableMachine(Machine m, LocalDate today) {
+        if (!NOTIFY_MACHINE_STATUSES.contains(normalizeStatus(m.getMachineStatus()))) return false;
+        return m.getCancelDate() == null || m.getCancelDate().isAfter(today);
+    }
+
+    /** "Under Maintenance", "under-maintenance", "UNDER_MAINTENANCE" → "UNDER_MAINTENANCE" */
+    private String normalizeStatus(Object status) {
+        if (status == null) return "";
+        return String.valueOf(status).trim().toUpperCase(Locale.ROOT).replaceAll("[\\s\\-]+", "_");
     }
 
     // ======================================================================
@@ -295,10 +370,14 @@ public class CalibrationScheduler {
 
         if (byMachineCode.isEmpty()) return Mono.empty();
 
+        LocalDate today = LocalDate.now(ZONE);
+
         return template.select(
                         Query.query(Criteria.where("machine_code").in(byMachineCode.keySet())),
                         Machine.class
                 )
+                // machine_code ซ้ำ (เช่น เครื่องเก่าที่ยกเลิกแล้ว) → ใช้เฉพาะแถวที่ยังใช้งาน
+                .filter(m -> isNotifiableMachine(m, today))
                 .collectList()
                 .flatMap(machines -> {
                     Set<String> foundCodes = machines.stream()
@@ -307,7 +386,7 @@ public class CalibrationScheduler {
                             .collect(Collectors.toSet());
                     byMachineCode.keySet().stream()
                             .filter(code -> !foundCodes.contains(code))
-                            .forEach(code -> log.warn("[{}] machineCode={} has calibration due but no machine record — nobody notified",
+                            .forEach(code -> log.warn("[{}] machineCode={} has calibration due but no active machine record — nobody notified",
                                     role, code));
 
                     Map<Long, Map<Long, CalibrationRecord>> byPersonMap = new HashMap<>();
@@ -372,6 +451,7 @@ public class CalibrationScheduler {
         ).collectList();
 
         if (role == Role.ADMIN) {
+            // records ผ่านการกรองสถานะเครื่อง / งานที่ทำแล้ว จาก fetchDueCalibrations มาแล้ว
             return adminsMono.flatMap(admins -> {
                 if (admins.isEmpty()) {
                     log.warn("[{}] No active members with this role — skipping", role);
@@ -390,10 +470,12 @@ public class CalibrationScheduler {
 
         if (machineCodes.isEmpty()) return Mono.empty();
 
+        LocalDate today = LocalDate.now(ZONE);
+
         Mono<List<Machine>> machinesMono = template.select(
                 Query.query(Criteria.where("machine_code").in(machineCodes)),
                 Machine.class
-        ).collectList();
+        ).filter(m -> isNotifiableMachine(m, today)).collectList();
 
         Mono<List<Department>> departmentsMono = template.select(Query.empty(), Department.class).collectList();
 
@@ -699,7 +781,7 @@ public class CalibrationScheduler {
 
     // ======================================================================
     // ผู้รับผิดชอบของแต่ละรายการ (แสดงใน Email / Lark)
-    // Calibration: machine.responsible_person_name ของเครื่องนั้น
+    // Calibration: machine.responsible_person_name ของเครื่องนั้น (เฉพาะแถวเครื่องที่ยังใช้งาน)
     // ======================================================================
 
     /** คืน map: calibration record id → ชื่อผู้รับผิดชอบ */
@@ -711,10 +793,15 @@ public class CalibrationScheduler {
                 .collect(Collectors.toSet());
         if (codes.isEmpty()) return Mono.just(new HashMap<>());
 
+        LocalDate today = LocalDate.now(ZONE);
+
         return template.select(Query.query(Criteria.where("machine_code").in(codes)), Machine.class)
                 .filter(m -> m.getMachineCode() != null
+                        && isNotifiableMachine(m, today)
                         && m.getResponsiblePersonName() != null && !m.getResponsiblePersonName().isBlank())
-                .collectMap(Machine::getMachineCode, m -> m.getResponsiblePersonName().trim())
+                // machine_code ซ้ำ → ใช้ชื่อแรกที่เจอ (collectMap จะเขียนทับ จึงใช้ collect แทน)
+                .collect(() -> new HashMap<String, String>(),
+                        (acc, m) -> acc.putIfAbsent(m.getMachineCode(), m.getResponsiblePersonName().trim()))
                 .map(nameByCode -> {
                     Map<Long, String> out = new HashMap<>();
                     recordsById.forEach((id, r) -> {
