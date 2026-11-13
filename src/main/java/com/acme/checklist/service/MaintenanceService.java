@@ -63,6 +63,29 @@ public class MaintenanceService {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // TIMING CONDITIONS  (นิยามเดียว ใช้ทุก query)
+    //
+    //   on time      = ทำแล้ว และ actual_date <= due_date
+    //   overdue      = ทำแล้วแต่ช้า หรือ ยังไม่ทำและเลยกำหนดแล้ว
+    //   not due yet  = ยังไม่ทำ และยังไม่ถึงกำหนด
+    //
+    //   plan = on time + overdue + not due yet  (ไม่นับแถวที่ due_date เป็น NULL)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private static String onTimeCond(String a) {
+        return a + "actual_date IS NOT NULL AND " + a + "actual_date <= " + a + "due_date";
+    }
+
+    private static String overdueCond(String a) {
+        return "(" + a + "actual_date IS NOT NULL AND " + a + "actual_date > " + a + "due_date)"
+                + " OR (" + a + "actual_date IS NULL AND " + a + "due_date < CURRENT_DATE)";
+    }
+
+    private static String notDueCond(String a) {
+        return a + "actual_date IS NULL AND " + a + "due_date >= CURRENT_DATE";
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // MACHINE STATUS FILTER  (สวิตช์เดียว ใช้เหมือนกันทุกหน้า)
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -443,17 +466,17 @@ public class MaintenanceService {
                     String sql =
                             "SELECT\n"
                                     + "    department, department_name,\n"
-                                    + "    COUNT(*)                                                            AS total,\n"
-                                    + "    COUNT(CASE WHEN status = 'Pass'     THEN 1 END)                    AS total_pass,\n"
-                                    + "    COUNT(CASE WHEN status = 'Not Pass' THEN 1 END)                    AS total_not_pass,\n"
-                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date <= due_date THEN 1 END) AS total_on_time,\n"
-                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date >  due_date THEN 1 END) AS total_overdue,\n"
-                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END)                AS total_completed,\n"
-                                    + "    COUNT(CASE WHEN actual_date IS NULL     THEN 1 END)                AS total_pending,\n"
+                                    + "    COUNT(*)                                                     AS total,\n"
+                                    + "    COUNT(CASE WHEN status = 'Pass'     THEN 1 END)             AS total_pass,\n"
+                                    + "    COUNT(CASE WHEN status = 'Not Pass' THEN 1 END)             AS total_not_pass,\n"
+                                    + "    COUNT(CASE WHEN " + onTimeCond("")  + " THEN 1 END)         AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN " + overdueCond("") + " THEN 1 END)         AS total_overdue,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END)         AS total_completed,\n"
+                                    + "    COUNT(CASE WHEN actual_date IS NULL     THEN 1 END)         AS total_pending,\n"
                                     + "    ROUND(COUNT(CASE WHEN status = 'Pass'     THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS pass_rate,\n"
                                     + "    ROUND(COUNT(CASE WHEN status = 'Not Pass' THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS not_pass_rate,\n"
-                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date <= due_date THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS on_time_rate,\n"
-                                    + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL AND actual_date >  due_date THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS overdue_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN " + onTimeCond("")  + " THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS on_time_rate,\n"
+                                    + "    ROUND(COUNT(CASE WHEN " + overdueCond("") + " THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS overdue_rate,\n"
                                     + "    ROUND(COUNT(CASE WHEN actual_date IS NOT NULL THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS completed_rate,\n"
                                     + "    ROUND(COUNT(CASE WHEN actual_date IS NULL     THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS pending_rate\n"
                                     + "FROM (\n"
@@ -502,9 +525,10 @@ public class MaintenanceService {
                                     + "    EXTRACT(MONTH FROM mr.due_date)::int AS month,\n"
                                     + "    mr.responsible_maintenance           AS member_id,\n"
                                     + "    MAX(" + MEMBER_NAME_EXPR + ")        AS member_name,\n"
-                                    + "    COUNT(*) AS total_plan,\n"
-                                    + "    COUNT(CASE WHEN mr.actual_date IS NOT NULL AND mr.actual_date <= mr.due_date THEN 1 END) AS total_on_time,\n"
-                                    + "    COUNT(CASE WHEN (mr.actual_date IS NOT NULL AND mr.actual_date > mr.due_date) OR mr.actual_date IS NULL THEN 1 END) AS total_overdue\n"
+                                    + "    COUNT(*)                                                 AS total_plan,\n"
+                                    + "    COUNT(CASE WHEN " + onTimeCond("mr.")  + " THEN 1 END)  AS total_on_time,\n"
+                                    + "    COUNT(CASE WHEN " + overdueCond("mr.") + " THEN 1 END)  AS total_overdue,\n"
+                                    + "    COUNT(CASE WHEN " + notDueCond("mr.")  + " THEN 1 END)  AS total_not_due\n"
                                     + "FROM maintenance_record mr\n"
                                     + "LEFT JOIN member mb ON mb.id = mr.responsible_maintenance\n"
                                     + "WHERE mr.years IS NOT NULL\n"
@@ -527,6 +551,7 @@ public class MaintenanceService {
                                     getLongValue(row, "total_plan"),
                                     getLongValue(row, "total_on_time"),
                                     getLongValue(row, "total_overdue"),
+                                    getLongValue(row, "total_not_due"),
                             })
                             .all().collectList()
                             .flatMapMany(flatRows -> {
@@ -535,13 +560,19 @@ public class MaintenanceService {
 
                                 for (Object[] r : flatRows) {
                                     String key = r[0] + "-" + r[1];
+                                    long plan    = (long) r[4];
+                                    long onTime  = (long) r[5];
+                                    long overdue = (long) r[6];
+                                    long notDue  = (long) r[7];
+
                                     monthMap.computeIfAbsent(key, k -> new ArrayList<>())
                                             .add(MaintenanceMonthlyDTO.ResponsibleSummary.builder()
                                                     .memberId((Long) r[2]).memberName((String) r[3])
-                                                    .totalPlan((long) r[4]).totalOnTime((long) r[5]).totalOverdue((long) r[6])
+                                                    .totalPlan(plan).totalOnTime(onTime)
+                                                    .totalOverdue(overdue).totalNotDue(notDue)
                                                     .build());
-                                    monthTotals.merge(key, new long[]{ (long) r[4], (long) r[5], (long) r[6] },
-                                            (a, b) -> new long[]{ a[0] + b[0], a[1] + b[1], a[2] + b[2] });
+                                    monthTotals.merge(key, new long[]{ plan, onTime, overdue, notDue },
+                                            (a, b) -> new long[]{ a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3] });
                                 }
 
                                 return Flux.fromIterable(monthMap.entrySet().stream().map(e -> {
@@ -549,7 +580,8 @@ public class MaintenanceService {
                                     long[]   t     = monthTotals.get(e.getKey());
                                     return MaintenanceMonthlyDTO.builder()
                                             .year(Integer.parseInt(parts[0])).month(Integer.parseInt(parts[1]))
-                                            .totalPlan(t[0]).totalOnTime(t[1]).totalOverdue(t[2])
+                                            .totalPlan(t[0]).totalOnTime(t[1])
+                                            .totalOverdue(t[2]).totalNotDue(t[3])
                                             .byResponsible(e.getValue()).build();
                                 }).toList());
                             })
